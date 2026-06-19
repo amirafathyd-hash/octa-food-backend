@@ -21,10 +21,14 @@ def _to_iso(date_str):
     return datetime.strptime(date_str, '%d-%b-%Y').strftime('%Y-%m-%d')
 
 
-def _upsert_daily(item_date_iso, key, fields):
+def _bulk_upsert_daily(rows):
+    """Upserts many daily_items rows in ONE request instead of one request per row
+    (a single order PDF can have 70+ items; doing them one by one was slow enough
+    to hit request timeouts on the free hosting tier)."""
+    if not rows:
+        return
     sb = get_client()
-    payload = {'item_date': item_date_iso, 'item_key': key, **fields}
-    sb.table('daily_items').upsert(payload, on_conflict='item_date,item_key').execute()
+    sb.table('daily_items').upsert(rows, on_conflict='item_date,item_key').execute()
 
 
 def _log(file_type, file_name, item_date, message, level='info'):
@@ -53,11 +57,13 @@ def upload_order():
             order = parse_order_pdf(path)
             seed_from_order(order)
             date_iso = _to_iso(order['date'])
-            count = 0
+            rows = []
             for section in ('salads', 'dressing'):
                 for item in order[section]:
                     key = item['name_en'].strip().upper()
-                    _upsert_daily(date_iso, key, {
+                    rows.append({
+                        'item_date': date_iso,
+                        'item_key': key,
                         'name_en': item['name_en'],
                         'name_ar': item['name_ar'],
                         'section': section,
@@ -66,7 +72,8 @@ def upload_order():
                         'unit': item['unit'].split('-')[0],
                         'current_inventory': item['current_inventory'],
                     })
-                    count += 1
+            _bulk_upsert_daily(rows)
+            count = len(rows)
             _log('order', f.filename, date_iso, f'تم استيراد {count} صنف بنجاح')
             results.append({'file': f.filename, 'date': order['date'], 'items': count, 'status': 'ok'})
         except Exception as e:
@@ -92,24 +99,34 @@ def upload_invoice():
             if not invoice['date']:
                 raise ValueError('لم يتم العثور على تاريخ في الفاتورة')
             date_iso = invoice['date']  # already YYYY-MM-DD in parse_invoice
+            rows = []
+            log_messages = []
             matched, unmatched = 0, 0
             for it in invoice['items']:
                 key, score, method = match_invoice_item(it['name_ar'], db)
                 if key:
-                    _upsert_daily(date_iso, key, {
+                    rows.append({
+                        'item_date': date_iso,
+                        'item_key': key,
                         'invoice_qty': it['qty'],
                         'invoice_price': it['total'],
                         'invoice_unit_label': it['unit_label'],
                     })
                     matched += 1
                     if method == 'fuzzy':
-                        _log('invoice', f.filename, date_iso,
-                             f"مطابقة ذكية: \"{it['name_ar']}\" -> {key} (تشابه {score:.0f}%)")
+                        log_messages.append((
+                            'info',
+                            f"مطابقة ذكية: \"{it['name_ar']}\" -> {key} (تشابه {score:.0f}%)"
+                        ))
                 else:
                     unmatched += 1
-                    _log('invoice', f.filename, date_iso,
-                         f"لم يتم العثور على تطابق لـ \"{it['name_ar']}\" (أعلى تشابه {score:.0f}%)",
-                         level='warning')
+                    log_messages.append((
+                        'warning',
+                        f"لم يتم العثور على تطابق لـ \"{it['name_ar']}\" (أعلى تشابه {score:.0f}%)"
+                    ))
+            _bulk_upsert_daily(rows)
+            for level, msg in log_messages:
+                _log('invoice', f.filename, date_iso, msg, level=level)
             results.append({'file': f.filename, 'date': date_iso, 'matched': matched,
                              'unmatched': unmatched, 'status': 'ok'})
         except Exception as e:
@@ -131,14 +148,16 @@ def upload_received():
             path = tmp.name
         try:
             records = parse_received_xlsx(path)
-            count = 0
+            rows = []
             dates_seen = set()
             for rec in records:
                 if rec['qty_received'] is None and rec['qty_needed'] is None:
                     continue
                 date_iso = _to_iso(rec['date'])
                 dates_seen.add(date_iso)
-                _upsert_daily(date_iso, rec['key'], {
+                rows.append({
+                    'item_date': date_iso,
+                    'item_key': rec['key'],
                     'name_en': rec['name_en'],
                     'name_ar': rec['name_ar'],
                     'qty_box': rec['qty_box'],
@@ -148,7 +167,10 @@ def upload_received():
                     'qty_received': rec['qty_received'],
                     'rec_unit': rec['rec_unit'],
                 })
-                count += 1
+            # Supabase upsert via REST can choke on very large single batches; chunk it.
+            for i in range(0, len(rows), 500):
+                _bulk_upsert_daily(rows[i:i + 500])
+            count = len(rows)
             _log('received', f.filename, None, f'تم استيراد {count} صف ({len(dates_seen)} يوم)')
             results.append({'file': f.filename, 'rows': count, 'days': len(dates_seen), 'status': 'ok'})
         except Exception as e:
