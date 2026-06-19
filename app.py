@@ -8,6 +8,7 @@ from flask_cors import CORS
 from parse_order import parse_order_pdf
 from parse_invoice import parse_invoice_pdf
 from parse_received import parse_received_xlsx
+from parse_received_image import parse_received_image
 from item_db import load_db, seed_from_order
 from matcher import match_invoice_item
 from db import get_client
@@ -146,40 +147,72 @@ def upload_invoice():
 
 @app.route('/api/upload-received', methods=['POST'])
 def upload_received():
-    """Accepts one or more 'received' Excel files. Upserts qty_received/rec_unit."""
+    """Accepts 'received' files — either Excel sheets (legacy) or photos/scans of
+    the printed sheet with handwritten received quantities (OCR via EasyOCR)."""
     files = request.files.getlist('files')
     results = []
+    db = None  # lazily loaded only if we hit an image file
+
     for f in files:
-        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        is_image = f.filename.lower().endswith(('.jpg', '.jpeg', '.png'))
+        suffix = '.jpg' if is_image else '.xlsx'
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             f.save(tmp.name)
             path = tmp.name
         try:
-            records = parse_received_xlsx(path)
-            rows = []
-            dates_seen = set()
-            for rec in records:
-                if rec['qty_received'] is None and rec['qty_needed'] is None:
-                    continue
-                date_iso = _to_iso(rec['date'])
-                dates_seen.add(date_iso)
-                rows.append({
-                    'item_date': date_iso,
-                    'item_key': rec['key'],
-                    'name_en': rec['name_en'],
-                    'name_ar': rec['name_ar'],
-                    'qty_box': rec['qty_box'],
-                    'qty_needed': rec['qty_needed'],
-                    'unit': rec['unit'],
-                    'current_inventory': rec['current_inventory'],
-                    'qty_received': rec['qty_received'],
-                    'rec_unit': rec['rec_unit'],
-                })
-            # Supabase upsert via REST can choke on very large single batches; chunk it.
-            for i in range(0, len(rows), 500):
-                _bulk_upsert_daily(rows[i:i + 500])
-            count = len(rows)
-            _log('received', f.filename, None, f'تم استيراد {count} صف ({len(dates_seen)} يوم)')
-            results.append({'file': f.filename, 'rows': count, 'days': len(dates_seen), 'status': 'ok'})
+            if is_image:
+                if db is None:
+                    db = load_db()
+                parsed = parse_received_image(path, db)
+                if not parsed['date']:
+                    raise ValueError('لم يتم العثور على تاريخ مطبوع في الصورة')
+                date_iso = parsed['date']
+                rows = []
+                review_count = 0
+                for r in parsed['rows']:
+                    rows.append({
+                        'item_date': date_iso,
+                        'item_key': r['item_key'],
+                        'qty_received': r['qty'],
+                        'rec_unit': r['unit'],
+                    })
+                    if r['needs_review']:
+                        review_count += 1
+                        _log('received', f.filename, date_iso,
+                             f"يحتاج مراجعة: \"{r['raw_text']}\" بجانب {r['name_en']} "
+                             f"(ثقة {r['confidence']}%)", level='warning')
+                _bulk_upsert_daily(rows)
+                _log('received', f.filename, date_iso,
+                     f"تم استيراد {len(rows)} قيمة من الصورة بالـ OCR "
+                     f"({review_count} منهم يحتاجون مراجعة)")
+                results.append({'file': f.filename, 'date': date_iso, 'rows': len(rows),
+                                 'needs_review': review_count, 'status': 'ok'})
+            else:
+                records = parse_received_xlsx(path)
+                rows = []
+                dates_seen = set()
+                for rec in records:
+                    if rec['qty_received'] is None and rec['qty_needed'] is None:
+                        continue
+                    date_iso = _to_iso(rec['date'])
+                    dates_seen.add(date_iso)
+                    rows.append({
+                        'item_date': date_iso,
+                        'item_key': rec['key'],
+                        'name_en': rec['name_en'],
+                        'name_ar': rec['name_ar'],
+                        'qty_box': rec['qty_box'],
+                        'qty_needed': rec['qty_needed'],
+                        'unit': rec['unit'],
+                        'current_inventory': rec['current_inventory'],
+                        'qty_received': rec['qty_received'],
+                        'rec_unit': rec['rec_unit'],
+                    })
+                for i in range(0, len(rows), 500):
+                    _bulk_upsert_daily(rows[i:i + 500])
+                count = len(rows)
+                _log('received', f.filename, None, f'تم استيراد {count} صف ({len(dates_seen)} يوم)')
+                results.append({'file': f.filename, 'rows': count, 'days': len(dates_seen), 'status': 'ok'})
         except Exception as e:
             _log('received', f.filename, None, str(e), level='warning')
             results.append({'file': f.filename, 'status': 'error', 'error': str(e)})
