@@ -24,11 +24,18 @@ def _to_iso(date_str):
 def _bulk_upsert_daily(rows):
     """Upserts many daily_items rows in ONE request instead of one request per row
     (a single order PDF can have 70+ items; doing them one by one was slow enough
-    to hit request timeouts on the free hosting tier)."""
+    to hit request timeouts on the free hosting tier).
+    Also de-duplicates by (item_date, item_key) within the same batch, since Postgres
+    rejects an upsert where the same conflict target appears twice in one statement
+    (this can happen if the same item name shows up in both the salads and dressing
+    sections of an order PDF)."""
     if not rows:
         return
+    deduped = {}
+    for row in rows:
+        deduped[(row['item_date'], row['item_key'])] = row
     sb = get_client()
-    sb.table('daily_items').upsert(rows, on_conflict='item_date,item_key').execute()
+    sb.table('daily_items').upsert(list(deduped.values()), on_conflict='item_date,item_key').execute()
 
 
 def _log(file_type, file_name, item_date, message, level='info'):
