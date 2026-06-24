@@ -150,6 +150,19 @@ def parse_received_image(image_path, master_items, name_match_threshold=80):
     name_list = list(name_lookup.keys())
     name_list_upper = [n.upper() for n in name_list]
 
+    # Find the printed "Quantity Received" column header so we know where the
+    # handwriting column actually starts. Without this, the nearest text to the
+    # right of an item name is often the PRINTED "Qty Needed" number (which sits
+    # closer to the item name than the handwritten value further right) and we'd
+    # wrongly copy that instead of the real handwritten quantity.
+    received_col_x = None
+    for y, xl, xr, text in sorted(words, key=lambda w: w[0]):
+        if text.strip().lower() in ('received', 'recieved'):
+            received_col_x = xl
+            break
+    # fallback: if we couldn't find the header at all, don't filter by it
+    MIN_GAP_FROM_NAME = 5
+
     item_candidates = []   # (y_center, x_right_edge, item_key, matched_name)
     other_words = []       # (y_center, x_left, text)
 
@@ -193,9 +206,10 @@ def parse_received_image(image_path, master_items, name_match_threshold=80):
 
     for idx, (y_center, x_right, item_key, matched_name) in enumerate(sorted_items):
         upper_bound, lower_bound = bands[idx]
+        min_x = max(x_right + MIN_GAP_FROM_NAME, received_col_x - 20) if received_col_x else x_right + MIN_GAP_FROM_NAME
         candidates = []
         for i, (oy, ox, text) in enumerate(other_words):
-            if i in used_idx or ox < x_right - 5:
+            if i in used_idx or ox < min_x:
                 continue
             if upper_bound <= oy < lower_bound:
                 candidates.append((i, ox, text))
