@@ -168,19 +168,29 @@ def parse_received_image(image_path, master_items, name_match_threshold=80):
     used_idx = set()
 
     sorted_items = sorted(set(item_candidates), key=lambda r: r[0])
-    if len(sorted_items) >= 2:
-        diffs = [sorted_items[i + 1][0] - sorted_items[i][0] for i in range(len(sorted_items) - 1)]
-        diffs = [d for d in diffs if d > 2]
-        row_height = sorted(diffs)[len(diffs) // 2] if diffs else 25
-    else:
-        row_height = 25
 
-    for y_center, x_right, item_key, matched_name in sorted_items:
+    # Assign each item a vertical "band" bounded by the midpoints to its
+    # neighbors above/below, instead of just picking the nearest text by raw
+    # distance. This avoids a handwritten value bleeding into the wrong row
+    # when two printed rows sit close together (tall handwriting strokes can
+    # otherwise end up nearer to the row above or below than to their own).
+    n = len(sorted_items)
+    bands = []
+    for idx in range(n):
+        y_center = sorted_items[idx][0]
+        upper_bound = (-1e9 if idx == 0
+                       else (sorted_items[idx - 1][0] + y_center) / 2)
+        lower_bound = (1e9 if idx == n - 1
+                        else (y_center + sorted_items[idx + 1][0]) / 2)
+        bands.append((upper_bound, lower_bound))
+
+    for idx, (y_center, x_right, item_key, matched_name) in enumerate(sorted_items):
+        upper_bound, lower_bound = bands[idx]
         candidates = []
         for i, (oy, ox, text) in enumerate(other_words):
             if i in used_idx or ox < x_right - 5:
                 continue
-            if abs(oy - y_center) <= row_height * 0.6:
+            if upper_bound <= oy < lower_bound:
                 candidates.append((i, ox, text))
 
         if not candidates:
