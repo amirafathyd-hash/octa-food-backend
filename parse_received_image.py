@@ -99,10 +99,9 @@ def _call_ocr_space(image_path):
                 'apikey': OCR_SPACE_API_KEY,
                 'OCREngine': 3,            # best engine for handwriting
                 'isOverlayRequired': True,  # get word-level (x, y) positions
-                'scale': True,
                 'language': 'eng',
             },
-            timeout=60,
+            timeout=90,
         )
     resp.raise_for_status()
     data = resp.json()
