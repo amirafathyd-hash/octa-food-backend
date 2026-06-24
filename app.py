@@ -8,7 +8,7 @@ from flask_cors import CORS
 from parse_order import parse_order_pdf
 from parse_invoice import parse_invoice_pdf
 from parse_received import parse_received_xlsx
-from parse_received_image import parse_received_image
+from parse_received_image import parse_received_image, process_ocr_data
 from item_db import load_db, seed_from_order
 from matcher import match_invoice_item
 from db import get_client
@@ -219,6 +219,49 @@ def upload_received():
         finally:
             os.unlink(path)
     return jsonify({'results': results})
+
+
+@app.route('/api/process-received-ocr', methods=['POST'])
+def process_received_ocr():
+    """Accepts OCR.space's JSON result (already fetched by the BROWSER, which has
+    no network restrictions) for one 'received' image, plus the original
+    filename. Does the row-matching/parsing here on the server — no outbound
+    network call needed for this part, so it works fine even on a network-
+    restricted free hosting tier."""
+    payload = request.get_json(silent=True) or {}
+    ocr_data = payload.get('ocr_data')
+    filename = payload.get('filename', 'image')
+    if not ocr_data:
+        return jsonify({'results': [{'file': filename, 'status': 'error', 'error': 'لا توجد بيانات OCR'}]})
+
+    db = load_db()
+    try:
+        parsed = process_ocr_data(ocr_data, db)
+        if not parsed['date']:
+            raise ValueError('لم يتم العثور على تاريخ مطبوع في الصورة')
+        date_iso = parsed['date']
+        rows = []
+        review_count = 0
+        for r in parsed['rows']:
+            rows.append({
+                'item_date': date_iso,
+                'item_key': r['item_key'],
+                'qty_received': r['qty'],
+                'rec_unit': r['unit'],
+            })
+            if r['needs_review']:
+                review_count += 1
+                _log('received', filename, date_iso,
+                     f"يحتاج مراجعة: \"{r['raw_text']}\" بجانب {r['name_en']} (ثقة {r['confidence']}%)",
+                     level='warning')
+        _bulk_upsert_daily(rows)
+        _log('received', filename, date_iso,
+             f"تم استيراد {len(rows)} قيمة من الصورة بالـ OCR ({review_count} منهم يحتاجون مراجعة)")
+        return jsonify({'results': [{'file': filename, 'date': date_iso, 'rows': len(rows),
+                                      'needs_review': review_count, 'status': 'ok'}]})
+    except Exception as e:
+        _log('received', filename, None, str(e), level='warning')
+        return jsonify({'results': [{'file': filename, 'status': 'error', 'error': str(e)}]})
 
 
 @app.route('/api/log', methods=['GET'])
