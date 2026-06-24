@@ -1,4 +1,5 @@
 import os
+import time
 from supabase import create_client
 
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
@@ -16,3 +17,18 @@ def get_client():
             )
         _client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _client
+
+
+def execute_with_retry(query, max_attempts=3, delay_seconds=2):
+    """Runs query.execute() with retries. The free hosting tier's outbound
+    network has occasional brief hiccups (not a real bug) — retrying after a
+    short pause usually succeeds without failing the whole request."""
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return query.execute()
+        except Exception as e:
+            last_error = e
+            if attempt < max_attempts:
+                time.sleep(delay_seconds * attempt)
+    raise last_error
