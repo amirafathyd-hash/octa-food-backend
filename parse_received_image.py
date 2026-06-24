@@ -123,15 +123,20 @@ def _call_ocr_space(image_path):
     raise RuntimeError(f'فشل الاتصال بخدمة OCR.space بعد محاولتين: {last_error}')
 
 
-def parse_received_image(image_path, master_items, name_match_threshold=80):
+def process_ocr_data(data, master_items, name_match_threshold=80):
     """
+    Same logic as parse_received_image(), but takes an already-fetched
+    OCR.space response (dict) instead of calling the API itself. This lets the
+    BROWSER call OCR.space directly (it has no network restrictions) and hand
+    the JSON result to our backend just for the row-matching/parsing step,
+    which needs no outbound network call at all.
+
     master_items: dict from item_db.load_db() -> {key: {display_name, ...}}
     Returns: {
         'date': 'YYYY-MM-DD' or None,
         'rows': [ {item_key, name_en, raw_text, qty, unit, confidence, needs_review}, ... ],
     }
     """
-    data = _call_ocr_space(image_path)
     parsed_results = data.get('ParsedResults', [])
     if not parsed_results:
         return {'date': None, 'rows': []}
@@ -241,6 +246,14 @@ def parse_received_image(image_path, master_items, name_match_threshold=80):
         })
 
     return {'date': date_iso, 'rows': rows}
+
+
+def parse_received_image(image_path, master_items, name_match_threshold=80):
+    """Server-side convenience wrapper: fetch from OCR.space ourselves, then process.
+    Not used by the main app flow anymore (browser calls OCR.space directly to avoid
+    Railway's restricted outbound network), but kept for local testing/CLI use."""
+    data = _call_ocr_space(image_path)
+    return process_ocr_data(data, master_items, name_match_threshold)
 
 
 if __name__ == '__main__':
