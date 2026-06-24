@@ -66,6 +66,9 @@ def _normalize_unit(raw):
     return UNIT_NORMALIZE.get(key, raw.upper() if raw else '')
 
 
+VALID_UNITS = {'KG', 'BOX', 'PKT', 'PC'}
+
+
 def _parse_quantity_text(raw_text):
     cleaned = raw_text.strip().replace(',', '.').replace('—', '-')
     dm = DASH_DECIMAL_RE.match(cleaned)
@@ -75,7 +78,8 @@ def _parse_quantity_text(raw_text):
             qty = float(f'{whole}.{frac}')
         except ValueError:
             return None, None, False
-        return qty, _normalize_unit(unit_str), True
+        unit = _normalize_unit(unit_str)
+        return qty, unit, unit in VALID_UNITS
 
     m = QTY_RE.search(cleaned)
     if not m:
@@ -85,7 +89,8 @@ def _parse_quantity_text(raw_text):
         qty = float(qty_str.replace(',', '.'))
     except ValueError:
         return None, None, False
-    return qty, _normalize_unit(unit_str), True
+    unit = _normalize_unit(unit_str)
+    return qty, unit, unit in VALID_UNITS
 
 
 def _call_ocr_space(image_path):
@@ -204,6 +209,8 @@ def parse_received_image(image_path, master_items, name_match_threshold=80):
                         else (y_center + sorted_items[idx + 1][0]) / 2)
         bands.append((upper_bound, lower_bound))
 
+    Y_BIAS_CORRECTION = -8  # handwriting tends to sit a few px lower than its printed row
+
     for idx, (y_center, x_right, item_key, matched_name) in enumerate(sorted_items):
         upper_bound, lower_bound = bands[idx]
         min_x = max(x_right + MIN_GAP_FROM_NAME, received_col_x - 20) if received_col_x else x_right + MIN_GAP_FROM_NAME
@@ -211,7 +218,8 @@ def parse_received_image(image_path, master_items, name_match_threshold=80):
         for i, (oy, ox, text) in enumerate(other_words):
             if i in used_idx or ox < min_x:
                 continue
-            if upper_bound <= oy < lower_bound:
+            corrected_y = oy + Y_BIAS_CORRECTION
+            if upper_bound <= corrected_y < lower_bound:
                 candidates.append((i, ox, text))
 
         if not candidates:
