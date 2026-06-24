@@ -91,23 +91,31 @@ def _parse_quantity_text(raw_text):
 def _call_ocr_space(image_path):
     if not OCR_SPACE_API_KEY:
         raise RuntimeError('لازم تحدد OCR_SPACE_API_KEY في متغيرات البيئة (Environment Variables)')
-    with open(image_path, 'rb') as f:
-        resp = requests.post(
-            OCR_SPACE_URL,
-            files={'file': f},
-            data={
-                'apikey': OCR_SPACE_API_KEY,
-                'OCREngine': 3,            # best engine for handwriting
-                'isOverlayRequired': True,  # get word-level (x, y) positions
-                'language': 'eng',
-            },
-            timeout=90,
-        )
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get('IsErroredOnProcessing'):
-        raise RuntimeError(data.get('ErrorMessage', ['OCR.space error'])[0])
-    return data
+
+    last_error = None
+    for attempt in range(2):  # try once, retry once on a transient network failure
+        try:
+            with open(image_path, 'rb') as f:
+                resp = requests.post(
+                    OCR_SPACE_URL,
+                    files={'file': f},
+                    data={
+                        'apikey': OCR_SPACE_API_KEY,
+                        'OCREngine': 3,            # best engine for handwriting
+                        'isOverlayRequired': True,  # get word-level (x, y) positions
+                        'language': 'eng',
+                    },
+                    timeout=(10, 45),  # (connect timeout, read timeout) — fail fast instead of hanging
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get('IsErroredOnProcessing'):
+                raise RuntimeError(data.get('ErrorMessage', ['OCR.space error'])[0])
+            return data
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_error = e
+            continue
+    raise RuntimeError(f'فشل الاتصال بخدمة OCR.space بعد محاولتين: {last_error}')
 
 
 def parse_received_image(image_path, master_items, name_match_threshold=80):
