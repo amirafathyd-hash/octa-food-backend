@@ -11,7 +11,7 @@ from parse_received import parse_received_xlsx
 from parse_received_image import parse_received_image, process_ocr_data
 from item_db import load_db, seed_from_order
 from matcher import match_invoice_item
-from db import get_client
+from db import get_client, execute_with_retry
 
 app = Flask(__name__)
 CORS(app)  # allow calls from the Netlify frontend domain
@@ -36,15 +36,18 @@ def _bulk_upsert_daily(rows):
     for row in rows:
         deduped[(row['item_date'], row['item_key'])] = row
     sb = get_client()
-    sb.table('daily_items').upsert(list(deduped.values()), on_conflict='item_date,item_key').execute()
+    execute_with_retry(sb.table('daily_items').upsert(list(deduped.values()), on_conflict='item_date,item_key'))
 
 
 def _log(file_type, file_name, item_date, message, level='info'):
     sb = get_client()
-    sb.table('upload_log').insert({
-        'file_type': file_type, 'file_name': file_name,
-        'item_date': item_date, 'message': message, 'level': level,
-    }).execute()
+    try:
+        execute_with_retry(sb.table('upload_log').insert({
+            'file_type': file_type, 'file_name': file_name,
+            'item_date': item_date, 'message': message, 'level': level,
+        }), max_attempts=2)
+    except Exception:
+        pass  # logging is best-effort; never let a logging failure break the actual request
 
 
 @app.route('/api/health', methods=['GET'])
@@ -267,7 +270,7 @@ def process_received_ocr():
 @app.route('/api/log', methods=['GET'])
 def get_log():
     sb = get_client()
-    res = sb.table('upload_log').select('*').order('created_at', desc=True).limit(200).execute()
+    res = execute_with_retry(sb.table('upload_log').select('*').order('created_at', desc=True).limit(200))
     return jsonify(res.data)
 
 
@@ -279,7 +282,7 @@ def report():
     q = sb.table('daily_items').select('*').order('item_date')
     if month:
         q = q.gte('item_date', f'{month}-01').lt('item_date', _next_month(month))
-    res = q.execute()
+    res = execute_with_retry(q)
     rows = res.data
 
     stats = {'matched': 0, 'fuzzy': 0, 'needs_review': 0, 'no_invoice': 0, 'total': len(rows)}
@@ -303,7 +306,7 @@ def finalize():
     q = sb.table('daily_items').select('*').order('item_date')
     if month:
         q = q.gte('item_date', f'{month}-01').lt('item_date', _next_month(month))
-    res = q.execute()
+    res = execute_with_retry(q)
     rows = res.data
 
     from excel_writer import build_workbook
