@@ -13,6 +13,9 @@ from item_db import load_db, seed_from_order
 from matcher import match_invoice_item
 from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
+from tokyo_ordering import read_current_inputs, write_updated_workbook
+
+TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 
 app = Flask(__name__)
 CORS(app)  # allow calls from the Netlify frontend domain
@@ -353,6 +356,27 @@ def invoices_export_xlsx():
     wb_path = build_invoices_workbook(invoices)
     return send_file(wb_path, as_attachment=True,
                       download_name=f"octa-invoices-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
+
+@app.route('/api/tokyo-ordering/current', methods=['GET'])
+def tokyo_ordering_current():
+    """يرجّع الأيام والوجبات الحالية (العدد والوزن) من ملف القالب المخزّن على السيرفر."""
+    if not os.path.exists(TOKYO_TEMPLATE_PATH):
+        return jsonify({'error': 'ملف القالب tokyo_ordering_template.xlsm غير موجود على السيرفر'}), 404
+    days = read_current_inputs(TOKYO_TEMPLATE_PATH)
+    return jsonify({'days': days})
+
+
+@app.route('/api/tokyo-ordering/export', methods=['POST'])
+def tokyo_ordering_export():
+    """يستقبل الأيام بعد التعديل، ويرجّع نسخة محدّثة من نفس ملف القالب (بالماكرو والمعادلات
+    زي ما هي) فيها القيم الجديدة بس، جاهزة تتحمّل وتفتحها في إكسل وتدوس Update زي العادة."""
+    if not os.path.exists(TOKYO_TEMPLATE_PATH):
+        return jsonify({'error': 'ملف القالب tokyo_ordering_template.xlsm غير موجود على السيرفر'}), 404
+    payload = request.get_json(silent=True) or {}
+    days = payload.get('days') or []
+    out_path = write_updated_workbook(TOKYO_TEMPLATE_PATH, days)
+    return send_file(out_path, as_attachment=True, download_name='Tokyo_Ordering_Updated.xlsm')
 
 
 def _next_month(month):
