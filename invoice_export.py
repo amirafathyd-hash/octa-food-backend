@@ -11,26 +11,30 @@ import unicodedata
 import tempfile
 import pdfplumber
 
-ARABIC_RUN = re.compile(r'[\u0600-\u06FF]+')
+ARABIC_RUN = re.compile(r'[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]+')
+ARABIC_CHAR = re.compile(r'[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]')
 
 
 def _fix_token(token):
     # يقسّم الكلمة لقطع: عربي / غير عربي، ويقلب ترتيب القطع (لأن التخزين كان معكوسًا)،
-    # وبيقلب ترتيب الحروف داخل القطعة العربية فقط (الأرقام/اللاتيني تفضل كما هي)
-    segments = re.findall(r'[\u0600-\u06FF]+|[^\u0600-\u06FF]+', token)
+    # وبيقلب ترتيب الحروف داخل القطعة العربية فقط (الأرقام/اللاتيني تفضل كما هي).
+    # مهم: العكس ده بيحصل على شكل الجليفات الأصلي (presentation forms) قبل أي تطبيع NFKC،
+    # عشان الحروف المدمجة (ligatures) اللي بتتفك لحرفين منفصلين تفضل بترتيبها الصحيح
+    # الداخلي بعد العكس (لو طبّعنا الأول وبعدين عكسنا، بنعكس ترتيب حروف الـ ligature
+    # الداخلي بالغلط، وده اللي كان بيسبب لخبطة زي "شركة" -> "رشكة").
+    segments = re.findall(r'[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]+|[^\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]+', token)
     fixed = []
     for seg in reversed(segments):
         if ARABIC_RUN.fullmatch(seg):
             fixed.append(seg[::-1])
         else:
             fixed.append(seg)
-    return ''.join(fixed)
+    return unicodedata.normalize('NFKC', ''.join(fixed))
 
 
 def fix_line(line):
     line = re.sub(r'[\ue000-\uf8ff]', '', line)  # شيل رموز الأيقونات (private-use glyphs)
-    norm = unicodedata.normalize('NFKC', line)
-    tokens = norm.split(' ')
+    tokens = line.split(' ')
     tokens = [_fix_token(t) for t in tokens if t]
     tokens.reverse()
     return ' '.join(tokens)
