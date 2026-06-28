@@ -87,18 +87,21 @@ def parse_items(fixed_lines):
     header_seen = False
     header_keywords = re.compile(r'(فاتورة|بيانات|الرقم|المنتج|الكمية|الخصم|الضريبة|الاجمالي|اﻻﺠﻤﺎﻟﻲ|الرضيبة|االجمالي|المجموع|قيمة|العميل|موافق|الرئيس)')
 
-    for i, line in enumerate(fixed_lines):
-        clean = line.strip()
+    i = 0
+    n = len(fixed_lines)
+    while i < n:
+        clean = fixed_lines[i].strip()
         if not clean:
+            i += 1
             continue
         m = row_re.match(clean)
         if not m:
             if header_keywords.search(clean):
                 header_seen = True
                 pending_name_parts = []  # أي كلام قبل/فوق رأس الجدول مالوش دعوة بأي صنف
-                continue
-            if header_seen and re.search(r'[\u0600-\u06FF]', clean):
+            elif header_seen and re.search(r'[\u0600-\u06FF]', clean):
                 pending_name_parts.append(clean)
+            i += 1
             continue
 
         mid_tokens = m.group('mid').split()
@@ -128,14 +131,27 @@ def parse_items(fixed_lines):
         name = inline_name if inline_name else ' '.join(pending_name_parts).strip()
         name = re.sub(r'\d+\.?\d*%', '', name).strip()
         pending_name_parts = []
+        consumed_next = False
 
-        # نلحق سطر تكملة الاسم اللي بعد سطر الأرقام (لو موجود وغير رقمي خالص ومش سطر بند جديد)
-        if i + 1 < len(fixed_lines):
+        # نلحق سطر تكملة الاسم اللي بعد سطر الأرقام (لو موجود وغير رقمي خالص ومش سطر بند جديد).
+        # بدون مسافة بين الاسم وتكملته، لأن التقسيم بيحصل وسط الكلمة نفسها غالبًا
+        # (مثلاً "خس مدور امر" + "يكي" = "خس مدور امريكي"، مش "امر يكي").
+        if i + 1 < n:
             nxt = fixed_lines[i + 1].strip()
-            if nxt and re.search(r'[\u0600-\u06FF]', nxt) and not row_re.match(nxt):
+            if nxt and re.search(r'[\u0600-\u06FF]', nxt) and not row_re.match(nxt) and not header_keywords.search(nxt):
                 extra = re.sub(r'[\d.]+', '', nxt).strip()
                 if extra:
-                    name = f'{name} {extra}'.strip()
+                    name = f'{name}{extra}'.strip()
+                    consumed_next = True  # السطر ده اتستخدم، السطر اللي بعده ميتعالجش تاني كأنه اسم صنف جديد
+
+        # شيل رموز الحروف اللي مالها تعريف يونيكود في الخط المستخدم (عيب في ملف PDF نفسه،
+        # مش في الترتيب)، ولو الاسم بقى قصير جدًا بعد الشيل، نعلّم عليه إنه يحتاج مراجعة يدوية
+        needs_review = False
+        if re.search(r'\(cid:\d+\)', name):
+            name = re.sub(r'\(cid:\d+\)', '', name).strip()
+            needs_review = True
+        if len(re.sub(r'[^\u0600-\u06FF]', '', name)) <= 1:
+            needs_review = True
 
         items.append({
             'name': name or '(بدون اسم)',
@@ -146,7 +162,10 @@ def parse_items(fixed_lines):
             'tax_pct': _to_float(m.group('tax_pct')),
             'tax_value': _to_float(m.group('tax_val')),
             'total': _to_float(m.group('total')),
+            'needs_review': needs_review,
         })
+
+        i += 2 if consumed_next else 1
 
     return items
 
@@ -364,6 +383,13 @@ def parse_invoice_full(pdf_path, file_name=''):
 
     items = parse_items(fixed_lines)
 
+    review_items = [it['name'] for it in items if it.get('needs_review')]
+    notes = ''
+    if not items:
+        notes = 'لم يتم استخراج بنود — قد تحتاج مراجعة يدوية'
+    elif review_items:
+        notes = f"تنبيه: اسم {len(review_items)} صنف غير واضح بسبب عيب في الخط المستخدم بملف PDF (السعر/الكمية صحيحين، الاسم يحتاج تأكيد يدوي): {', '.join(review_items)}"
+
     return {
         'fileName': file_name,
         'date': date_m.group(1) if date_m else '',
@@ -382,7 +408,8 @@ def parse_invoice_full(pdf_path, file_name=''):
                 'unit': it['unit'],
                 'unitPrice': it['unit_price'],
                 'total': it['total'],
+                'needsReview': it.get('needs_review', False),
             } for it in items
         ],
-        'notes': '' if items else 'لم يتم استخراج بنود — قد تحتاج مراجعة يدوية',
+        'notes': notes,
     }
