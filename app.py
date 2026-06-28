@@ -12,6 +12,7 @@ from parse_received_image import parse_received_image, process_ocr_data
 from item_db import load_db, seed_from_order
 from matcher import match_invoice_item
 from db import get_client, execute_with_retry
+from invoice_export import parse_invoice_full
 
 app = Flask(__name__)
 CORS(app)  # allow calls from the Netlify frontend domain
@@ -313,6 +314,34 @@ def finalize():
     wb_path = build_workbook(rows)
     return send_file(wb_path, as_attachment=True,
                       download_name=f"octa_food_report_{month or 'all'}.xlsx")
+
+
+@app.route('/api/invoices-export', methods=['POST'])
+def invoices_export():
+    """يستقبل عدة ملفات PDF فواتير، يستخرج منها كل البيانات (تاريخ، رقم فاتورة،
+    مورد، عميل، بنود، إجماليات) مع تصحيح ترتيب الحروف العربي، ويرجعها JSON
+    عشان الفرونت إند يبني منها شيت إكسل قابل للتعديل قبل التحميل.
+    مستقل تمامًا عن /api/upload-invoice ومفيش أي تأثير على قاعدة البيانات."""
+    files = request.files.getlist('files')
+    results = []
+    for f in files:
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+            f.save(tmp.name)
+            path = tmp.name
+        try:
+            data = parse_invoice_full(path, f.filename)
+            results.append(data)
+        except Exception as e:
+            results.append({
+                'fileName': f.filename,
+                'date': '', 'number': '', 'party': '',
+                'subtotal': 0, 'vat': 0, 'total': 0,
+                'items': [],
+                'notes': f'تعذر قراءة الملف: {e}',
+            })
+        finally:
+            os.unlink(path)
+    return jsonify({'invoices': results})
 
 
 def _next_month(month):
