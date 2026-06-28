@@ -8,6 +8,7 @@
 """
 import re
 import unicodedata
+import tempfile
 import pdfplumber
 
 ARABIC_RUN = re.compile(r'[\u0600-\u06FF]+')
@@ -53,6 +54,8 @@ NUM = r'[\d.,]+'
 def _to_float(s):
     if s is None:
         return 0.0
+    if isinstance(s, (int, float)):
+        return float(s)
     s = s.replace(',', '').strip()
     try:
         return float(s)
@@ -142,6 +145,177 @@ def parse_items(fixed_lines):
         })
 
     return items
+
+
+def build_invoices_workbook(invoices):
+    """يبني ملف إكسل منسّق بالكامل (ألوان، حدود، عرض أعمدة، خط عريض للعناوين
+    والإجماليات) من بيانات الفواتير — بعد ما المستخدم يراجعها ويعدّلها في الواجهة."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    RED = 'C0392B'
+    LIGHT = 'FDF2F0'
+    WHITE = 'FFFFFF'
+    INK = '241A17'
+
+    header_fill = PatternFill('solid', fgColor=RED)
+    header_font = Font(color=WHITE, bold=True, size=11)
+    title_font = Font(bold=True, size=13, color=RED)
+    total_font = Font(bold=True, size=11, color=INK)
+    normal_font = Font(size=10.5, color=INK)
+    light_fill = PatternFill('solid', fgColor=LIGHT)
+    thin = Side(style='thin', color='D8B9B0')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    money_fmt = '#,##0.00'
+
+    def style_sheet_rtl(ws):
+        ws.sheet_view.rightToLeft = True
+
+    def header_row(ws, row_idx, headers, widths):
+        for i, h in enumerate(headers, start=1):
+            c = ws.cell(row=row_idx, column=i, value=h)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = Alignment(horizontal='center', vertical='center')
+            c.border = border
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.freeze_panes = ws.cell(row=row_idx + 1, column=1)
+
+    def write_row(ws, row_idx, values, money_cols=(), bold=False, fill=None):
+        for i, v in enumerate(values, start=1):
+            c = ws.cell(row=row_idx, column=i, value=v)
+            c.font = total_font if bold else normal_font
+            c.border = border
+            c.alignment = Alignment(horizontal='center', vertical='center')
+            if fill:
+                c.fill = fill
+            if i in money_cols and isinstance(v, (int, float)):
+                c.number_format = money_fmt
+
+    wb = Workbook()
+
+    # ---- ملخص الفواتير ----
+    ws = wb.active
+    ws.title = 'ملخص الفواتير'
+    style_sheet_rtl(ws)
+    headers = ['الملف', 'التاريخ', 'رقم الفاتورة', 'المورد / العميل', 'قبل الضريبة', 'الضريبة', 'الإجمالي', 'عدد البنود', 'ملاحظات']
+    widths = [30, 13, 16, 28, 13, 11, 13, 11, 30]
+    header_row(ws, 1, headers, widths)
+    for r, inv in enumerate(invoices, start=2):
+        items = inv.get('items') or []
+        write_row(ws, r, [
+            inv.get('fileName', ''), inv.get('date', ''), inv.get('number', ''),
+            inv.get('party', ''), _to_float(inv.get('subtotal')), _to_float(inv.get('vat')),
+            _to_float(inv.get('total')), len(items), inv.get('notes', ''),
+        ], money_cols=(5, 6, 7), fill=light_fill if r % 2 == 0 else None)
+
+    # ---- تجميع يومي ----
+    ws2 = wb.create_sheet('تجميع يومي')
+    style_sheet_rtl(ws2)
+    header_row(ws2, 1, ['التاريخ', 'عدد الفواتير', 'إجمالي اليوم'], [16, 14, 16])
+    daily = {}
+    for inv in invoices:
+        key = inv.get('date') or 'بدون تاريخ'
+        d = daily.setdefault(key, {'count': 0, 'total': 0.0})
+        d['count'] += 1
+        d['total'] += _to_float(inv.get('total'))
+    r = 2
+    for key in sorted(daily.keys()):
+        write_row(ws2, r, [key, daily[key]['count'], daily[key]['total']], money_cols=(3,),
+                  fill=light_fill if r % 2 == 0 else None)
+        r += 1
+    if daily:
+        write_row(ws2, r, ['الإجمالي', sum(d['count'] for d in daily.values()),
+                            sum(d['total'] for d in daily.values())], money_cols=(3,), bold=True,
+                   fill=PatternFill('solid', fgColor='F1D8D6'))
+
+    # ---- تاب لكل فاتورة ----
+    used_names = set()
+
+    def safe_sheet_name(name):
+        base = (name or 'فاتورة').replace('/', '-').replace('\\', '-').replace('*', '-') \
+            .replace('?', '-').replace('[', '-').replace(']', '-').replace(':', '-')
+        base = base.strip()[:28] or 'فاتورة'
+        candidate, i = base, 2
+        while candidate in used_names:
+            candidate = f'{base[:25]}-{i}'
+            i += 1
+        used_names.add(candidate)
+        return candidate
+
+    for idx, inv in enumerate(invoices):
+        title = f"{inv.get('date') or f'فاتورة-{idx+1}'} {inv.get('number') or ''}".strip()
+        wsi = wb.create_sheet(safe_sheet_name(title))
+        style_sheet_rtl(wsi)
+        wsi.column_dimensions['A'].width = 38
+        wsi.column_dimensions['B'].width = 13
+        wsi.column_dimensions['C'].width = 14
+        wsi.column_dimensions['D'].width = 15
+
+        labels = [
+            ('اسم الملف', inv.get('fileName', '')),
+            ('التاريخ', inv.get('date', '')),
+            ('رقم الفاتورة', inv.get('number', '')),
+            ('المورد / العميل', inv.get('party', '')),
+        ]
+        row = 1
+        for label, value in labels:
+            c1 = wsi.cell(row=row, column=1, value=label)
+            c1.font = Font(bold=True, size=11, color=INK)
+            c2 = wsi.cell(row=row, column=2, value=value)
+            c2.font = normal_font
+            wsi.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+            row += 1
+
+        row += 1
+        header_row(wsi, row, ['الصنف / البيان', 'الكمية', 'سعر الوحدة', 'إجمالي البند'], [38, 13, 14, 15])
+        table_header_row = row
+        row += 1
+        items_total = 0.0
+        for j, item in enumerate(inv.get('items') or []):
+            total = _to_float(item.get('total'))
+            items_total += total
+            write_row(wsi, row, [
+                item.get('item', ''), _to_float(item.get('qty')),
+                _to_float(item.get('unitPrice')), total,
+            ], money_cols=(3, 4), fill=light_fill if j % 2 == 0 else None)
+            row += 1
+
+        wsi.freeze_panes = wsi.cell(row=table_header_row + 1, column=1)
+
+        row += 1
+        totals = [
+            ('إجمالي البنود', items_total),
+            ('قبل الضريبة', _to_float(inv.get('subtotal'))),
+            ('الضريبة', _to_float(inv.get('vat'))),
+            ('الإجمالي', _to_float(inv.get('total'))),
+        ]
+        for label, value in totals:
+            c1 = wsi.cell(row=row, column=1, value=label)
+            c1.font = total_font
+            c1.border = border
+            c4 = wsi.cell(row=row, column=4, value=value)
+            c4.font = total_font
+            c4.number_format = money_fmt
+            c4.border = border
+            c4.alignment = Alignment(horizontal='center')
+            if label == 'الإجمالي':
+                fill_final = PatternFill('solid', fgColor='F1D8D6')
+                c1.fill = fill_final
+                c4.fill = fill_final
+            row += 1
+        if inv.get('notes'):
+            row += 1
+            c1 = wsi.cell(row=row, column=1, value='ملاحظات')
+            c1.font = Font(bold=True, size=10.5, color='B55A00')
+            c2 = wsi.cell(row=row, column=2, value=inv.get('notes'))
+            wsi.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+
+    tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
+    wb.save(tmp.name)
+    return tmp.name
 
 
 def parse_invoice_full(pdf_path, file_name=''):
