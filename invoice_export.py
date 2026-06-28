@@ -231,28 +231,53 @@ def build_invoices_workbook(invoices):
         write_row(ws, r, [
             inv.get('fileName', ''), inv.get('date', ''), inv.get('number', ''),
             inv.get('party', ''), _to_float(inv.get('subtotal')), _to_float(inv.get('vat')),
-            _to_float(inv.get('total')), len(items), inv.get('notes', ''),
+            None, len(items), inv.get('notes', ''),
         ], money_cols=(5, 6, 7), fill=light_fill if r % 2 == 0 else None)
+        # الإجمالي = قبل الضريبة + الضريبة — معادلة شغالة
+        c7 = ws.cell(row=r, column=7, value=f'=E{r}+F{r}')
+        c7.font = normal_font
+        c7.border = border
+        c7.alignment = Alignment(horizontal='center', vertical='center')
+        c7.number_format = money_fmt
+        if r % 2 == 0:
+            c7.fill = light_fill
+    last_summary_row = len(invoices) + 1
 
     # ---- تجميع يومي ----
     ws2 = wb.create_sheet('تجميع يومي')
     style_sheet_rtl(ws2)
     header_row(ws2, 1, ['التاريخ', 'عدد الفواتير', 'إجمالي اليوم'], [16, 14, 16])
-    daily = {}
-    for inv in invoices:
-        key = inv.get('date') or 'بدون تاريخ'
-        d = daily.setdefault(key, {'count': 0, 'total': 0.0})
-        d['count'] += 1
-        d['total'] += _to_float(inv.get('total'))
+    dates_sorted = sorted({inv.get('date') or 'بدون تاريخ' for inv in invoices})
     r = 2
-    for key in sorted(daily.keys()):
-        write_row(ws2, r, [key, daily[key]['count'], daily[key]['total']], money_cols=(3,),
-                  fill=light_fill if r % 2 == 0 else None)
+    for key in dates_sorted:
+        c1 = ws2.cell(row=r, column=1, value=key)
+        c1.font = normal_font
+        c1.border = border
+        c1.alignment = Alignment(horizontal='center', vertical='center')
+        # عدد الفواتير وإجمالي اليوم بيتحسبوا أوتوماتيك من شيت "ملخص الفواتير"
+        c2 = ws2.cell(row=r, column=2, value=f"=COUNTIF('ملخص الفواتير'!B2:B{last_summary_row},A{r})")
+        c3 = ws2.cell(row=r, column=3, value=f"=SUMIF('ملخص الفواتير'!B2:B{last_summary_row},A{r},'ملخص الفواتير'!G2:G{last_summary_row})")
+        for c in (c2, c3):
+            c.font = normal_font
+            c.border = border
+            c.alignment = Alignment(horizontal='center', vertical='center')
+        c3.number_format = money_fmt
+        if r % 2 == 0:
+            for c in (c1, c2, c3):
+                c.fill = light_fill
         r += 1
-    if daily:
-        write_row(ws2, r, ['الإجمالي', sum(d['count'] for d in daily.values()),
-                            sum(d['total'] for d in daily.values())], money_cols=(3,), bold=True,
-                   fill=PatternFill('solid', fgColor='F1D8D6'))
+    if dates_sorted:
+        last_daily_row = r - 1
+        total_fill = PatternFill('solid', fgColor='F1D8D6')
+        c1 = ws2.cell(row=r, column=1, value='الإجمالي')
+        c2 = ws2.cell(row=r, column=2, value=f'=SUM(B2:B{last_daily_row})')
+        c3 = ws2.cell(row=r, column=3, value=f'=SUM(C2:C{last_daily_row})')
+        for c in (c1, c2, c3):
+            c.font = total_font
+            c.border = border
+            c.alignment = Alignment(horizontal='center')
+            c.fill = total_fill
+        c3.number_format = money_fmt
 
     # ---- تاب لكل فاتورة ----
     used_names = set()
@@ -296,24 +321,35 @@ def build_invoices_workbook(invoices):
         header_row(wsi, row, ['الصنف / البيان', 'الكمية', 'سعر الوحدة', 'إجمالي البند'], [38, 13, 14, 15])
         table_header_row = row
         row += 1
-        items_total = 0.0
+        first_item_row = row
         for j, item in enumerate(inv.get('items') or []):
-            total = _to_float(item.get('total'))
-            items_total += total
-            write_row(wsi, row, [
-                item.get('item', ''), _to_float(item.get('qty')),
-                _to_float(item.get('unitPrice')), total,
-            ], money_cols=(3, 4), fill=light_fill if j % 2 == 0 else None)
+            qty = _to_float(item.get('qty'))
+            price = _to_float(item.get('unitPrice'))
+            write_row(wsi, row, [item.get('item', ''), qty, price, None], money_cols=(3,),
+                      fill=light_fill if j % 2 == 0 else None)
+            # إجمالي البند = الكمية × سعر الوحدة — معادلة شغالة، يتغير أوتوماتيك لو عدّلت أي رقم
+            c4 = wsi.cell(row=row, column=4, value=f'=B{row}*C{row}')
+            c4.font = normal_font
+            c4.border = border
+            c4.alignment = Alignment(horizontal='center', vertical='center')
+            c4.number_format = money_fmt
+            if j % 2 == 0:
+                c4.fill = light_fill
             row += 1
+        last_item_row = row - 1
 
         wsi.freeze_panes = wsi.cell(row=table_header_row + 1, column=1)
 
         row += 1
+        items_total_row = row
+        subtotal_row = row + 1
+        vat_row = row + 2
+        total_row = row + 3
         totals = [
-            ('إجمالي البنود', items_total),
+            ('إجمالي البنود', f'=SUM(D{first_item_row}:D{last_item_row})' if last_item_row >= first_item_row else 0),
             ('قبل الضريبة', _to_float(inv.get('subtotal'))),
             ('الضريبة', _to_float(inv.get('vat'))),
-            ('الإجمالي', _to_float(inv.get('total'))),
+            ('الإجمالي', f'=D{subtotal_row}+D{vat_row}'),
         ]
         for label, value in totals:
             c1 = wsi.cell(row=row, column=1, value=label)
