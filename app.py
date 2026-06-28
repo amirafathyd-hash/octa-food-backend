@@ -12,7 +12,7 @@ from parse_received_image import parse_received_image, process_ocr_data
 from item_db import load_db, seed_from_order
 from matcher import match_invoice_item
 from db import get_client, execute_with_retry
-from invoice_export import parse_invoice_full
+from invoice_export import parse_invoice_full, build_invoices_workbook
 
 app = Flask(__name__)
 CORS(app)  # allow calls from the Netlify frontend domain
@@ -342,6 +342,17 @@ def invoices_export():
         finally:
             os.unlink(path)
     return jsonify({'invoices': results})
+
+
+@app.route('/api/invoices-export-xlsx', methods=['POST'])
+def invoices_export_xlsx():
+    """يستقبل بيانات الفواتير (بعد ما المستخدم يراجعها ويعدّلها في الواجهة) كـ JSON
+    ويرجّع ملف إكسل منسّق بالكامل (ألوان، حدود، خط عريض للإجماليات) جاهز للتحميل."""
+    payload = request.get_json(silent=True) or {}
+    invoices = payload.get('invoices') or []
+    wb_path = build_invoices_workbook(invoices)
+    return send_file(wb_path, as_attachment=True,
+                      download_name=f"octa-invoices-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
 
 
 def _next_month(month):
