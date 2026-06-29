@@ -1,7 +1,9 @@
 import os
 import io
+import secrets
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from werkzeug.security import generate_password_hash, check_password_hash
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
@@ -386,6 +388,144 @@ def tokyo_ordering_export():
 def _next_month(month):
     y, m = map(int, month.split('-'))
     return f'{y+1}-01-01' if m == 12 else f'{y}-{m+1:02d}-01'
+
+
+SESSION_DAYS = 7
+
+
+def _new_session(username):
+    token = secrets.token_hex(32)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat()
+    sb = get_client()
+    execute_with_retry(sb.table('app_sessions').insert({
+        'token': token, 'username': username, 'expires_at': expires_at,
+    }))
+    return token
+
+
+def _check_session(token):
+    if not token:
+        return None
+    sb = get_client()
+    res = execute_with_retry(sb.table('app_sessions').select('*').eq('token', token))
+    rows = res.data or []
+    if not rows:
+        return None
+    row = rows[0]
+    expires_at = datetime.fromisoformat(row['expires_at'].replace('Z', '+00:00'))
+    if expires_at < datetime.now(timezone.utc):
+        return None
+    return row['username']
+
+
+def _require_auth():
+    """يرجّع username لو التوكين صحيح، أو يرجّع None ومعاه الـ response المناسب لو لأ."""
+    token = request.headers.get('X-Auth-Token') or (request.get_json(silent=True) or {}).get('token')
+    username = _check_session(token)
+    if not username:
+        return None, (jsonify({'error': 'جلسة غير صالحة، سجّل دخول تاني'}), 401)
+    return username, None
+
+
+@app.route('/api/setup-first-user', methods=['POST'])
+def setup_first_user():
+    """شغّال بس أول مرة (لما جدول app_users يكون فاضي)، عشان تعمل أول حساب admin.
+    بعد ما يتضاف أول يوزر، الراوت ده بيقفل نفسه أوتوماتيك ومايقبلش طلبات تانية."""
+    sb = get_client()
+    existing = execute_with_retry(sb.table('app_users').select('id').limit(1))
+    if existing.data:
+        return jsonify({'error': 'فيه يوزرز موجودين بالفعل، استخدم صفحة تسجيل الدخول.'}), 403
+
+    payload = request.get_json(silent=True) or {}
+    username = (payload.get('username') or '').strip()
+    password = payload.get('password') or ''
+    if not username or len(password) < 4:
+        return jsonify({'error': 'اليوزر نيم مطلوب والباسورد لازم يكون 4 حروف على الأقل'}), 400
+
+    execute_with_retry(sb.table('app_users').insert({
+        'username': username, 'password_hash': generate_password_hash(password),
+    }))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    payload = request.get_json(silent=True) or {}
+    username = (payload.get('username') or '').strip()
+    password = payload.get('password') or ''
+    if not username or not password:
+        return jsonify({'error': 'اليوزر نيم والباسورد مطلوبين'}), 400
+
+    sb = get_client()
+    res = execute_with_retry(sb.table('app_users').select('*').eq('username', username))
+    rows = res.data or []
+    if not rows or not check_password_hash(rows[0]['password_hash'], password):
+        return jsonify({'error': 'اليوزر نيم أو الباسورد غلط'}), 401
+
+    token = _new_session(username)
+    return jsonify({'token': token, 'username': username})
+
+
+@app.route('/api/verify-session', methods=['GET'])
+def verify_session():
+    token = request.args.get('token')
+    username = _check_session(token)
+    if not username:
+        return jsonify({'valid': False}), 401
+    return jsonify({'valid': True, 'username': username})
+
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    payload = request.get_json(silent=True) or {}
+    token = payload.get('token')
+    if token:
+        sb = get_client()
+        execute_with_retry(sb.table('app_sessions').delete().eq('token', token))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/users', methods=['GET'])
+def list_users():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(sb.table('app_users').select('id, username, created_at').order('created_at'))
+    return jsonify({'users': res.data or []})
+
+
+@app.route('/api/users', methods=['POST'])
+def create_user():
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    username = (payload.get('username') or '').strip()
+    password = payload.get('password') or ''
+    if not username or not password:
+        return jsonify({'error': 'اليوزر نيم والباسورد مطلوبين'}), 400
+    if len(password) < 4:
+        return jsonify({'error': 'الباسورد لازم يكون 4 حروف/أرقام على الأقل'}), 400
+
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('app_users').insert({
+            'username': username, 'password_hash': generate_password_hash(password),
+        }))
+    except Exception as e:
+        return jsonify({'error': f'تعذر إضافة اليوزر (ممكن يكون موجود قبل كده): {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/users/<int:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    execute_with_retry(sb.table('app_users').delete().eq('id', user_id))
+    return jsonify({'ok': True})
 
 
 if __name__ == '__main__':
