@@ -84,7 +84,15 @@ def build_workbook(rows):
     """
     by_day = defaultdict(list)
     for r in rows:
-        dt = datetime.strptime(r['item_date'], '%Y-%m-%d')
+        raw_date = r.get('item_date')
+        if not raw_date:
+            continue
+        try:
+            # Supabase ممكن ترجع التاريخ كـ 'YYYY-MM-DD' (date) أو كـ
+            # 'YYYY-MM-DDTHH:MM:SS+00:00' (timestamp) — نتعامل مع الاتنين
+            dt = datetime.strptime(str(raw_date)[:10], '%Y-%m-%d')
+        except ValueError:
+            continue
         by_day[dt].append(r)
 
     wb = Workbook()
