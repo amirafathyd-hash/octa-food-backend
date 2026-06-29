@@ -49,7 +49,31 @@ def extract_fixed_lines(pdf_path):
             for line in text.split('\n'):
                 raw_lines.append(line)
                 fixed_lines.append(fix_line(line))
+    fixed_lines = resolve_known_cid_glyphs(fixed_lines)
     return raw_lines, fixed_lines
+
+
+# بعض فونتات الـ PDF مالها تعريف يونيكود لحروف عربية متصلة معيّنة، فبتطلع كرمز
+# "(cid:NUMBER)" بدل الحرف الحقيقي. عبارة "المركز الرئيسي" ثابتة وموجودة في كل
+# فاتورة، فبنستخدمها كمرجع نكتشف بيه إن الرمز ده بيمثّل الحروف "مر" — ولو ظهر
+# نفس الرمز في مكان تاني بالفاتورة (زي اسم صنف "تمر")، نستبدله بالحروف الصحيحة
+# بدل ما نمسحه ويضيع الاسم.
+_CID_BOILERPLATE_RE = re.compile(r'ال\(cid:(\d+)\)كز الرئيسي')
+
+
+def resolve_known_cid_glyphs(lines):
+    cid_map = {}
+    for line in lines:
+        m = _CID_BOILERPLATE_RE.search(line)
+        if m:
+            cid_map[m.group(1)] = 'مر'
+    if not cid_map:
+        return lines
+
+    def repl(m):
+        return cid_map.get(m.group(1), m.group(0))
+
+    return [re.sub(r'\(cid:(\d+)\)', repl, line) for line in lines]
 
 
 NUM = r'[\d.,]+'
@@ -67,6 +91,45 @@ def _to_float(s):
         return 0.0
 
 
+# بعض بنود الفاتورة بتتقسم بشكل غريب على PDF: جزء الضريبة (%النسبة القيمة) والقوس
+# الفاتح بيطلعوا على سطر مستقل قبل وبعد سطر البند الرئيسي، بدل ما يكونوا كلهم على
+# سطر واحد. ده بيخلي سطر البند الرئيسي يفقد الجزء ده تمامًا (مفيش % ولا قوس فيه)
+# فما بيتطابقش مع row_re، والبند بيضيع كامل أو يندمج غلط مع اللي بعده. الدالة دي
+# بتلمّ الأجزاء المنفصلة دي وترجّعها سطر واحد كامل قبل أي تحليل.
+_ORPHAN_TAX_RE = re.compile(
+    r'^(?:[\d.,]+%\s+)?%(?P<tax_pct>\d+)\s+(?P<tax_val>' + NUM + r')\)$'
+)
+_BROKEN_ROW_RE = re.compile(
+    r'^(?P<idx>\d+)\s+(?P<mid>.+?)\s+(?P<before_tax>' + NUM + r')\s+(?P<total>' + NUM + r')$'
+)
+_ORPHAN_PAREN_RE = re.compile(r'^' + NUM + r'\s*\($')
+
+
+def reassemble_split_rows(lines):
+    out = list(lines)
+    n = len(out)
+    for i in range(n):
+        line = out[i].strip()
+        if not line:
+            continue
+        m = _ORPHAN_TAX_RE.match(line)
+        if not m or i + 1 >= n:
+            continue
+        nxt = out[i + 1].strip()
+        bm = _BROKEN_ROW_RE.match(nxt)
+        if not bm:
+            continue
+        merged = (
+            f"{bm.group('idx')} {bm.group('mid')} {bm.group('before_tax')} "
+            f"%{m.group('tax_pct')} {m.group('tax_val')}) ( {bm.group('total')}"
+        )
+        out[i + 1] = merged
+        out[i] = ''
+        if i + 2 < n and _ORPHAN_PAREN_RE.match(out[i + 2].strip()):
+            out[i + 2] = ''
+    return out
+
+
 def parse_items(fixed_lines):
     """
     كل بند بياخد عادة 2-3 سطور بعد التصحيح:
@@ -81,6 +144,8 @@ def parse_items(fixed_lines):
         r'(?P<tax_val>' + NUM + r')\)\s*\(\s*(?P<total>' + NUM + r')$'
     )
     qty_unit_re = re.compile(r'^(?P<qty>' + NUM + r')(?P<unit>[\u0600-\u06FF]+)$')
+
+    fixed_lines = reassemble_split_rows(fixed_lines)
 
     items = []
     pending_name_parts = []
