@@ -1,7 +1,10 @@
 import os
 import io
+import re
 import secrets
 import tempfile
+import openpyxl
+from copy import copy
 from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask import Flask, request, jsonify, send_file
@@ -543,6 +546,66 @@ def change_user_password(user_id):
         'password_hash': generate_password_hash(password),
     }).eq('id', user_id))
     return jsonify({'ok': True})
+
+
+@app.route('/api/extract-sheet-range', methods=['POST'])
+def extract_sheet_range():
+    """بتاخد ملف Excel مرفوع + اسم تاب، وترجّع نفس التاب (أعمدة A:E بس) في ملف
+    جديد، بنفس الخط والألوان والحدود والمحاذاة وعرض الأعمدة والدمج تمامًا — لأن
+    openpyxl بيقرا ويكتب كل تفاصيل التنسيق دي بدقة كاملة (بعكس مكتبات الجافاسكريبت
+    المجانية اللي بس بتقرا لون الخلفية)."""
+    file = request.files.get('file')
+    sheet_name = request.form.get('sheet_name')
+    if not file or not sheet_name:
+        return jsonify({'error': 'محتاج الملف واسم التاب'}), 400
+
+    try:
+        src_wb = openpyxl.load_workbook(file, data_only=True)
+    except Exception as e:
+        return jsonify({'error': f'تعذر فتح الملف: {e}'}), 400
+
+    if sheet_name not in src_wb.sheetnames:
+        return jsonify({'error': f'مش لاقي تاب "{sheet_name}" في الملف ده'}), 404
+
+    src_ws = src_wb[sheet_name]
+    out_wb = openpyxl.Workbook()
+    out_ws = out_wb.active
+    out_ws.title = sheet_name
+
+    COLS = 5  # A..E
+    for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row, min_col=1, max_col=COLS):
+        for cell in row:
+            new_cell = out_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            if cell.has_style:
+                new_cell.font = copy(cell.font)
+                new_cell.fill = copy(cell.fill)
+                new_cell.border = copy(cell.border)
+                new_cell.alignment = copy(cell.alignment)
+                new_cell.number_format = cell.number_format
+
+    # عرض الأعمدة
+    for col_letter in ['A', 'B', 'C', 'D', 'E']:
+        if col_letter in src_ws.column_dimensions:
+            out_ws.column_dimensions[col_letter].width = src_ws.column_dimensions[col_letter].width
+
+    # ارتفاع الصفوف
+    for row_num, dim in src_ws.row_dimensions.items():
+        if dim.height:
+            out_ws.row_dimensions[row_num].height = dim.height
+
+    # الخلايا المدموجة (بس اللي جوه A:E)
+    for merged_range in src_ws.merged_cells.ranges:
+        if merged_range.max_col <= COLS:
+            out_ws.merge_cells(str(merged_range))
+
+    out_ws.sheet_view.rightToLeft = src_ws.sheet_view.rightToLeft
+
+    buf = io.BytesIO()
+    out_wb.save(buf)
+    buf.seek(0)
+    safe_name = re.sub(r'[^\w\-]+', '-', sheet_name)
+    return send_file(buf, as_attachment=True, download_name=f'{safe_name}-extract.xlsx',
+                      mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
 if __name__ == '__main__':
