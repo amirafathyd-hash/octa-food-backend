@@ -3,7 +3,10 @@ import io
 import re
 import secrets
 import tempfile
+import zipfile
 import openpyxl
+from openpyxl.styles import PatternFill, Font
+from openpyxl.utils import get_column_letter
 from copy import copy
 from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -546,6 +549,237 @@ def change_user_password(user_id):
         'password_hash': generate_password_hash(password),
     }).eq('id', user_id))
     return jsonify({'ok': True})
+
+
+STATION_SHEET_MAP = {
+    'breakfast': 'Ordering',
+    'desserts': 'Ordering',
+    'hot': 'All_Ingredients',
+    'marination': 'Marination_Ordering',
+    'rice': 'Ordering',
+    'salads': 'Ordering',
+    'sauce': 'Ordering',
+}
+# الترتيب الأبجدي اللي طلبه العميل (Breakfast, Desserts, Hot Section, Marination, Rice, Salads, Sauces)
+STATION_ORDER = ['breakfast', 'desserts', 'hot', 'marination', 'rice', 'salads', 'sauce']
+STATION_LABELS = {
+    'breakfast': 'Breakfast', 'desserts': 'Desserts', 'hot': 'Hot Section',
+    'marination': 'Marination', 'rice': 'Rice', 'salads': 'Salads', 'sauce': 'Sauces',
+}
+STATION_TAB_NAMES = {
+    'breakfast': 'Breakfast', 'desserts': 'Desserts', 'hot': 'Hot Section',
+    'marination': 'Marination', 'rice': 'Rice', 'salads': 'Salads', 'sauce': 'Sauce',
+}
+PURPLE_FILL = PatternFill(fill_type='solid', fgColor='6600FF')
+
+
+def _read_station_rows(file_storage, sheet_name):
+    """بيرجّع dict: name -> {'unit':..,'category':..,'weekly':..} من شيت المحطة
+    المحدّد بالاسم (عشان ملف توكيو فيه أكتر من شيت محتمل، ولازم نحدد الصحيح
+    لكل محطة بالاسم مش بالتخمين).
+    أعمدة المصدر: A=الاسم، B=الفئة، C=الوحدة، D=الوزن اليومي، E=الوزن الأسبوعي."""
+    wb = openpyxl.load_workbook(file_storage, data_only=True)
+    if sheet_name not in wb.sheetnames:
+        return None, {}
+    ws = wb[sheet_name]
+    out = {}
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=5, values_only=True):
+        name, category, unit, _daily, weekly = (list(row) + [None] * 5)[:5]
+        if not name or not str(name).strip():
+            continue
+        if str(name).strip().lower() == 'items':
+            continue
+        out[str(name).strip()] = {
+            'unit': unit, 'category': category,
+            'weekly': weekly if isinstance(weekly, (int, float)) else 0,
+        }
+    return sheet_name, out
+
+
+def _style_header_cell(cell, size=11, bold=True):
+    cell.font = Font(name='Calibri', size=size, bold=bold)
+    cell.fill = PURPLE_FILL
+
+
+def _build_purchasing_workbook(station_data):
+    """station_data: {station_key: {ingredient: {'unit','category','weekly'}}}
+    بيرجّع openpyxl.Workbook فيه شيت Purchasing + شيت لكل محطة (A:E، نفس التنسيق)."""
+    all_names = set()
+    for data in station_data.values():
+        all_names.update(data.keys())
+    sorted_names = sorted(all_names, key=lambda s: s.lower())
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Purchasing'
+
+    # ===== الهيدر =====
+    ws['A3'] = 'Sum of Weekly Weight'
+    for col in range(1, 19):  # A..R
+        _style_header_cell(ws.cell(row=3, column=col), size=18)
+    for idx, key in enumerate(STATION_ORDER):
+        col = 4 + idx  # D=4
+        ws.cell(row=4, column=col, value=STATION_LABELS[key])
+        _style_header_cell(ws.cell(row=4, column=col), size=18)
+    sum_col = 4 + len(STATION_ORDER)         # K
+    ws.cell(row=4, column=sum_col, value='Sum of Weekly Consumption')
+    _style_header_cell(ws.cell(row=4, column=sum_col), size=18)
+
+    dup_col = sum_col + 2                     # M (سايبين عمود فاضي زي الأصل)
+    maq_col = dup_col + 1                     # N
+    exp_col = maq_col + 1                     # O
+    avail_col = exp_col + 1                   # P
+    order_col = avail_col + 1                 # Q
+    next_col = order_col + 1                  # R
+
+    headers_en = {
+        dup_col: 'Weekly Consumtion', maq_col: 'Min. Available Quantity (MAQ )',
+        exp_col: 'Expected available Stock', avail_col: 'Available Stock',
+        order_col: 'Weekly Order', next_col: 'Expected available Stock Next week',
+    }
+    headers_ar = {
+        dup_col: 'الاستهلاك الأسبوعى', maq_col: 'الحد الأدنى للكمية المتاحة (MAQ)',
+        exp_col: 'المخزون المتوقع المتاح', avail_col: 'المخزون المتاح',
+        order_col: 'الطلب الأسبوعي', next_col: 'المخزون المتوقع المتاح للأسبوع القادم',
+    }
+    for col, text in headers_en.items():
+        ws.cell(row=3, column=col, value=text)
+        _style_header_cell(ws.cell(row=3, column=col), size=11)
+    for col, text in headers_ar.items():
+        ws.cell(row=4, column=col, value=text)
+        _style_header_cell(ws.cell(row=4, column=col), size=11)
+
+    # ===== صفوف البيانات (من صف 5) =====
+    sum_letter = get_column_letter(sum_col)
+    dup_letter = get_column_letter(dup_col)
+    maq_letter = get_column_letter(maq_col)
+    exp_letter = get_column_letter(exp_col)
+    avail_letter = get_column_letter(avail_col)
+    order_letter = get_column_letter(order_col)
+    d_letter = get_column_letter(4)
+    j_letter = get_column_letter(4 + len(STATION_ORDER) - 1)
+
+    for i, name in enumerate(sorted_names):
+        r = 5 + i
+        unit, category = '', ''
+        for key in STATION_ORDER:
+            info = station_data.get(key, {}).get(name)
+            if info:
+                unit = unit or info.get('unit') or ''
+                category = category or info.get('category') or ''
+        ws.cell(row=r, column=1, value=name)
+        ws.cell(row=r, column=2, value=unit)
+        ws.cell(row=r, column=3, value=category)
+        for idx, key in enumerate(STATION_ORDER):
+            col = 4 + idx
+            info = station_data.get(key, {}).get(name)
+            if info and info.get('weekly'):
+                ws.cell(row=r, column=col, value=info['weekly'])
+        ws.cell(row=r, column=sum_col, value=f'=SUM({d_letter}{r}:{j_letter}{r})')
+        ws.cell(row=r, column=dup_col, value=f'={sum_letter}{r}')
+        # MAQ / Expected / Available تتكتب يدوي كل أسبوع — تفضل فاضية عمدًا
+        ws.cell(row=r, column=order_col,
+                value=f'=({dup_letter}{r})-({avail_letter}{r}-{maq_letter}{r})')
+        ws.cell(row=r, column=next_col,
+                value=f'={order_letter}{r}+{avail_letter}{r}-{dup_letter}{r}')
+
+    ws.column_dimensions['A'].width = 44
+    ws.column_dimensions['B'].width = 8.5
+    ws.column_dimensions['C'].width = 13
+    for col in range(4, 4 + len(STATION_ORDER)):
+        ws.column_dimensions[get_column_letter(col)].width = 17
+    ws.column_dimensions[get_column_letter(sum_col)].width = 32
+    ws.column_dimensions[get_column_letter(dup_col)].width = 27
+    ws.column_dimensions[get_column_letter(maq_col)].width = 27
+    ws.column_dimensions[get_column_letter(exp_col)].width = 31
+    ws.column_dimensions[get_column_letter(avail_col)].width = 21
+    ws.column_dimensions[get_column_letter(order_col)].width = 21
+    ws.column_dimensions[get_column_letter(next_col)].width = 32
+    ws.freeze_panes = 'A5'
+
+    return wb, {
+        'sum_col': sum_col, 'dup_col': dup_col, 'maq_col': maq_col, 'exp_col': exp_col,
+        'avail_col': avail_col, 'order_col': order_col, 'next_col': next_col,
+    }
+
+
+def _add_station_tab(wb, station_key, file_storage):
+    """بيضيف تاب لمحطة بنفس التنسيق الكامل (A:E)، باستخدام نفس منطق extract-sheet-range."""
+    file_storage.seek(0)
+    src_wb = openpyxl.load_workbook(file_storage, data_only=True)
+    sheet_name = STATION_SHEET_MAP[station_key]
+    if sheet_name not in src_wb.sheetnames:
+        return None
+    src_ws = src_wb[sheet_name]
+    out_ws = wb.create_sheet(title=STATION_TAB_NAMES[station_key])
+
+    COLS = 5
+    for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row, min_col=1, max_col=COLS):
+        for cell in row:
+            new_cell = out_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            if cell.has_style:
+                new_cell.font = copy(cell.font)
+                new_cell.fill = copy(cell.fill)
+                new_cell.border = copy(cell.border)
+                new_cell.alignment = copy(cell.alignment)
+                new_cell.number_format = cell.number_format
+    for col_letter in ['A', 'B', 'C', 'D', 'E']:
+        if col_letter in src_ws.column_dimensions:
+            out_ws.column_dimensions[col_letter].width = src_ws.column_dimensions[col_letter].width
+    for merged_range in src_ws.merged_cells.ranges:
+        if merged_range.max_col <= COLS:
+            out_ws.merge_cells(str(merged_range))
+    return out_ws
+
+
+@app.route('/api/mega-purchasing', methods=['POST'])
+def mega_purchasing():
+    missing = [k for k in STATION_ORDER if k not in request.files]
+    if missing:
+        return jsonify({'error': f'محطات ناقصة: {", ".join(missing)}'}), 400
+
+    try:
+        station_data = {}
+        for key in STATION_ORDER:
+            _, rows = _read_station_rows(request.files[key], STATION_SHEET_MAP[key])
+            station_data[key] = rows
+
+        # ===== النسخة الكاملة (كل حاجة ظاهرة) =====
+        wb_full, cols = _build_purchasing_workbook(station_data)
+        for key in STATION_ORDER:
+            request.files[key].seek(0)
+            _add_station_tab(wb_full, key, request.files[key])
+
+        # ===== نسخة المطبخ (التابات والأعمدة التفصيلية مخفية) =====
+        wb_kitchen, _ = _build_purchasing_workbook(station_data)
+        for key in STATION_ORDER:
+            request.files[key].seek(0)
+            ws_station = _add_station_tab(wb_kitchen, key, request.files[key])
+            if ws_station is not None:
+                ws_station.sheet_state = 'hidden'
+        kitchen_ws = wb_kitchen['Purchasing']
+        hide_from = 4  # D
+        hide_to = cols['sum_col']  # K (آخر عمود تفصيلي قبل الفاصل)
+        for col in range(hide_from, hide_to + 1):
+            kitchen_ws.column_dimensions[get_column_letter(col)].hidden = True
+
+        buf_full = io.BytesIO()
+        wb_full.save(buf_full)
+        buf_full.seek(0)
+        buf_kitchen = io.BytesIO()
+        wb_kitchen.save(buf_kitchen)
+        buf_kitchen.seek(0)
+
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            today = datetime.now().strftime('%Y-%m-%d')
+            zf.writestr(f'Mega_Purchasing_Full_{today}.xlsx', buf_full.getvalue())
+            zf.writestr(f'Mega_Purchasing_Kitchen_{today}.xlsx', buf_kitchen.getvalue())
+        zip_buf.seek(0)
+        return send_file(zip_buf, as_attachment=True, download_name=f'Mega_Purchasing_{datetime.now().strftime("%Y-%m-%d")}.zip',
+                          mimetype='application/zip')
+    except Exception as e:
+        return jsonify({'error': f'حصل خطأ في التجميع: {e}'}), 500
 
 
 @app.route('/api/extract-sheet-range', methods=['POST'])
