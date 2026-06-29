@@ -306,17 +306,21 @@ def report():
 def finalize():
     """Builds the final comparison Excel for a given month (e.g. ?month=2026-04)."""
     month = request.args.get('month')  # 'YYYY-MM'
-    sb = get_client()
-    q = sb.table('daily_items').select('*').order('item_date')
-    if month:
-        q = q.gte('item_date', f'{month}-01').lt('item_date', _next_month(month))
-    res = execute_with_retry(q)
-    rows = res.data
+    try:
+        sb = get_client()
+        q = sb.table('daily_items').select('*').order('item_date')
+        if month:
+            q = q.gte('item_date', f'{month}-01').lt('item_date', _next_month(month))
+        res = execute_with_retry(q)
+        rows = res.data
 
-    from excel_writer import build_workbook
-    wb_path = build_workbook(rows)
-    return send_file(wb_path, as_attachment=True,
-                      download_name=f"octa_food_report_{month or 'all'}.xlsx")
+        from excel_writer import build_workbook
+        wb_path = build_workbook(rows)
+        return send_file(wb_path, as_attachment=True,
+                          download_name=f"octa_food_report_{month or 'all'}.xlsx")
+    except Exception as e:
+        app.logger.exception('finalize failed for month=%s', month)
+        return jsonify({'error': f'تعذر إنشاء التقرير: {e}'}), 500
 
 
 @app.route('/api/invoices-export', methods=['POST'])
