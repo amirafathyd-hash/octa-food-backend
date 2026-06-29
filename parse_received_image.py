@@ -50,12 +50,26 @@ UNIT_NORMALIZE = {
 VALID_UNITS = {'KG', 'BOX', 'PKT', 'PC', 'TRAY', 'BTL', 'LTR'}
 
 # --- Date extraction: supports BOTH text-month and numeric formats ---
-DATE_RE_TEXT = re.compile(r'(\d{1,2})[\s\-/]+([A-Za-z]{3,9})[\s\-/]+(\d{4})')
-DATE_RE_NUMERIC = re.compile(r'(\d{1,2})[\s\-/.](\d{1,2})[\s\-/.](\d{2,4})')
+# الفواصل بتشمل الشرطة العادية والشرطات الطويلة اللي ممكن الـOCR يرجّعها بدلها (– —)
+SEP = r'[\s\-–—/]+'
+DATE_RE_TEXT = re.compile(r'(\d{1,2})' + SEP + r'([A-Za-z]{3,9})' + SEP + r'(\d{4})')
+DATE_RE_NUMERIC = re.compile(r'(\d{1,2})[\s\-–—/.](\d{1,2})[\s\-–—/.](\d{2,4})')
 MONTH_MAP = {
     'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
     'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
 }
+MONTH_ABBRS = list(MONTH_MAP.keys())
+
+
+def _match_month(token):
+    """بيدّور على اسم الشهر مع تسامح غلطة حرف واحد من الـOCR (مثلاً Mor بدل Mar)."""
+    key = token.lower()[:3]
+    if key in MONTH_MAP:
+        return MONTH_MAP[key]
+    match = process.extractOne(key, MONTH_ABBRS, scorer=fuzz.ratio)
+    if match and match[1] >= 60:  # يسمح بفرق حرف واحد في اسم الشهر المختصر (3 حروف)
+        return MONTH_MAP[match[0]]
+    return None
 
 
 def _extract_date(all_text):
@@ -63,7 +77,7 @@ def _extract_date(all_text):
     m = DATE_RE_TEXT.search(all_text.replace(' ', '-'))
     if m:
         day, mon, year = m.groups()
-        mon_num = MONTH_MAP.get(mon.lower()[:3])
+        mon_num = _match_month(mon)
         if mon_num:
             return f'{int(year):04d}-{mon_num:02d}-{int(day):02d}'
 
