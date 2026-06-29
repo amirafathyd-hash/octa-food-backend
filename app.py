@@ -528,5 +528,22 @@ def delete_user(user_id):
     return jsonify({'ok': True})
 
 
+@app.route('/api/users/<int:user_id>/password', methods=['PUT'])
+def change_user_password(user_id):
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    password = payload.get('password') or ''
+    if len(password) < 4:
+        return jsonify({'error': 'الباسورد لازم يكون 4 حروف/أرقام على الأقل'}), 400
+
+    sb = get_client()
+    execute_with_retry(sb.table('app_users').update({
+        'password_hash': generate_password_hash(password),
+    }).eq('id', user_id))
+    return jsonify({'ok': True})
+
+
 if __name__ == '__main__':
     app.run(debug=True, port=8000)
