@@ -1,0 +1,898 @@
+{
+ "breakfast": {
+  "Foul": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "O17",
+   "portion_g": 1.0,
+   "arabic_name": "Foul - فول",
+   "mode": "ingredients"
+  },
+  "Egg and Cheese Sandwich": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Egg and Cheese Sandwich - ساندوتش بيض وجبنة",
+   "mode": "ingredients"
+  },
+  "Croissant Spinach and Cheese ": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Croissant Spinach and Cheese - كروسوان سبانخ وجبنة",
+   "mode": "ingredients"
+  },
+  "Club Sandwich": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S14",
+   "portion_g": 1.0,
+   "arabic_name": "Club Sandwich - ساندوتش كلوب",
+   "mode": "ingredients"
+  },
+  "Greek Yogurt with Oats": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S11",
+   "portion_g": 1.0,
+   "arabic_name": "Greek Yogurt with Oats - زبادي يوناني بالشوفان",
+   "mode": "ingredients"
+  },
+  "Croissant Turkey ": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Croissant Turkey - كروسوان ديك رومي",
+   "mode": "ingredients"
+  },
+  "Tuna Sandwich": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Tuna Sandwich - ساندوتش تونة",
+   "mode": "ingredients"
+  },
+  "Ta'teema": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Ta'teema - تعتيمة",
+   "mode": "ingredients"
+  },
+  "Oatmeal Egg Pie": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Oatmeal Egg Pie - فطيرة بيض بالشوفان",
+   "mode": "ingredients"
+  },
+  "Omelette Vegetable and Mushroom": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Omelette Vegetable and Mushroom - أومليت خضار ومشروم",
+   "mode": "ingredients"
+  },
+  "Shakshuka Sandwich": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Shakshuka Sandwich - ساندوتش شكشوكة",
+   "mode": "ingredients"
+  },
+  "Masoob": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Masoob - معصوب",
+   "mode": "ingredients"
+  },
+  "Croissant Cheddar Cheese": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Croissant Cheddar Cheese - كروسوان جبنة شيدر",
+   "mode": "ingredients"
+  },
+  "Halloumi Sandwich": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Halloumi Sandwich - ساندوتش حلوم",
+   "mode": "ingredients"
+  },
+  "Omelette Vegetable and Mush (2)": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Omelette Vegetable and Mushroom - أومليت خضار ومشروم",
+   "mode": "ingredients"
+  },
+  "Turkey & Cranberry Sandwich": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Turkey & Cranberry Sandwich - ساندوتش ديك رومي وتوت أحمر",
+   "mode": "ingredients"
+  },
+  "Boiled Egg Sandwich ": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Boiled Egg Sandwich - ساندوتش بيض مسلوق",
+   "mode": "ingredients"
+  },
+  "Croissant Feta Cheese and Veget": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Croissant Feta Cheese and Vegetables - كروسوان جبنة فيتا وخضار",
+   "mode": "ingredients"
+  },
+  "Chicken Club Sandwich": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Chicken Club Sandwich - ساندوتش كلوب دجاج",
+   "mode": "ingredients"
+  },
+  "Pancake": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Pancake - بان كيك",
+   "mode": "ingredients"
+  },
+  "Croissant Chocolate ": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Croissant Chocolate - كروسوان شوكولاتة",
+   "mode": "ingredients"
+  },
+  "Chicken Club Sandwich (2)": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Chicken Club Sandwich - ساندوتش كلوب دجاج",
+   "mode": "ingredients"
+  },
+  "Halloumi Sandwich (2)": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Halloumi Sandwich - ساندوتش حلوم",
+   "mode": "ingredients"
+  },
+  "Egg and Cheese Sandwich (2)": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Egg and Cheese Sandwich - ساندوتش بيض وجبنة",
+   "mode": "ingredients"
+  },
+  "Hummus": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Hummus - حمص",
+   "mode": "ingredients"
+  },
+  "Omelette Vegetable and Mush (3)": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Omelette Vegetable and Mushroom - أومليت خضار ومشروم",
+   "mode": "ingredients"
+  },
+  "Club Sandwich (2)": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S14",
+   "portion_g": 1.0,
+   "arabic_name": "Club Sandwich - ساندوتش كلوب",
+   "mode": "ingredients"
+  },
+  "Areekah": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Areekah - عريكة",
+   "mode": "ingredients"
+  },
+  "Croissant Scrambled Egg ": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Croissant Scrambled Egg - كروسوان بيض مخفوق",
+   "mode": "ingredients"
+  },
+  "Chicken Club Sandwich (3)": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Chicken Club Sandwich - ساندوتش كلوب دجاج",
+   "mode": "ingredients"
+  },
+  "Sakshuka Turkish": {
+   "file": "data/Tokyo_Breakfast.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Sakshuka Turkish - شكشوكة تركية",
+   "mode": "ingredients"
+  }
+ },
+ "dessert": {
+  "Zatar Pie": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "فطيرة الزعتر",
+   "mode": "ingredients"
+  },
+  "Laham Pie": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "فطيرة لحمة و جبنة",
+   "mode": "ingredients"
+  },
+  "Labneh Pie": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "مناقيش لبنة بالخضار",
+   "mode": "ingredients"
+  },
+  "Rocky Road": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "روكي رود",
+   "mode": "ingredients"
+  },
+  "Basbusa": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "بسبوسة",
+   "mode": "ingredients"
+  },
+  "Blueberry Cheese Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "تشيز كيك التوت الأزرق",
+   "mode": "ingredients"
+  },
+  "Mixed Nuts": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Mixed Nuts - مكسرات مشكلة",
+   "mode": "ingredients"
+  },
+  "Raspberry Chooclate Cheese Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "كيك الشكولاته",
+   "mode": "ingredients"
+  },
+  "Brownie ": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "براونى بايتس",
+   "mode": "ingredients"
+  },
+  "Baboffee Pie": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "بانوفى باى",
+   "mode": "ingredients"
+  },
+  "Sabestien": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "سان سباستيان تشيز كيك",
+   "mode": "ingredients"
+  },
+  "Mixed Nuts (2)": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Mixed Nuts - مكسرات مشكلة",
+   "mode": "ingredients"
+  },
+  "Labneh Pie (2)": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "مناقيش لبنة بالخضار",
+   "mode": "ingredients"
+  },
+  "Laham Pie (2)": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "فطيرة لحمة و جبنة",
+   "mode": "ingredients"
+  },
+  "Zatar Pie (2)": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "فطيرة الزعتر",
+   "mode": "ingredients"
+  },
+  "Lemon Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "كيك إنجليزى بالليمون",
+   "mode": "ingredients"
+  },
+  "Cookies": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "كوكيز",
+   "mode": "ingredients"
+  },
+  "Saffron Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S12",
+   "portion_g": 1.0,
+   "arabic_name": "كيك الزعفران",
+   "mode": "ingredients"
+  },
+  "Mixed Nuts (3)": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Mixed Nuts - مكسرات مشكلة",
+   "mode": "ingredients"
+  },
+  "Lotuse Cheese Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Lotuse Cheese Cake - تشيز كيك اللوتس",
+   "mode": "ingredients"
+  },
+  "Oat Bar": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Oat Bar - بار الشوفان",
+   "mode": "ingredients"
+  },
+  "Almond Chooclate Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "English Chooclate Cake - كيك بالشوكولاته و اللوز",
+   "mode": "ingredients"
+  },
+  "Mixed Nuts (4)": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Mixed Nuts - مكسرات مشكلة",
+   "mode": "ingredients"
+  },
+  "Mango Cheese Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "تشيز كيك مانجو",
+   "mode": "ingredients"
+  },
+  "Classic Cheese Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "تشيز كيك كلاسيك",
+   "mode": "ingredients"
+  },
+  "Muffin": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "مافن",
+   "mode": "ingredients"
+  },
+  "Mixed Nuts (5)": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Mixed Nuts - مكسرات مشكلة",
+   "mode": "ingredients"
+  },
+  "Orange Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "كيكة البرتقال",
+   "mode": "ingredients"
+  },
+  "Dukhun Cake": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "كيكة الدخن",
+   "mode": "ingredients"
+  },
+  "Saffron Cake (2)": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S12",
+   "portion_g": 1.0,
+   "arabic_name": "كيكة الزعفران",
+   "mode": "ingredients"
+  },
+  "Mixed Nuts (6)": {
+   "file": "data/Tokyo_Dessert_Ordering.xlsm",
+   "input_cell": "S13",
+   "portion_g": 1.0,
+   "arabic_name": "Mixed Nuts - مكسرات مشكلة",
+   "mode": "ingredients"
+  }
+ },
+ "rice": {
+  "رز أبيض (2)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "White Rice  - الرز الأبيض",
+   "mode": "batch_13"
+  },
+  " رز بريانى-رز زعفران (2)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Biryani - Saffron Rice  - رز بريانى-رز زعفران ",
+   "mode": "batch_13"
+  },
+  "رز صيادية": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Sayadieh Rice - رز صيادية",
+   "mode": "batch_13"
+  },
+  "رز كبسه": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Kabsa Rice  - رز كبسة",
+   "mode": "batch_13"
+  },
+  "رز  المندى": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Mandi Rice  - رز  المندى",
+   "mode": "batch_13"
+  },
+  "رز أبيض (3)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "White Rice  - الرز الأبيض",
+   "mode": "batch_13"
+  },
+  " رز بريانى-رز زعفران (3)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Biryani - Saffron Rice  - رز بريانى-رز زعفران ",
+   "mode": "batch_13"
+  },
+  "رز جولوف": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Jollof Rice — رز جولوف",
+   "mode": "batch_13"
+  },
+  "رز الزربيان": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Zourbian Rice  - رز الزربيان",
+   "mode": "batch_13"
+  },
+  "رز أبيض": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "White Rice  - الرز الأبيض",
+   "mode": "batch_13"
+  },
+  " رز بريانى-رز زعفران": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Biryani - Saffron Rice  - رز بريانى-رز زعفران ",
+   "mode": "batch_13"
+  },
+  "رز بالمكسرات": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Rice with Nuts - رز بالمكسرات ",
+   "mode": "batch_13"
+  },
+  "رز السليق": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Saleq Rice  - رز السليق",
+   "mode": "batch_13"
+  },
+  "رز  المندى (2)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Mandi Rice  - رز  المندى",
+   "mode": "batch_13"
+  },
+  "رز أبيض (4)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "White Rice  - الرز الأبيض",
+   "mode": "batch_13"
+  },
+  "رز مصرى": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Egyptian Rice  - الرز المصرى",
+   "mode": "batch_13"
+  },
+  " رز بريانى-رز زعفران (4)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Biryani - Saffron Rice  - رز بريانى-رز زعفران ",
+   "mode": "batch_13"
+  },
+  "رز المقلوبة": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Maklouba Rice  - الرز المقلوبة",
+   "mode": "batch_13"
+  },
+  "رز أبيض (5)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "White Rice  - الرز الأبيض",
+   "mode": "batch_13"
+  },
+  "رز مصرى (2)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Egyptian Rice  - الرز المصرى",
+   "mode": "batch_13"
+  },
+  " رز بريانى-رز زعفران (5)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Biryani - Saffron Rice  - رز بريانى-رز زعفران ",
+   "mode": "batch_13"
+  },
+  "رز بالخضار الاربعاء": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Vegetables Rice (1) - رز بالخضار",
+   "mode": "batch_13"
+  },
+  "رز مشكل": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Mix Rice - رز مشكل",
+   "mode": "batch_13"
+  },
+  "رز  البخارى ": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Boukhary Rice  - رز  البخارى",
+   "mode": "batch_13"
+  },
+  "رز أبيض (6)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "White Rice  - الرز الأبيض",
+   "mode": "batch_13"
+  },
+  "رز مكسيكي": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Mexican Rice - رز مكسيكي",
+   "mode": "batch_13"
+  },
+  "رز بالخضار الخميس": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Vegetables Rice   - رز بالخضار ",
+   "mode": "batch_13"
+  },
+  "رز صيادية (2)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Sayadieh Rice - رز صيادية",
+   "mode": "batch_13"
+  },
+  "رز السليق (2)": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Saleq Rice  - رز السليق",
+   "mode": "batch_13"
+  },
+  "رز الكابلى": {
+   "file": "data/Rice_Ordering_Sheet.xlsm",
+   "input_cell": "Z1",
+   "portion_g": 1.0,
+   "arabic_name": "Kabli Rice  - رز الكابلى",
+   "mode": "batch_13"
+  }
+ },
+ "salads": {
+  "BEETROOT SALAD — سلطة الشمندر": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H4",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "ITALIAN SALAD — سلطة إيطالية": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H5",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "MASHROOM SALAD — سلطة الجرجير بالمشروم": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H6",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "SOMBRERO SALAD — سلطة السيمبريرو": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H7",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "CEASAR SALAD — سلطة السيزر": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H8",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "FETA DATE SALAD — سلطة التمر": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H9",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "TROPICAL QINOA SALAD — سلطة الكينوا": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H10",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "TANGO SALAD — سلطة التانغو": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H11",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "MAXICAN SALAD — سلطة مكسيكية": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H12",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "ROCKET SALAD — سلطة الجرجير بخل البلسمك": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H13",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "KALE SALAD — سلطة الكيل": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H14",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "VEG & FETA CHEESE SALAD — سلطة الخضار بالفيتا": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H15",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "Fruit Salad  — سلطة الفواكه": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H16",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "Red Apple snack — تفاح أحمرسناك": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H17",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "Green Apple — تفاح أخضر": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H18",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  },
+  "Banana — موز": {
+   "file": "data/Salads_Order_Costing.xlsm",
+   "input_cell": "H19",
+   "input_sheet": "User",
+   "portion_g": 1.0,
+   "mode": "salad_table"
+  }
+ },
+ "sauce": {
+  "Changezi Chicken": [
+   {
+    "pct": 0.3,
+    "label": "دجاج تشانجيزي"
+   }
+  ],
+  "Chicken Mushroom": [
+   {
+    "pct": 0.3,
+    "label": "دجاج بالفطر"
+   }
+  ],
+  "Butter Chicken": [
+   {
+    "pct": 0.3,
+    "label": "دجاج هندي بالزبده"
+   }
+  ],
+  "Ginger Chicken": [
+   {
+    "pct": 0.3,
+    "label": "دجاج بالزنجبيل"
+   }
+  ],
+  "Chinese Chicken": [
+   {
+    "pct": 0.3,
+    "label": "دجاج صيني"
+   }
+  ],
+  "Curry Chicken": [
+   {
+    "pct": 0.3,
+    "label": "دجاج بالكاري"
+   }
+  ],
+  "Chicken Steak Sauce": [
+   {
+    "pct": 0.3,
+    "label": "ستيك دجاج"
+   }
+  ],
+  "Pan Fried Fish": [
+   {
+    "pct": 0.3,
+    "label": "بان فرايد فيش"
+   }
+  ],
+  "Coconut Chicken": [
+   {
+    "pct": 0.3,
+    "label": "دجاج بجوز الهند"
+   }
+  ],
+  "Meat with Bamiya": [
+   {
+    "pct": 0.7,
+    "label": "بامية لحم"
+   }
+  ],
+  "Lahm Fasooliya": [
+   {
+    "pct": 0.7,
+    "label": "فاصوليا اللحم"
+   }
+  ],
+  "Chicken Molokeya": [
+   {
+    "pct": 0.7,
+    "label": "دجاج ملوخية"
+   }
+  ],
+  "Salmon with cream": [
+   {
+    "pct": 0.3,
+    "label": "سالمون بالكريمة"
+   }
+  ],
+  "Daoud Basha": [
+   {
+    "pct": 0.4,
+    "label": "داود باشا"
+   }
+  ],
+  "French Meatball": [
+   {
+    "pct": 0.3,
+    "label": "كرات اللحم الفرانسية"
+   }
+  ],
+  "Kebab Hindi": [
+   {
+    "pct": 0.4,
+    "label": "كباب الهندي"
+   }
+  ],
+  "Meat Kebab": [
+   {
+    "pct": 0.05,
+    "label": "كباب اللحم أعلى (الصوص العلوي)"
+   },
+   {
+    "pct": 0.4,
+    "label": "كباب اللحم أسفل (الصوص السفلي)"
+   }
+  ],
+  "Pink Chicken": [
+   {
+    "pct": 0.3,
+    "label": "كريمة الطماطم"
+   }
+  ],
+  "Singapore Chicken": [
+   {
+    "pct": 0.3,
+    "label": "دجاج سنغرفوري"
+   }
+  ],
+  "Fish with Shabat and Lemon": [
+   {
+    "pct": 0.15,
+    "label": "سمك بالشبت والليمون"
+   }
+  ],
+  "Moussaka Meat": [
+   {
+    "pct": 0.3,
+    "label": "مصقعة لحم"
+   }
+  ]
+ }
+}
