@@ -768,41 +768,98 @@ def _read_vegetable_rows(file_storage, sheet_name):
 
 
 def _build_vegetables_workbook(station_vegetable_data):
-    """station_vegetable_data: {station_key: [rows]} زي _read_vegetable_rows.
-    بيرجّع workbook فيه تاب لكل محطة (الأصناف الخضروات بتاعتها بس)، + تاب أخير
-    اسمه 'All Vegetables' فيه كل الخضروات من كل المحطات مجمّعة مع بعض."""
-    headers = ['ITEMS', 'Category', 'Daily Weight', 'Daily Order', 'Order Unit']
+    """station_vegetable_data: {station_key: [rows]}
+    - تاب لكل محطة فيها خضروات فعلاً (المحطات الفاضية بتتشال تلقائي)
+    - تاب أخير 'All Vegetables' مجمّع
+    - ستايل: هيدر بنفسجي، ألوان متبادلة على الصفوف، أعمدة واسعة، RTL"""
+    HEADER_FILL = PatternFill('solid', start_color='6600FF')
+    HEADER_FONT = Font(name='Tahoma', bold=True, color='FFFFFF', size=11)
+    HEADER_ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    EVEN_FILL = PatternFill('solid', start_color='F2EEFF')
+    ODD_FILL  = PatternFill('solid', start_color='FFFFFF')
+    DATA_FONT = Font(name='Tahoma', size=11)
+    NUM_FONT  = Font(name='Tahoma', size=11, bold=True)
+    CENTER    = Alignment(horizontal='center', vertical='center')
+    RIGHT     = Alignment(horizontal='right',  vertical='center')
+
+    from openpyxl.styles import Border, Side
+    THIN = Side(style='thin', color='D0C8F0')
+    BOX  = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+
+    COL_WIDTHS_NORMAL = [48, 14, 16, 14, 14]  # A:E (بدون عمود المحطة)
+    COL_WIDTHS_ALL    = [18, 48, 14, 16, 14, 14]  # A:F (مع عمود المحطة)
+
+    HEADERS_NORMAL = ['ITEMS', 'Category', 'Daily Weight', 'Daily Order', 'Order Unit']
+    HEADERS_ALL    = ['Station', 'ITEMS', 'Category', 'Daily Weight', 'Daily Order', 'Order Unit']
+
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
     def _write_sheet(title, rows, with_station_col=False):
+        if not rows and not with_station_col:
+            return  # لا تعمل تاب للمحطات الفاضية
         ws = wb.create_sheet(title=title[:31])
-        cols = (['Station'] + headers) if with_station_col else headers
-        for c, h in enumerate(cols, start=1):
+        ws.sheet_view.rightToLeft = True
+        ws.row_dimensions[1].height = 24
+
+        headers = HEADERS_ALL if with_station_col else HEADERS_NORMAL
+        widths  = COL_WIDTHS_ALL if with_station_col else COL_WIDTHS_NORMAL
+
+        for c, (h, w) in enumerate(zip(headers, widths), start=1):
             cell = ws.cell(row=1, column=c, value=h)
-            _style_header_cell(cell, size=11)
-        r = 2
-        for row in rows:
+            cell.fill      = HEADER_FILL
+            cell.font      = HEADER_FONT
+            cell.alignment = HEADER_ALIGN
+            cell.border    = BOX
+            ws.column_dimensions[get_column_letter(c)].width = w
+
+        for i, row in enumerate(rows):
+            r = i + 2
+            fill = EVEN_FILL if i % 2 == 0 else ODD_FILL
             c = 1
             if with_station_col:
-                ws.cell(row=r, column=c, value=row.get('_station_label', '')); c += 1
-            ws.cell(row=r, column=c, value=row['name']); c += 1
-            ws.cell(row=r, column=c, value=row['category']); c += 1
-            ws.cell(row=r, column=c, value=row['daily_weight']); c += 1
-            ws.cell(row=r, column=c, value=row['daily_order']); c += 1
-            ws.cell(row=r, column=c, value=row['order_unit']); c += 1
-            r += 1
-        ws.column_dimensions[get_column_letter(2 if with_station_col else 1)].width = 38
-        return ws
+                cell = ws.cell(row=r, column=c, value=row.get('_station_label', ''))
+                cell.fill = fill; cell.font = DATA_FONT; cell.border = BOX
+                cell.alignment = CENTER
+                c += 1
+            # ITEMS
+            cell = ws.cell(row=r, column=c, value=row['name'])
+            cell.fill = fill; cell.font = DATA_FONT; cell.border = BOX
+            cell.alignment = RIGHT; c += 1
+            # Category
+            cell = ws.cell(row=r, column=c, value=row['category'])
+            cell.fill = fill; cell.font = DATA_FONT; cell.border = BOX
+            cell.alignment = CENTER; c += 1
+            # Daily Weight
+            cell = ws.cell(row=r, column=c, value=row['daily_weight'])
+            cell.fill = fill; cell.font = NUM_FONT; cell.border = BOX
+            cell.alignment = CENTER
+            cell.number_format = '#,##0.00'; c += 1
+            # Daily Order
+            cell = ws.cell(row=r, column=c, value=row['daily_order'])
+            cell.fill = fill; cell.font = NUM_FONT; cell.border = BOX
+            cell.alignment = CENTER
+            cell.number_format = '#,##0.000'; c += 1
+            # Order Unit
+            cell = ws.cell(row=r, column=c, value=row['order_unit'])
+            cell.fill = fill; cell.font = DATA_FONT; cell.border = BOX
+            cell.alignment = CENTER
 
+        ws.freeze_panes = 'A2'
+
+    # تابات المحطات (بس اللي فيها خضروات)
     all_rows = []
     for key in STATION_ORDER:
         rows = station_vegetable_data.get(key, [])
-        _write_sheet(STATION_TAB_NAMES[key], rows)
-        for row in rows:
-            all_rows.append({**row, '_station_label': STATION_LABELS.get(key, key)})
+        if rows:  # تخطي المحطات الفاضية
+            _write_sheet(STATION_TAB_NAMES[key], rows)
+            for row in rows:
+                all_rows.append({**row, '_station_label': STATION_LABELS.get(key, key)})
 
+    # تاب All Vegetables (دايمًا بيتضاف حتى لو فاضي)
     _write_sheet('All Vegetables', all_rows, with_station_col=True)
+
     if not wb.sheetnames:
         wb.create_sheet('فاضي')
     return wb
