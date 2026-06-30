@@ -127,6 +127,40 @@ def _read_block(excel, sheet):
     return rows
 
 
+def _has_batch_table(excel, sheet):
+    """بعض الوجبات (زي السندوتشات) معندهاش جدول الباتشات (B51:J55) خالص —
+    بتتحسب بطريقة أبسط (وزن كل مكوّن = عدد الأوردرات × كمية المكوّن في
+    الوحدة الواحدة، من غير batches خالص). بنتأكد الأول قبل ما نحاول نقرا
+    جدول مش موجود، عشان منرميش خطأ غلط."""
+    val = _read_cell(excel, sheet, 'B51')
+    return val is not None and str(val).strip() != ''
+
+
+def _read_ingredient_list(excel, sheet, max_row=40):
+    """بديل لجدول الباتشات للوجبات اللي مالهاش الجدول ده (زي السندوتشات) —
+    بيرجّع كل صف مكوّن (B..H) بعد ما يكون Z1 اتغيّر، عشان نشوف وزن كل
+    مكوّن للعدد الجديد من الأوردرات. بنوقف عند أول صف فاضي عشان منلقطش
+    أقسام تانية تحت في نفس الشيت (زي مكونات التتبيلة المنفصلة)."""
+    rows = []
+    for r in range(5, max_row + 1):
+        name = _read_cell(excel, sheet, f'B{r}')
+        unit = _read_cell(excel, sheet, f'C{r}')
+        if not name or not str(name).strip():
+            if rows:
+                break  # خلصنا أول قسم حقيقي، نوقف هنا
+            continue
+        if not unit:
+            # صف عنوان قسم جديد (زي "Base Recipe (10kg Yield)") مش مكوّن حقيقي
+            if rows:
+                break
+            continue
+        amount = _read_cell(excel, sheet, f'H{r}') or _read_cell(excel, sheet, f'G{r}')
+        if amount is None:
+            continue
+        rows.append({'label': str(name).strip(), 'unit': unit, 'amount': amount})
+    return rows
+
+
 def calculate_meal(meal_name, order_count):
     """بياخد اسم وجبة وعدد أوردرات، ويرجّع جدول الباتشات المحسوب بناءً على
     صيغ الإكسل الحقيقية لنفس الوجبة دي."""
@@ -141,17 +175,36 @@ def calculate_meal(meal_name, order_count):
     excel = _get_excel()
     z1_addr = f"'{meal_name}'!Z1"
 
-    # مهم جدًا: لازم نقرا كل الخلايا النهائية اللي محتاجينها الأول (قبل ما نغيّر
-    # Z1)، عشان pycel يبني شجرة الاعتماديات الكاملة من Z1 لحدهم. لو غيّرنا Z1
-    # قبل كده، الخلايا اللي لسه ماتقريتش بتفضل شايلة القيمة الأصلية المحفوظة في
-    # الملف (مش بتتحدث) — ده باج حقيقي لاحظناه واتأكدنا منه بالاختبار.
-    target_cells = ['B', 'C', 'D', 'G', 'H', 'I', 'J']
-    for r in range(51, 56):
-        for col in target_cells:
-            excel.evaluate(f"'{meal_name}'!{col}{r}")
-
-    excel.set_value(z1_addr, z1_value)
-    rows = _read_block(excel, meal_name)
+    if _has_batch_table(excel, meal_name):
+        # مهم جدًا: لازم نقرا كل الخلايا النهائية اللي محتاجينها الأول (قبل ما
+        # نغيّر Z1)، عشان pycel يبني شجرة الاعتماديات الكاملة من Z1 لحدهم.
+        target_cells = ['B', 'C', 'D', 'G', 'H', 'I', 'J']
+        for r in range(51, 56):
+            for col in target_cells:
+                excel.evaluate(f"'{meal_name}'!{col}{r}")
+        excel.set_value(z1_addr, z1_value)
+        rows = _read_block(excel, meal_name)
+        mode = 'batches'
+    else:
+        # مفيش جدول باتشات للوجبة دي (زي السندوتشات) — بنحسب قايمة المكونات
+        # مباشرة بدل منه.
+        for r in range(5, 40):
+            for col in ['B', 'C', 'G', 'H']:
+                excel.evaluate(f"'{meal_name}'!{col}{r}")
+        excel.evaluate(z1_addr)
+        excel.set_value(z1_addr, z1_value)
+        ingredients = _read_ingredient_list(excel, meal_name)
+        rows = [{
+            'label': ing['label'],
+            'conversion_factor': None,
+            'final_kg': ing['amount'],
+            'protein_label': '',
+            'protein_conversion_factor': None,
+            'uncooked_protein': None,
+            'cooked_protein': None,
+            'unit': ing['unit'],
+        } for ing in ingredients]
+        mode = 'ingredients'
 
     return {
         'meal_name': meal_name,
@@ -159,6 +212,7 @@ def calculate_meal(meal_name, order_count):
         'order_count': order_count,
         'portion_g': portion_g,
         'z1_calculated': z1_value,
+        'mode': mode,
         'rows': rows,
     }
 
