@@ -52,7 +52,13 @@ VALID_UNITS = {'KG', 'BOX', 'PKT', 'PC', 'TRAY', 'BTL', 'LTR'}
 # --- Date extraction: supports BOTH text-month and numeric formats ---
 # الفواصل بتشمل الشرطة العادية والشرطات الطويلة اللي ممكن الـOCR يرجّعها بدلها (– —)
 SEP = r'[\s\-–—/]+'
-DATE_RE_TEXT = re.compile(r'(\d{1,2})' + SEP + r'([A-Za-z]{3,9})' + SEP + r'(\d{4})')
+# ملحوظة مهمة: OCR.space أحيانًا بيقرا حروف "Apr" كحروف سيريلية (روسية) شبه
+# مطابقة بصريًا (زي "Арт" بدل "Apr") خصوصًا مع خطوط معينة أو صور خط يد. لو
+# قصرنا الـregex على [A-Za-z] بس، الكلمة دي مش هتتطابق خالص وهيضيع التاريخ كله.
+# فبنوسّع الـregex يقبل أي حروف (مش أرقام ولا فواصل)، وبعدين نحوّل الحروف
+# السيريلية الشبيهة بصريًا للاتيني قبل ما نقارن باسم الشهر.
+MONTH_TOKEN_RE = r'([^\d\s\-–—/]{3,9})'
+DATE_RE_TEXT = re.compile(r'(\d{1,2})' + SEP + MONTH_TOKEN_RE + SEP + r'(\d{4})')
 DATE_RE_NUMERIC = re.compile(r'(\d{1,2})[\s\-–—/.](\d{1,2})[\s\-–—/.](\d{2,4})')
 MONTH_MAP = {
     'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
@@ -60,10 +66,21 @@ MONTH_MAP = {
 }
 MONTH_ABBRS = list(MONTH_MAP.keys())
 
+# خريطة الحروف السيريلية (كبيرة وصغيرة) اللي شكلها مطابق بصريًا لحروف لاتينية،
+# وبتظهر غلط في نتائج OCR لأسماء الشهور الإنجليزية أحيانًا.
+CYRILLIC_TO_LATIN = str.maketrans({
+    'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H', 'О': 'O',
+    'Р': 'P', 'С': 'C', 'Т': 'T', 'У': 'Y', 'Х': 'X',
+    'а': 'a', 'в': 'b', 'е': 'e', 'к': 'k', 'м': 'm', 'н': 'h', 'о': 'o',
+    'р': 'p', 'с': 'c', 'т': 't', 'у': 'y', 'х': 'x',
+})
+
 
 def _match_month(token):
-    """بيدّور على اسم الشهر مع تسامح غلطة حرف واحد من الـOCR (مثلاً Mor بدل Mar)."""
-    key = token.lower()[:3]
+    """بيدّور على اسم الشهر مع تسامح غلطة حرف واحد من الـOCR (مثلاً Mor بدل Mar)،
+    وكمان بيحوّل أي حروف سيريلية شبيهة بصريًا للاتيني الأول."""
+    normalized = token.translate(CYRILLIC_TO_LATIN)
+    key = normalized.lower()[:3]
     if key in MONTH_MAP:
         return MONTH_MAP[key]
     match = process.extractOne(key, MONTH_ABBRS, scorer=fuzz.ratio)
