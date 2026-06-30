@@ -733,6 +733,70 @@ def _add_station_tab(wb, station_key, file_storage):
     return out_ws
 
 
+def _add_station_tab_daily(wb, station_key, file_storage):
+    """زي _add_station_tab بالظبط، بس بترجع أعمدة A:D بس (من غير الوزن
+    الأسبوعي في E)، وبتشيل أي صف يكون الوزن اليومي بتاعه (عمود D) صفر رقمي
+    بالظبط — صفوف العناوين والفئات (اللي عمود D فيها فاضي) بتفضل زي ما هي."""
+    file_storage.seek(0)
+    src_wb = openpyxl.load_workbook(file_storage, data_only=True)
+    sheet_name = STATION_SHEET_MAP[station_key]
+    if sheet_name not in src_wb.sheetnames:
+        return None
+    src_ws = src_wb[sheet_name]
+    out_ws = wb.create_sheet(title=STATION_TAB_NAMES[station_key])
+
+    COLS = 4
+    out_row = 1
+    for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row, min_col=1, max_col=COLS):
+        d_value = row[3].value if len(row) > 3 else None
+        if isinstance(d_value, (int, float)) and not isinstance(d_value, bool) and d_value == 0:
+            continue  # الصف ده وزنه اليومي صفر بالظبط — نتخطاه بالكامل
+        for cell in row:
+            new_cell = out_ws.cell(row=out_row, column=cell.column, value=cell.value)
+            if cell.has_style:
+                new_cell.font = copy(cell.font)
+                new_cell.fill = copy(cell.fill)
+                new_cell.border = copy(cell.border)
+                new_cell.alignment = copy(cell.alignment)
+                new_cell.number_format = cell.number_format
+        out_row += 1
+
+    for col_letter in ['A', 'B', 'C', 'D']:
+        if col_letter in src_ws.column_dimensions:
+            out_ws.column_dimensions[col_letter].width = src_ws.column_dimensions[col_letter].width
+    return out_ws
+
+
+@app.route('/api/daily-ordering', methods=['POST'])
+def daily_ordering():
+    """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع ملف إكسل
+    واحد فيه تاب لكل محطة بأعمدة A:D بس (من غير عمود الوزن الأسبوعي)، وأي
+    صف وزنه اليومي صفر بيتشال تلقائيًا."""
+    missing = [k for k in STATION_ORDER if k not in request.files]
+    if missing:
+        return jsonify({'error': f'محطات ناقصة: {", ".join(missing)}'}), 400
+
+    try:
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        for key in STATION_ORDER:
+            request.files[key].seek(0)
+            _add_station_tab_daily(wb, key, request.files[key])
+
+        if not wb.sheetnames:
+            wb.create_sheet('فاضي')
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return send_file(buf, as_attachment=True,
+                          download_name=f'Daily_Ordering_{datetime.now().strftime("%Y-%m-%d")}.xlsx',
+                          mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:
+        app.logger.exception('daily_ordering failed')
+        return jsonify({'error': f'حصل خطأ في التجميع: {e}'}), 500
+
+
 @app.route('/api/mega-purchasing', methods=['POST'])
 def mega_purchasing():
     missing = [k for k in STATION_ORDER if k not in request.files]
