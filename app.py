@@ -605,7 +605,25 @@ def _style_header_cell(cell, size=11, bold=True):
 
 def _build_purchasing_workbook(station_data):
     """station_data: {station_key: {ingredient: {'unit','category','weekly'}}}
-    بيرجّع openpyxl.Workbook فيه شيت Purchasing + شيت لكل محطة (A:E، نفس التنسيق)."""
+    بيرجّع openpyxl.Workbook فيه شيت Purchasing منسّق بشكل احترافي."""
+    from openpyxl.styles import Border, Side, GradientFill
+    THIN = Side(style='thin', color='D0D0D0')
+    BOX  = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+
+    DARK_FILL  = PatternFill('solid', start_color='1A1A2E')   # هيدر داكن
+    STAT_FILL  = PatternFill('solid', start_color='6600FF')   # محطات بنفسجي
+    SUM_FILL   = PatternFill('solid', start_color='C04000')   # مجموع احمر
+    EXTRA_FILL = PatternFill('solid', start_color='2E4057')   # أعمدة إضافية
+    EVEN_FILL  = PatternFill('solid', start_color='F5F3FF')
+    ODD_FILL   = PatternFill('solid', start_color='FFFFFF')
+
+    WHITE_BOLD = Font(name='Calibri', bold=True, color='FFFFFF', size=11)
+    WHITE_SM   = Font(name='Calibri', bold=True, color='FFFFFF', size=10)
+    DATA_FONT  = Font(name='Calibri', size=10)
+    NUM_FONT   = Font(name='Calibri', size=10, bold=True)
+    CENTER     = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    LEFT       = Alignment(horizontal='left',   vertical='center')
+
     all_names = set()
     for data in station_data.values():
         all_names.update(data.keys())
@@ -614,90 +632,129 @@ def _build_purchasing_workbook(station_data):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = 'Purchasing'
+    ws.sheet_view.rightToLeft = False
 
-    # ===== الهيدر =====
-    ws['A3'] = 'Sum of Weekly Weight'
-    for col in range(1, 19):  # A..R
-        _style_header_cell(ws.cell(row=3, column=col), size=18)
+    # ===== الصف الأول: عنوان رئيسي =====
+    ws.merge_cells('A1:R1')
+    ws['A1'] = 'Weekly Purchasing Report'
+    ws['A1'].font = Font(name='Calibri', bold=True, color='FFFFFF', size=14)
+    ws['A1'].fill = DARK_FILL
+    ws['A1'].alignment = CENTER
+    ws.row_dimensions[1].height = 30
+
+    # ===== الصف الثاني: هيدر الأعمدة =====
+    ws.row_dimensions[2].height = 32
+    # A-C: بيانات الصنف
+    for col, txt in [(1,'ITEMS'), (2,'Unit'), (3,'Category')]:
+        c = ws.cell(row=2, column=col, value=txt)
+        c.fill = DARK_FILL; c.font = WHITE_BOLD; c.alignment = CENTER; c.border = BOX
+
+    # D-J: أعمدة المحطات
     for idx, key in enumerate(STATION_ORDER):
-        col = 4 + idx  # D=4
-        ws.cell(row=4, column=col, value=STATION_LABELS[key])
-        _style_header_cell(ws.cell(row=4, column=col), size=18)
-    sum_col = 4 + len(STATION_ORDER)         # K
-    ws.cell(row=4, column=sum_col, value='Sum of Weekly Consumption')
-    _style_header_cell(ws.cell(row=4, column=sum_col), size=18)
+        col = 4 + idx
+        c = ws.cell(row=2, column=col, value=STATION_LABELS[key])
+        c.fill = STAT_FILL; c.font = WHITE_BOLD; c.alignment = CENTER; c.border = BOX
 
-    dup_col = sum_col + 2                     # M (سايبين عمود فاضي زي الأصل)
-    maq_col = dup_col + 1                     # N
-    exp_col = maq_col + 1                     # O
-    avail_col = exp_col + 1                   # P
-    order_col = avail_col + 1                 # Q
-    next_col = order_col + 1                  # R
+    sum_col  = 4 + len(STATION_ORDER)  # K
+    dup_col  = sum_col + 1             # L
+    maq_col  = dup_col + 1             # M
+    exp_col  = maq_col + 1             # N
+    avail_col= exp_col + 1             # O
+    order_col= avail_col + 1           # P
+    next_col = order_col + 1           # Q
 
-    headers_en = {
-        dup_col: 'Weekly Consumtion', maq_col: 'Min. Available Quantity (MAQ )',
-        exp_col: 'Expected available Stock', avail_col: 'Available Stock',
-        order_col: 'Weekly Order', next_col: 'Expected available Stock Next week',
+    # K: مجموع
+    c = ws.cell(row=2, column=sum_col, value='Weekly\nConsumption')
+    c.fill = SUM_FILL; c.font = WHITE_BOLD; c.alignment = CENTER; c.border = BOX
+
+    # L-Q: أعمدة المخزون
+    extra_headers = {
+        dup_col:  'Weekly\nConsumption',
+        maq_col:  'Min. Available\nQty (MAQ)',
+        exp_col:  'Expected\nStock',
+        avail_col:'Available\nStock',
+        order_col:'Weekly\nOrder',
+        next_col: 'Next Week\nExpected Stock',
     }
-    headers_ar = {
-        dup_col: 'الاستهلاك الأسبوعى', maq_col: 'الحد الأدنى للكمية المتاحة (MAQ)',
-        exp_col: 'المخزون المتوقع المتاح', avail_col: 'المخزون المتاح',
-        order_col: 'الطلب الأسبوعي', next_col: 'المخزون المتوقع المتاح للأسبوع القادم',
-    }
-    for col, text in headers_en.items():
-        ws.cell(row=3, column=col, value=text)
-        _style_header_cell(ws.cell(row=3, column=col), size=11)
-    for col, text in headers_ar.items():
-        ws.cell(row=4, column=col, value=text)
-        _style_header_cell(ws.cell(row=4, column=col), size=11)
+    for col, txt in extra_headers.items():
+        c = ws.cell(row=2, column=col, value=txt)
+        c.fill = EXTRA_FILL; c.font = WHITE_SM; c.alignment = CENTER; c.border = BOX
 
-    # ===== صفوف البيانات (من صف 5) =====
-    sum_letter = get_column_letter(sum_col)
-    dup_letter = get_column_letter(dup_col)
-    maq_letter = get_column_letter(maq_col)
-    exp_letter = get_column_letter(exp_col)
+    # ===== صفوف البيانات =====
+    sum_letter   = get_column_letter(sum_col)
+    dup_letter   = get_column_letter(dup_col)
+    maq_letter   = get_column_letter(maq_col)
     avail_letter = get_column_letter(avail_col)
     order_letter = get_column_letter(order_col)
-    d_letter = get_column_letter(4)
-    j_letter = get_column_letter(4 + len(STATION_ORDER) - 1)
+    d_letter     = get_column_letter(4)
+    j_letter     = get_column_letter(4 + len(STATION_ORDER) - 1)
 
     for i, name in enumerate(sorted_names):
-        r = 5 + i
+        r = 3 + i
+        fill = EVEN_FILL if i % 2 == 0 else ODD_FILL
+
         unit, category = '', ''
         for key in STATION_ORDER:
             info = station_data.get(key, {}).get(name)
             if info:
-                unit = unit or info.get('unit') or ''
+                unit     = unit     or info.get('unit')     or ''
                 category = category or info.get('category') or ''
-        ws.cell(row=r, column=1, value=name)
-        ws.cell(row=r, column=2, value=unit)
-        ws.cell(row=r, column=3, value=category)
+
+        for col, val, fnt, aln in [
+            (1, name,     DATA_FONT, LEFT),
+            (2, unit,     DATA_FONT, CENTER),
+            (3, category, DATA_FONT, CENTER),
+        ]:
+            cell = ws.cell(row=r, column=col, value=val)
+            cell.fill = fill; cell.font = fnt; cell.alignment = aln; cell.border = BOX
+
         for idx, key in enumerate(STATION_ORDER):
             col = 4 + idx
             info = station_data.get(key, {}).get(name)
-            if info and info.get('weekly'):
-                ws.cell(row=r, column=col, value=info['weekly'])
-        ws.cell(row=r, column=sum_col, value=f'=SUM({d_letter}{r}:{j_letter}{r})')
-        ws.cell(row=r, column=dup_col, value=f'={sum_letter}{r}')
-        # MAQ / Expected / Available تتكتب يدوي كل أسبوع — تفضل فاضية عمدًا
-        ws.cell(row=r, column=order_col,
-                value=f'=({dup_letter}{r})-({avail_letter}{r}-{maq_letter}{r})')
-        ws.cell(row=r, column=next_col,
-                value=f'={order_letter}{r}+{avail_letter}{r}-{dup_letter}{r}')
+            val  = info['weekly'] if (info and info.get('weekly')) else None
+            cell = ws.cell(row=r, column=col, value=val)
+            cell.fill = fill; cell.font = NUM_FONT if val else DATA_FONT
+            cell.alignment = CENTER; cell.border = BOX
+            if val: cell.number_format = '#,##0.00'
 
-    ws.column_dimensions['A'].width = 44
-    ws.column_dimensions['B'].width = 8.5
-    ws.column_dimensions['C'].width = 13
+        # K: SUM
+        cell = ws.cell(row=r, column=sum_col, value=f'=SUM({d_letter}{r}:{j_letter}{r})')
+        cell.fill = fill; cell.font = NUM_FONT; cell.alignment = CENTER
+        cell.border = BOX; cell.number_format = '#,##0.00'
+
+        # L: duplicate of sum
+        cell = ws.cell(row=r, column=dup_col, value=f'={sum_letter}{r}')
+        cell.fill = fill; cell.font = NUM_FONT; cell.alignment = CENTER
+        cell.border = BOX; cell.number_format = '#,##0.00'
+
+        # M, N, O: يدوي — فاضية
+        for col in [maq_col, exp_col, avail_col]:
+            cell = ws.cell(row=r, column=col)
+            cell.fill = fill; cell.border = BOX
+
+        # P: Weekly Order formula
+        cell = ws.cell(row=r, column=order_col,
+                       value=f'=({dup_letter}{r})-({avail_letter}{r}-{maq_letter}{r})')
+        cell.fill = fill; cell.font = NUM_FONT; cell.alignment = CENTER
+        cell.border = BOX; cell.number_format = '#,##0.00'
+
+        # Q: Next week
+        cell = ws.cell(row=r, column=next_col,
+                       value=f'={order_letter}{r}+{avail_letter}{r}-{dup_letter}{r}')
+        cell.fill = fill; cell.font = NUM_FONT; cell.alignment = CENTER
+        cell.border = BOX; cell.number_format = '#,##0.00'
+
+    # ===== عرض الأعمدة =====
+    ws.column_dimensions['A'].width = 40
+    ws.column_dimensions['B'].width = 8
+    ws.column_dimensions['C'].width = 16
     for col in range(4, 4 + len(STATION_ORDER)):
-        ws.column_dimensions[get_column_letter(col)].width = 17
-    ws.column_dimensions[get_column_letter(sum_col)].width = 32
-    ws.column_dimensions[get_column_letter(dup_col)].width = 27
-    ws.column_dimensions[get_column_letter(maq_col)].width = 27
-    ws.column_dimensions[get_column_letter(exp_col)].width = 31
-    ws.column_dimensions[get_column_letter(avail_col)].width = 21
-    ws.column_dimensions[get_column_letter(order_col)].width = 21
-    ws.column_dimensions[get_column_letter(next_col)].width = 32
-    ws.freeze_panes = 'A5'
+        ws.column_dimensions[get_column_letter(col)].width = 16
+    for col, w in [(sum_col, 20), (dup_col, 20), (maq_col, 18),
+                   (exp_col, 18), (avail_col, 16), (order_col, 16), (next_col, 22)]:
+        ws.column_dimensions[get_column_letter(col)].width = w
+
+    ws.freeze_panes = 'A3'
 
     return wb, {
         'sum_col': sum_col, 'dup_col': dup_col, 'maq_col': maq_col, 'exp_col': exp_col,
