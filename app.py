@@ -1,4 +1,5 @@
 import os
+import requests
 import io
 import re
 import secrets
@@ -733,6 +734,80 @@ def _add_station_tab(wb, station_key, file_storage):
     return out_ws
 
 
+VEGETABLE_CATEGORY_LABELS = {'خضروات', 'خضراوات'}
+
+
+def _read_vegetable_rows(file_storage, sheet_name):
+    """بترجع صفوف الأصناف المصنّفة 'خضروات'/'خضراوات' بس من شيت المحطة،
+    بنفس أعمدة A (الاسم) + B (الفئة) + D (الوزن اليومي) + L (طلب اليوم) +
+    M (وحدة الطلب)، وبتشيل أي صف وزنه اليومي صفر بالظبط (زي باقي Daily Ordering)."""
+    file_storage.seek(0)
+    wb = openpyxl.load_workbook(file_storage, data_only=True)
+    if sheet_name not in wb.sheetnames:
+        return []
+    ws = wb[sheet_name]
+    out = []
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=13, values_only=True):
+        name, category = row[0], row[1]
+        if not name or not str(name).strip():
+            continue
+        if str(name).strip().lower() == 'items':
+            continue
+        if not category or str(category).strip() not in VEGETABLE_CATEGORY_LABELS:
+            continue
+        daily_weight = row[3] if len(row) > 3 else None
+        if isinstance(daily_weight, (int, float)) and not isinstance(daily_weight, bool) and daily_weight == 0:
+            continue
+        daily_order = row[11] if len(row) > 11 else None
+        order_unit = row[12] if len(row) > 12 else None
+        out.append({
+            'name': str(name).strip(), 'category': str(category).strip(),
+            'daily_weight': daily_weight, 'daily_order': daily_order, 'order_unit': order_unit,
+        })
+    return out
+
+
+def _build_vegetables_workbook(station_vegetable_data):
+    """station_vegetable_data: {station_key: [rows]} زي _read_vegetable_rows.
+    بيرجّع workbook فيه تاب لكل محطة (الأصناف الخضروات بتاعتها بس)، + تاب أخير
+    اسمه 'All Vegetables' فيه كل الخضروات من كل المحطات مجمّعة مع بعض."""
+    headers = ['ITEMS', 'Category', 'Daily Weight', 'Daily Order', 'Order Unit']
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    def _write_sheet(title, rows, with_station_col=False):
+        ws = wb.create_sheet(title=title[:31])
+        cols = (['Station'] + headers) if with_station_col else headers
+        for c, h in enumerate(cols, start=1):
+            cell = ws.cell(row=1, column=c, value=h)
+            _style_header_cell(cell, size=11)
+        r = 2
+        for row in rows:
+            c = 1
+            if with_station_col:
+                ws.cell(row=r, column=c, value=row.get('_station_label', '')); c += 1
+            ws.cell(row=r, column=c, value=row['name']); c += 1
+            ws.cell(row=r, column=c, value=row['category']); c += 1
+            ws.cell(row=r, column=c, value=row['daily_weight']); c += 1
+            ws.cell(row=r, column=c, value=row['daily_order']); c += 1
+            ws.cell(row=r, column=c, value=row['order_unit']); c += 1
+            r += 1
+        ws.column_dimensions[get_column_letter(2 if with_station_col else 1)].width = 38
+        return ws
+
+    all_rows = []
+    for key in STATION_ORDER:
+        rows = station_vegetable_data.get(key, [])
+        _write_sheet(STATION_TAB_NAMES[key], rows)
+        for row in rows:
+            all_rows.append({**row, '_station_label': STATION_LABELS.get(key, key)})
+
+    _write_sheet('All Vegetables', all_rows, with_station_col=True)
+    if not wb.sheetnames:
+        wb.create_sheet('فاضي')
+    return wb
+
+
 def _add_station_tab_daily(wb, station_key, file_storage):
     """زي _add_station_tab بالظبط، بس بترجع أعمدة A:D بس (من غير الوزن
     الأسبوعي في E)، وبتشيل أي صف يكون الوزن اليومي بتاعه (عمود D) صفر رقمي
@@ -769,32 +844,75 @@ def _add_station_tab_daily(wb, station_key, file_storage):
 
 @app.route('/api/daily-ordering', methods=['POST'])
 def daily_ordering():
-    """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع ملف إكسل
-    واحد فيه تاب لكل محطة بأعمدة A:D بس (من غير عمود الوزن الأسبوعي)، وأي
-    صف وزنه اليومي صفر بيتشال تلقائيًا."""
+    """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع zip فيه
+    ملفين: Daily_Ordering.xlsx (تاب لكل محطة بأعمدة A:D، أي صف وزنه اليومي
+    صفر بيتشال)، و Vegetables.xlsx (تاب لكل محطة فيه أصناف 'خضروات' بس +
+    تاب أخير 'All Vegetables' مجمّع فيه كل الخضروات من كل المحطات)."""
     missing = [k for k in STATION_ORDER if k not in request.files]
     if missing:
         return jsonify({'error': f'محطات ناقصة: {", ".join(missing)}'}), 400
 
     try:
-        wb = openpyxl.Workbook()
-        wb.remove(wb.active)
+        wb_daily = openpyxl.Workbook()
+        wb_daily.remove(wb_daily.active)
+        vegetable_data = {}
         for key in STATION_ORDER:
             request.files[key].seek(0)
-            _add_station_tab_daily(wb, key, request.files[key])
+            _add_station_tab_daily(wb_daily, key, request.files[key])
+            request.files[key].seek(0)
+            vegetable_data[key] = _read_vegetable_rows(request.files[key], STATION_SHEET_MAP[key])
 
-        if not wb.sheetnames:
-            wb.create_sheet('فاضي')
+        if not wb_daily.sheetnames:
+            wb_daily.create_sheet('فاضي')
 
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        return send_file(buf, as_attachment=True,
-                          download_name=f'Daily_Ordering_{datetime.now().strftime("%Y-%m-%d")}.xlsx',
-                          mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        wb_veg = _build_vegetables_workbook(vegetable_data)
+
+        today = datetime.now().strftime('%Y-%m-%d')
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            buf1 = io.BytesIO(); wb_daily.save(buf1)
+            zf.writestr(f'Daily_Ordering_{today}.xlsx', buf1.getvalue())
+            buf2 = io.BytesIO(); wb_veg.save(buf2)
+            zf.writestr(f'Vegetables_{today}.xlsx', buf2.getvalue())
+
+        zip_buf.seek(0)
+        return send_file(zip_buf, as_attachment=True,
+                          download_name=f'Daily_Ordering_{today}.zip',
+                          mimetype='application/zip')
     except Exception as e:
         app.logger.exception('daily_ordering failed')
         return jsonify({'error': f'حصل خطأ في التجميع: {e}'}), 500
+
+
+@app.route('/api/whatsapp-send', methods=['POST'])
+def whatsapp_send():
+    """بيستقبل صورة من المتصفح ويمررها لسيرفر الواتساب المنفصل (Node.js) عشان
+    يبعتها تلقائي للرقم المتظبط. لو الـenv vars مش متظبطة، بيرجع خطأ واضح."""
+    bot_url = os.environ.get('WHATSAPP_BOT_URL')
+    api_key = os.environ.get('WHATSAPP_BOT_API_KEY')
+    if not bot_url:
+        return jsonify({'error': 'سيرفر الواتساب لسه مش متظبط (WHATSAPP_BOT_URL ناقصة)'}), 503
+
+    if 'image' not in request.files:
+        return jsonify({'error': 'مفيش صورة مبعوتة'}), 400
+
+    try:
+        files = {'image': (request.files['image'].filename or 'card.png',
+                            request.files['image'].stream, 'image/png')}
+        data = {}
+        if request.form.get('number'):
+            data['number'] = request.form['number']
+        if request.form.get('caption'):
+            data['caption'] = request.form['caption']
+        headers = {'x-api-key': api_key} if api_key else {}
+
+        resp = requests.post(f'{bot_url}/send-image', files=files, data=data, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            return jsonify({'error': f'فشل سيرفر الواتساب: {resp.text[:200]}'}), 502
+        return jsonify(resp.json())
+    except Exception as e:
+        app.logger.exception('whatsapp_send failed')
+        return jsonify({'error': f'حصل خطأ في الاتصال بسيرفر الواتساب: {e}'}), 500
 
 
 @app.route('/api/mega-purchasing', methods=['POST'])
