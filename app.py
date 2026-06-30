@@ -251,7 +251,7 @@ def process_received_ocr():
 
     db = load_db()
     try:
-        parsed = process_ocr_data(ocr_data, db)
+        parsed = process_ocr_data(ocr_data, db, filename=filename)
         if not parsed['date']:
             raise ValueError('لم يتم العثور على تاريخ مطبوع في الصورة')
         date_iso = parsed['date']
