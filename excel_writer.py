@@ -55,7 +55,7 @@ def _write_day_sheet(wb, dt, day_rows):
     ws.freeze_panes = 'A4'  # keep title + header visible while scrolling
 
     current_section = None
-    for r in sorted(day_rows, key=lambda x: (x.get('section', ''), x.get('name_en', ''))):
+    for r in sorted(day_rows, key=lambda x: (x.get('section') or '', x.get('name_en') or '')):
         if r.get('section') != current_section:
             current_section = r.get('section')
             label = 'السلطات' if current_section == 'salads' else ('الصوص' if current_section == 'dressing' else '')
