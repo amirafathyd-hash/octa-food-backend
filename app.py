@@ -842,5 +842,38 @@ def extract_sheet_range():
                       mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
+@app.route('/api/smart-order/meals', methods=['GET'])
+def smart_order_meals():
+    """بترجع قائمة كل الوجبات المتاحة للطلب الذكي (للـ dropdown)."""
+    from smart_ordering import list_available_meals
+    return jsonify({'meals': list_available_meals()})
+
+
+@app.route('/api/smart-order/packages', methods=['GET'])
+def smart_order_packages():
+    """بترجع الوجبات منظّمة حسب باقات أيام المنيو، بنفس الأسماء اللي العميل
+    شايفها على الموقع، مربوطة بأسماء الشيتات الحقيقية اللي بتتحسب عليها."""
+    from smart_ordering import list_menu_packages
+    return jsonify({'packages': list_menu_packages()})
+
+
+@app.route('/api/smart-order/calculate', methods=['POST'])
+def smart_order_calculate():
+    """بتاخد {"orders": [{"meal_name": "...", "order_count": N}, ...]} وترجّع
+    جدول التجهيز المحسوب لكل وجبة، عن طريق تشغيل صيغ الإكسل الحقيقية لكل
+    وجبة على حدة (مش إعادة كتابة المعادلة يدويًا)."""
+    from smart_ordering import calculate_multiple
+    payload = request.get_json(silent=True) or {}
+    orders = payload.get('orders', [])
+    if not orders:
+        return jsonify({'error': 'محتاج تبعت قائمة فيها وجبة واحدة على الأقل'}), 400
+    try:
+        result = calculate_multiple(orders)
+        return jsonify(result)
+    except Exception as e:
+        app.logger.exception('smart_order_calculate failed')
+        return jsonify({'error': f'حصل خطأ في الحساب: {e}'}), 500
+
+
 if __name__ == '__main__':
     app.run(debug=True, port=8000)
