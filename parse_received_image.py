@@ -13,6 +13,7 @@ Strategy:
 import os
 import re
 import requests
+from datetime import datetime
 from rapidfuzz import fuzz, process
 
 OCR_SPACE_API_KEY = os.environ.get('OCR_SPACE_API_KEY')
@@ -111,6 +112,27 @@ def _extract_date(all_text):
     return None
 
 
+# بعض الصور بتتشوّه فيها قراءة اسم الشهر تشويه شديد (مش مجرد حرف سيريلي شبيه،
+# لأ كمان حروف غلط تمامًا زي "A" بتتقرا "h") لدرجة إن أي مطابقة نصية -حتى
+# المتسامحة- مش هتلحقها. عشان كده بنضيف خط دفاع أخير: ملفات الصور هنا دايمًا
+# بتتسمى بنفس تنسيق "يوم-شهر" (مثلاً 3-4.jpg = 3 إبريل)، فلو فشلت قراءة
+# التاريخ من النص، بنستخرجه من اسم الملف نفسه بدل ما نرفض الصورة بالكامل.
+FILENAME_DATE_RE = re.compile(r'^(\d{1,2})-(\d{1,2})(?:[-_.].*)?\.(?:jpe?g|png)$', re.IGNORECASE)
+
+
+def _extract_date_from_filename(filename, year=None):
+    if not filename:
+        return None
+    m = FILENAME_DATE_RE.match(filename.strip())
+    if not m:
+        return None
+    day, month = int(m.group(1)), int(m.group(2))
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        return None
+    y = year or datetime.now().year
+    return f'{y:04d}-{month:02d}-{day:02d}'
+
+
 def _normalize_unit(raw):
     key = re.sub(r'[^a-zA-Z]', '', raw).lower()
     return UNIT_NORMALIZE.get(key, raw.upper() if raw else '')
@@ -194,7 +216,7 @@ def _call_ocr_space(image_path):
     raise RuntimeError(f'فشل الاتصال بخدمة OCR.space بعد محاولتين: {last_error}')
 
 
-def process_ocr_data(data, master_items, name_match_threshold=72):
+def process_ocr_data(data, master_items, name_match_threshold=72, filename=None):
     """
     Takes an already-fetched OCR.space response (dict) and does row-matching/parsing.
     Threshold lowered from 80→72 to catch more item names despite OCR noise.
@@ -206,6 +228,10 @@ def process_ocr_data(data, master_items, name_match_threshold=72):
 
     full_text = ' '.join(pr.get('ParsedText', '') for pr in parsed_results)
     date_iso = _extract_date(full_text)
+    if not date_iso:
+        # خط دفاع أخير: لو النص متشوّه جدًا ومعرفناش نلاقي التاريخ فيه، نستخدم
+        # اسم الملف نفسه (لو متبع نفس تنسيق "يوم-شهر.jpg" المعتاد).
+        date_iso = _extract_date_from_filename(filename)
 
     words = []
     for pr in parsed_results:
