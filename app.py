@@ -5,7 +5,8 @@ import secrets
 import tempfile
 import zipfile
 import openpyxl
-from openpyxl.styles import PatternFill, Font
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 from copy import copy
 from datetime import datetime, timedelta, timezone
@@ -873,6 +874,209 @@ def smart_order_calculate():
     except Exception as e:
         app.logger.exception('smart_order_calculate failed')
         return jsonify({'error': f'حصل خطأ في الحساب: {e}'}), 500
+
+
+
+# ============================================================================
+# محطات الإنتاج الجديدة (Rice / Breakfast / Dessert / Salads / Sauce)
+# بُنيت عشان زرار "احسب الإنتاج" في غرفة التحكم يطلّع نتايج المحطات دي كمان،
+# مش بس الـ49 وجبة الأصلية.
+# ============================================================================
+
+@app.route('/api/smart-order/station-items', methods=['GET'])
+def smart_order_station_items():
+    """بترجع كل أصناف المحطات الخمسة الجديدة (الـ49 وجبة الأصلية شغالة أصلًا
+    عن طريق /api/smart-order/packages)."""
+    from station_calc import list_station_items, STATION_ITEMS
+    return jsonify({
+        'rice': list_station_items('rice'),
+        'breakfast': list_station_items('breakfast'),
+        'dessert': list_station_items('dessert'),
+        'salads': list_station_items('salads'),
+        'sauce_linked_meals': list(STATION_ITEMS['sauce'].keys()),
+    })
+
+
+@app.route('/api/smart-order/calculate-stations', methods=['POST'])
+def smart_order_calculate_stations():
+    """بتاخد:
+    {
+      "rice": [{"sheet_name": "...", "order_count": N}, ...],
+      "breakfast": [...], "dessert": [...], "salads": [...],
+      "main_meals": [{"meal_name": "...", "order_count": N}, ...]
+    }
+    وترجّع نتيجة كل صنف + الصوص المرتبط بأي وجبة من main_meals."""
+    from station_calc import (
+        calc_rice_item, calc_ingredient_item, calc_salad_item,
+        calc_sauce_for_meal, STATION_ITEMS,
+    )
+    from smart_ordering import MEAL_PORTIONS
+
+    payload = request.get_json(silent=True) or {}
+    results = {'rice': [], 'breakfast': [], 'dessert': [], 'salads': [], 'sauce': []}
+    errors = []
+
+    for item in payload.get('rice', []):
+        try:
+            results['rice'].append(calc_rice_item(item['sheet_name'], item['order_count']))
+        except Exception as e:
+            errors.append({'station': 'rice', 'item': item.get('sheet_name'), 'error': str(e)})
+
+    for item in payload.get('breakfast', []):
+        try:
+            results['breakfast'].append(calc_ingredient_item('breakfast', item['sheet_name'], item['order_count']))
+        except Exception as e:
+            errors.append({'station': 'breakfast', 'item': item.get('sheet_name'), 'error': str(e)})
+
+    for item in payload.get('dessert', []):
+        try:
+            results['dessert'].append(calc_ingredient_item('dessert', item['sheet_name'], item['order_count']))
+        except Exception as e:
+            errors.append({'station': 'dessert', 'item': item.get('sheet_name'), 'error': str(e)})
+
+    for item in payload.get('salads', []):
+        try:
+            results['salads'].append(calc_salad_item(item['sheet_name'], item['order_count']))
+        except Exception as e:
+            errors.append({'station': 'salads', 'item': item.get('sheet_name'), 'error': str(e)})
+
+    for item in payload.get('main_meals', []):
+        meal_name = item.get('meal_name')
+        order_count = item.get('order_count')
+        if meal_name in STATION_ITEMS['sauce'] and meal_name in MEAL_PORTIONS:
+            try:
+                portion_g = MEAL_PORTIONS[meal_name][0]
+                results['sauce'].append(calc_sauce_for_meal(meal_name, order_count, portion_g))
+            except Exception as e:
+                errors.append({'station': 'sauce', 'item': meal_name, 'error': str(e)})
+
+    return jsonify({'results': results, 'errors': errors})
+
+
+_STATION_TITLE_FILL = PatternFill('solid', start_color='8C1810')
+_STATION_TITLE_FONT = Font(name='Calibri', bold=True, color='FFFFFF', size=14)
+_STATION_HEADER_FILL = PatternFill('solid', start_color='6600FF')
+_STATION_HEADER_FONT = Font(name='Calibri', bold=True, color='FFFFFF')
+_STATION_DATA_FONT = Font(name='Calibri', size=11)
+
+
+def _build_station_workbook(items):
+    """items: list of {'sheet_name','arabic_name','order_count','mode','rows':[...]}
+    بيرجّع workbook فيه تاب لكل صنف، بانر بني + جدول بنفسجي، زي الستايل المعتمد
+    في باقي النظام (نفس ألوان PURPLE_FILL المستخدمة في mega-purchasing)."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    for entry in items:
+        title = (entry.get('sheet_name') or 'صنف')[:31]
+        safe_title = title
+        n = 1
+        existing = set(wb.sheetnames)
+        while safe_title in existing:
+            n += 1
+            safe_title = f'{title[:28]} ({n})'
+        ws = wb.create_sheet(title=safe_title)
+
+        ar = entry.get('arabic_name', '')
+        order_count = entry.get('order_count', '')
+        ws.merge_cells('A1:D1')
+        ws['A1'] = f"{entry.get('sheet_name', '')}  {('— ' + ar) if ar else ''}  ({order_count} أوردر)"
+        ws['A1'].fill = _STATION_TITLE_FILL
+        ws['A1'].font = _STATION_TITLE_FONT
+        ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[1].height = 26
+
+        is_batch = entry.get('mode') == 'batches'
+        headers = ['البيان', 'Conversion Factor', 'Final KG'] if is_batch else ['المكوّن', 'الوحدة', 'الكمية']
+        for c, h in enumerate(headers, start=1):
+            cell = ws.cell(row=3, column=c, value=h)
+            cell.fill = _STATION_HEADER_FILL
+            cell.font = _STATION_HEADER_FONT
+            cell.alignment = Alignment(horizontal='center')
+
+        r = 4
+        for row in entry.get('rows', []):
+            if is_batch:
+                ws.cell(row=r, column=1, value=row.get('label')).font = _STATION_DATA_FONT
+                ws.cell(row=r, column=2, value=row.get('conversion_factor')).font = _STATION_DATA_FONT
+                ws.cell(row=r, column=3, value=row.get('final_kg')).font = _STATION_DATA_FONT
+            else:
+                ws.cell(row=r, column=1, value=row.get('label')).font = _STATION_DATA_FONT
+                ws.cell(row=r, column=2, value=row.get('unit')).font = _STATION_DATA_FONT
+                ws.cell(row=r, column=3, value=row.get('amount')).font = _STATION_DATA_FONT
+            r += 1
+
+        ws.column_dimensions['A'].width = 36
+        ws.column_dimensions['B'].width = 18
+        ws.column_dimensions['C'].width = 16
+        ws.column_dimensions['D'].width = 16
+        ws.sheet_view.rightToLeft = True
+
+    if not wb.sheetnames:
+        wb.create_sheet('فاضي')
+    return wb
+
+
+@app.route('/api/smart-order/export-stations', methods=['POST'])
+def smart_order_export_stations():
+    """بتاخد نفس شكل /calculate-stations payload، بترجّع zip فيه ملف إكسل
+    لكل محطة (Rice/Breakfast/Desserts/Salads/Sauce/Hot_Marination)، كل ملف
+    فيه تاب لكل صنف بنفس الستايل المعتمد (بانر بني + جدول بنفسجي)."""
+    from station_calc import (
+        calc_rice_item, calc_ingredient_item, calc_salad_item,
+        calc_sauce_for_meal, STATION_ITEMS,
+    )
+    from smart_ordering import MEAL_PORTIONS, calculate_meal
+
+    payload = request.get_json(silent=True) or {}
+    results = {'rice': [], 'breakfast': [], 'dessert': [], 'salads': [], 'sauce': []}
+
+    try:
+        for item in payload.get('rice', []):
+            results['rice'].append(calc_rice_item(item['sheet_name'], item['order_count']))
+        for item in payload.get('breakfast', []):
+            results['breakfast'].append(calc_ingredient_item('breakfast', item['sheet_name'], item['order_count']))
+        for item in payload.get('dessert', []):
+            results['dessert'].append(calc_ingredient_item('dessert', item['sheet_name'], item['order_count']))
+        for item in payload.get('salads', []):
+            results['salads'].append(calc_salad_item(item['sheet_name'], item['order_count']))
+
+        # الوجبات الرئيسية (Hot Section + Marination) — مفيش فصل برمجي نظيف
+        # بينهم في الملف الأصلي، فبيتجمعوا في ملف واحد اسمه Hot_Marination.
+        main_results = []
+        for item in payload.get('main_meals', []):
+            try:
+                main_results.append(calculate_meal(item['meal_name'], item['order_count']))
+            except Exception:
+                pass
+        if main_results:
+            results['hot_marination'] = main_results
+
+        for item in payload.get('main_meals', []):
+            meal_name = item.get('meal_name')
+            if meal_name in STATION_ITEMS['sauce'] and meal_name in MEAL_PORTIONS:
+                portion_g = MEAL_PORTIONS[meal_name][0]
+                results['sauce'].append(calc_sauce_for_meal(meal_name, item['order_count'], portion_g))
+
+        labels = {'rice': 'Rice', 'breakfast': 'Breakfast', 'dessert': 'Desserts', 'salads': 'Salads',
+                  'sauce': 'Sauce', 'hot_marination': 'Hot_Marination'}
+        zip_buf = io.BytesIO()
+        today = datetime.now().strftime('%Y-%m-%d')
+        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for station, items in results.items():
+                if not items:
+                    continue
+                wb = _build_station_workbook(items)
+                buf = io.BytesIO()
+                wb.save(buf)
+                zf.writestr(f'{labels[station]}_{today}.xlsx', buf.getvalue())
+
+        zip_buf.seek(0)
+        return send_file(zip_buf, as_attachment=True,
+                          download_name=f'Production_Stations_{datetime.now().strftime("%Y-%m-%d")}.zip',
+                          mimetype='application/zip')
+    except Exception as e:
+        app.logger.exception('smart_order_export_stations failed')
+        return jsonify({'error': f'حصل خطأ في التصدير: {e}'}), 500
 
 
 if __name__ == '__main__':
