@@ -1,0 +1,63 @@
+{
+  "Saturday": [
+    ["Curry chicken with spaghetti", "Curry Chicken"],
+    ["Lamb Kabsa", "Kabsa Lahm"],
+    ["Beef chili dry with mashed potatoes", "Beef Chilli Dry"],
+    ["Pan fried fish with Sayadiya rice", "Pan Fried Fish"],
+    ["Meat and okra with saffron rice", "Meat with Bamiya"],
+    ["Herbal chicken with potato", "Herbal Chicken"],
+    ["Chinese chicken with white rice", "Chinese Chicken"],
+    ["Asian chicken sandwich with oat bread", "Asian Chicken Sandwich"]
+  ],
+  "Sunday": [
+    ["Chicken Alfredo with fettuccine pasta", "Chicken Alfredo"],
+    ["Chicken curry with coconut cream", "Coconut Chicken"],
+    ["Meat steak with mushroom and saffron rice", "Chicken Steak Sauce"],
+    ["Spicy Indian 65 chicken with white rice", "Chicken 65"],
+    ["Blankwet shrimp with saffron rice", "Blankwet Shrimp"],
+    ["BBQ chicken skewers with African jollof rice", "BBQ Chicken Skewers"],
+    ["Lamb mkhtoum with white rice", "Mkhtoum Lahm"],
+    ["Beef burger", "Beef Burger"]
+  ],
+  "Monday": [
+    ["Almond chicken with potato wedges", "Almond Chicken"],
+    ["Chicken pasta with vegetables", "Chicken Pasta with Vegetable"],
+    ["Changzezi chicken with white rice", "Changezi Chicken"],
+    ["Daoud Pasha with saffron rice", "Daoud Basha"],
+    ["Salmon with cream and mashed potatoes", "Salmon with cream"],
+    ["High protein meat moussaka with white rice", "Moussaka Meat"],
+    ["Oriental beef with nuts rice", "Laham Oriental"],
+    ["Chicken Fajita sandwich with oat bread", "Chicken Fajita"]
+  ],
+  "Tuesday": [
+    ["Chicken steak with mashed potatoes", "Chicken Steak Topping"],
+    ["Chicken and mushroom with white rice", "Chicken Mushroom"],
+    ["Stroganoff pasta", "Stroganoff pasta"],
+    ["Beef M&C with saffron rice", "Beef Amansi"],
+    ["Tikka chicken with biryani rice", "Chicken Tikka"],
+    ["Navy bean with meat and white rice", "Lahm Fasooliya"],
+    ["BBQ chicken sandwich with Ciabatta Bread", "BBQ Chicken"],
+    ["Octa chicken poke bowl", "Octa Poki Bowl"],
+    ["Lemon Shrimp with orzo and spinach", "Lemon Shrimp"]
+  ],
+  "Wednesday": [
+    ["Sriracha chicken with vegetable rice", "Sriracha Chicken"],
+    ["Indian butter chicken with white rice", "Butter Chicken"],
+    ["Pizzaiola chicken with Egyptian saffron rice", "Pizziola Chicken"],
+    ["High protein meat lasagna", "Lasagne Bachamel"],
+    ["Meat kebab with mandi rice", "Meat Kebab"],
+    ["Bolognese meat sauce with pasta", "Lahm Bolognese"],
+    ["Curry and cream shrimp with saffron rice", "Curry Shrimp"],
+    ["Indian kebab with white rice", "Kebab Hindi"],
+    ["Philadelphia beef sandwich with oat bread", "Beef philly cheese steak"]
+  ],
+  "Thursday": [
+    ["Creamy pink chicken with Mexican rice", "Pink Chicken"],
+    ["Ginger chicken with white rice", "Ginger Chicken"],
+    ["French meatballs with spaghetti", "French Meatball"],
+    ["Singapourian chicken with vegetables rice", "Singapore Chicken"],
+    ["Fish with dill and lemon with Sayadiyah rice", "Fish with Shabat and Lemon"],
+    ["Chicken Molokheya with white rice", "Chicken Molokeya"],
+    ["Meat kebab sandwich with ciabatta bread", "Beef Kebab Sandwich"]
+  ]
+}
