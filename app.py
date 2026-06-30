@@ -1,5 +1,4 @@
 import os
-import requests
 import io
 import re
 import secrets
@@ -734,157 +733,6 @@ def _add_station_tab(wb, station_key, file_storage):
     return out_ws
 
 
-VEGETABLE_CATEGORY_LABELS = {'خضروات', 'خضراوات'}
-
-
-def _read_vegetable_rows(file_storage, sheet_name):
-    """بترجع صفوف الأصناف المصنّفة 'خضروات'/'خضراوات' بس من شيت المحطة،
-    بنفس أعمدة A (الاسم) + B (الفئة) + D (الوزن اليومي) + L (طلب اليوم) +
-    M (وحدة الطلب)، وبتشيل أي صف وزنه اليومي صفر بالظبط (زي باقي Daily Ordering)."""
-    file_storage.seek(0)
-    wb = openpyxl.load_workbook(file_storage, data_only=True)
-    if sheet_name not in wb.sheetnames:
-        return []
-    ws = wb[sheet_name]
-    out = []
-    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=13, values_only=True):
-        name, category = row[0], row[1]
-        if not name or not str(name).strip():
-            continue
-        if str(name).strip().lower() == 'items':
-            continue
-        if not category or str(category).strip() not in VEGETABLE_CATEGORY_LABELS:
-            continue
-        daily_weight = row[3] if len(row) > 3 else None
-        if isinstance(daily_weight, (int, float)) and not isinstance(daily_weight, bool) and daily_weight == 0:
-            continue
-        daily_order = row[11] if len(row) > 11 else None
-        order_unit = row[12] if len(row) > 12 else None
-        out.append({
-            'name': str(name).strip(), 'category': str(category).strip(),
-            'daily_weight': daily_weight, 'daily_order': daily_order, 'order_unit': order_unit,
-        })
-    return out
-
-
-def _build_vegetables_workbook(station_vegetable_data):
-    """station_vegetable_data: {station_key: [rows]}
-    - تاب لكل محطة فيها خضروات فعلاً (المحطات الفاضية بتتشال تلقائي)
-    - تاب أخير 'All Vegetables' مجمّع
-    - ستايل: هيدر بنفسجي، ألوان متبادلة على الصفوف، أعمدة واسعة، RTL"""
-    HEADER_FILL = PatternFill('solid', start_color='6600FF')
-    HEADER_FONT = Font(name='Tahoma', bold=True, color='FFFFFF', size=11)
-    HEADER_ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
-
-    EVEN_FILL = PatternFill('solid', start_color='F2EEFF')
-    ODD_FILL  = PatternFill('solid', start_color='FFFFFF')
-    DATA_FONT = Font(name='Tahoma', size=11)
-    NUM_FONT  = Font(name='Tahoma', size=11, bold=True)
-    CENTER    = Alignment(horizontal='center', vertical='center')
-    RIGHT     = Alignment(horizontal='right',  vertical='center')
-
-    from openpyxl.styles import Border, Side
-    THIN = Side(style='thin', color='D0C8F0')
-    BOX  = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
-
-    COL_WIDTHS_NORMAL = [48, 14, 16, 14, 14]  # A:E (بدون عمود المحطة)
-    COL_WIDTHS_ALL    = [18, 48, 14, 16, 14, 14]  # A:F (مع عمود المحطة)
-
-    HEADERS_NORMAL = ['ITEMS', 'Category', 'Daily Weight', 'Daily Order', 'Order Unit']
-    HEADERS_ALL    = ['Station', 'ITEMS', 'Category', 'Daily Weight', 'Daily Order', 'Order Unit']
-
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
-
-    def _write_sheet(title, rows, with_station_col=False):
-        if not rows and not with_station_col:
-            return  # لا تعمل تاب للمحطات الفاضية
-        ws = wb.create_sheet(title=title[:31])
-        ws.sheet_view.rightToLeft = True
-        ws.row_dimensions[1].height = 24
-
-        headers = HEADERS_ALL if with_station_col else HEADERS_NORMAL
-        widths  = COL_WIDTHS_ALL if with_station_col else COL_WIDTHS_NORMAL
-
-        for c, (h, w) in enumerate(zip(headers, widths), start=1):
-            cell = ws.cell(row=1, column=c, value=h)
-            cell.fill      = HEADER_FILL
-            cell.font      = HEADER_FONT
-            cell.alignment = HEADER_ALIGN
-            cell.border    = BOX
-            ws.column_dimensions[get_column_letter(c)].width = w
-
-        for i, row in enumerate(rows):
-            r = i + 2
-            fill = EVEN_FILL if i % 2 == 0 else ODD_FILL
-            c = 1
-            if with_station_col:
-                cell = ws.cell(row=r, column=c, value=row.get('_station_label', ''))
-                cell.fill = fill; cell.font = DATA_FONT; cell.border = BOX
-                cell.alignment = CENTER
-                c += 1
-            # ITEMS
-            cell = ws.cell(row=r, column=c, value=row['name'])
-            cell.fill = fill; cell.font = DATA_FONT; cell.border = BOX
-            cell.alignment = RIGHT; c += 1
-            # Category
-            cell = ws.cell(row=r, column=c, value=row['category'])
-            cell.fill = fill; cell.font = DATA_FONT; cell.border = BOX
-            cell.alignment = CENTER; c += 1
-            # Daily Weight
-            cell = ws.cell(row=r, column=c, value=row['daily_weight'])
-            cell.fill = fill; cell.font = NUM_FONT; cell.border = BOX
-            cell.alignment = CENTER
-            cell.number_format = '#,##0.00'; c += 1
-            # Daily Order
-            cell = ws.cell(row=r, column=c, value=row['daily_order'])
-            cell.fill = fill; cell.font = NUM_FONT; cell.border = BOX
-            cell.alignment = CENTER
-            cell.number_format = '#,##0.000'; c += 1
-            # Order Unit
-            cell = ws.cell(row=r, column=c, value=row['order_unit'])
-            cell.fill = fill; cell.font = DATA_FONT; cell.border = BOX
-            cell.alignment = CENTER
-
-        ws.freeze_panes = 'A2'
-
-    # تابات المحطات (بس اللي فيها خضروات)
-    all_rows = []
-    for key in STATION_ORDER:
-        rows = station_vegetable_data.get(key, [])
-        if rows:  # تخطي المحطات الفاضية
-            _write_sheet(STATION_TAB_NAMES[key], rows)
-            for row in rows:
-                all_rows.append({**row, '_station_label': STATION_LABELS.get(key, key)})
-
-    # تاب All Vegetables (كل الصفوف raw)
-    _write_sheet('All Vegetables', all_rows, with_station_col=True)
-
-    # تاب Summary — كل صنف مرة واحدة، الوزن اليومي مجمّع من كل المحطات
-    from collections import defaultdict
-    summary = {}  # name -> {category, daily_weight_total, daily_order_total, order_unit}
-    for row in all_rows:
-        name = row['name']
-        if name not in summary:
-            summary[name] = {
-                'name': name,
-                'category': row['category'],
-                'daily_weight': row['daily_weight'] or 0,
-                'daily_order': row['daily_order'] or 0,
-                'order_unit': row['order_unit'],
-            }
-        else:
-            summary[name]['daily_weight'] = (summary[name]['daily_weight'] or 0) + (row['daily_weight'] or 0)
-            summary[name]['daily_order']  = (summary[name]['daily_order']  or 0) + (row['daily_order']  or 0)
-
-    summary_rows = sorted(summary.values(), key=lambda r: r['name'].lower())
-    _write_sheet('Summary', summary_rows)
-
-    if not wb.sheetnames:
-        wb.create_sheet('فاضي')
-    return wb
-
-
 def _add_station_tab_daily(wb, station_key, file_storage):
     """زي _add_station_tab بالظبط، بس بترجع أعمدة A:D بس (من غير الوزن
     الأسبوعي في E)، وبتشيل أي صف يكون الوزن اليومي بتاعه (عمود D) صفر رقمي
@@ -921,140 +769,32 @@ def _add_station_tab_daily(wb, station_key, file_storage):
 
 @app.route('/api/daily-ordering', methods=['POST'])
 def daily_ordering():
-    """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع zip فيه
-    ملفين: Daily_Ordering.xlsx (تاب لكل محطة بأعمدة A:D، أي صف وزنه اليومي
-    صفر بيتشال)، و Vegetables.xlsx (تاب لكل محطة فيه أصناف 'خضروات' بس +
-    تاب أخير 'All Vegetables' مجمّع فيه كل الخضروات من كل المحطات)."""
+    """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع ملف إكسل
+    واحد فيه تاب لكل محطة بأعمدة A:D بس (من غير عمود الوزن الأسبوعي)، وأي
+    صف وزنه اليومي صفر بيتشال تلقائيًا."""
     missing = [k for k in STATION_ORDER if k not in request.files]
     if missing:
         return jsonify({'error': f'محطات ناقصة: {", ".join(missing)}'}), 400
 
     try:
-        wb_daily = openpyxl.Workbook()
-        wb_daily.remove(wb_daily.active)
-        vegetable_data = {}
-
-        # قراءة بيانات كل المحطات
-        all_daily_rows = {}  # name -> {unit, category, daily_weight, daily_order, order_unit}
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
         for key in STATION_ORDER:
             request.files[key].seek(0)
-            _add_station_tab_daily(wb_daily, key, request.files[key])
-            request.files[key].seek(0)
-            vegetable_data[key] = _read_vegetable_rows(request.files[key], STATION_SHEET_MAP[key])
-            # جمع كل الأصناف من الـ Ordering sheet لعمل Summary
-            request.files[key].seek(0)
-            src_wb = openpyxl.load_workbook(request.files[key], data_only=True)
-            sheet_name = STATION_SHEET_MAP[key]
-            if sheet_name in src_wb.sheetnames:
-                src_ws = src_wb[sheet_name]
-                for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row, min_col=1, max_col=13, values_only=True):
-                    name = row[0]
-                    if not name or str(name).strip().lower() in ('', 'items'):
-                        continue
-                    daily_w = row[3] if len(row) > 3 else None
-                    if not isinstance(daily_w, (int, float)) or daily_w == 0:
-                        continue
-                    n = str(name).strip()
-                    unit = row[2] if len(row) > 2 else None
-                    cat  = row[1] if len(row) > 1 else None
-                    d_order = row[11] if len(row) > 11 else None
-                    o_unit  = row[12] if len(row) > 12 else None
-                    if n not in all_daily_rows:
-                        all_daily_rows[n] = {'name': n, 'category': cat or '', 'unit': unit or '',
-                                              'daily_weight': daily_w, 'daily_order': d_order or 0,
-                                              'order_unit': o_unit or ''}
-                    else:
-                        all_daily_rows[n]['daily_weight'] = (all_daily_rows[n]['daily_weight'] or 0) + daily_w
-                        all_daily_rows[n]['daily_order']  = (all_daily_rows[n]['daily_order']  or 0) + (d_order or 0)
+            _add_station_tab_daily(wb, key, request.files[key])
 
-        # تاب Summary في Daily_Ordering.xlsx
-        summary_rows = sorted(all_daily_rows.values(), key=lambda r: r['name'].lower())
-        ws_sum = wb_daily.create_sheet(title='Summary')
-        ws_sum.sheet_view.rightToLeft = True
-        ws_sum.row_dimensions[1].height = 24
-        HEADER_FILL2 = PatternFill('solid', start_color='6600FF')
-        HEADER_FONT2 = Font(name='Tahoma', bold=True, color='FFFFFF', size=11)
-        from openpyxl.styles import Border, Side
-        THIN2 = Side(style='thin', color='D0C8F0')
-        BOX2  = Border(top=THIN2, bottom=THIN2, left=THIN2, right=THIN2)
-        EVEN2 = PatternFill('solid', start_color='F2EEFF')
+        if not wb.sheetnames:
+            wb.create_sheet('فاضي')
 
-        headers_s = ['ITEMS', 'Category', 'Unit', 'Daily Weight', 'Daily Order', 'Order Unit']
-        widths_s   = [48, 16, 8, 16, 14, 14]
-        for c, (h, w) in enumerate(zip(headers_s, widths_s), start=1):
-            cell = ws_sum.cell(row=1, column=c, value=h)
-            cell.fill = HEADER_FILL2; cell.font = HEADER_FONT2
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-            cell.border = BOX2
-            ws_sum.column_dimensions[get_column_letter(c)].width = w
-
-        for i, row in enumerate(summary_rows):
-            r = i + 2
-            fill = EVEN2 if i % 2 == 0 else PatternFill('solid', start_color='FFFFFF')
-            vals = [row['name'], row['category'], row['unit'],
-                    row['daily_weight'], row['daily_order'], row['order_unit']]
-            aligns = ['right', 'center', 'center', 'center', 'center', 'center']
-            for c, (v, al) in enumerate(zip(vals, aligns), start=1):
-                cell = ws_sum.cell(row=r, column=c, value=v)
-                cell.fill = fill
-                cell.font = Font(name='Tahoma', size=11, bold=(c in (4, 5)))
-                cell.alignment = Alignment(horizontal=al, vertical='center')
-                cell.border = BOX2
-                if c in (4, 5) and isinstance(v, float):
-                    cell.number_format = '#,##0.00'
-        ws_sum.freeze_panes = 'A2'
-
-        if not wb_daily.sheetnames:
-            wb_daily.create_sheet('فاضي')
-
-        wb_veg = _build_vegetables_workbook(vegetable_data)
-
-        today = datetime.now().strftime('%Y-%m-%d')
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-            buf1 = io.BytesIO(); wb_daily.save(buf1)
-            zf.writestr(f'Daily_Ordering_{today}.xlsx', buf1.getvalue())
-            buf2 = io.BytesIO(); wb_veg.save(buf2)
-            zf.writestr(f'Vegetables_{today}.xlsx', buf2.getvalue())
-
-        zip_buf.seek(0)
-        return send_file(zip_buf, as_attachment=True,
-                          download_name=f'Daily_Ordering_{today}.zip',
-                          mimetype='application/zip')
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return send_file(buf, as_attachment=True,
+                          download_name=f'Daily_Ordering_{datetime.now().strftime("%Y-%m-%d")}.xlsx',
+                          mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:
         app.logger.exception('daily_ordering failed')
         return jsonify({'error': f'حصل خطأ في التجميع: {e}'}), 500
-
-
-@app.route('/api/whatsapp-send', methods=['POST'])
-def whatsapp_send():
-    """بيستقبل صورة من المتصفح ويمررها لسيرفر الواتساب المنفصل (Node.js) عشان
-    يبعتها تلقائي للرقم المتظبط. لو الـenv vars مش متظبطة، بيرجع خطأ واضح."""
-    bot_url = os.environ.get('WHATSAPP_BOT_URL')
-    api_key = os.environ.get('WHATSAPP_BOT_API_KEY')
-    if not bot_url:
-        return jsonify({'error': 'سيرفر الواتساب لسه مش متظبط (WHATSAPP_BOT_URL ناقصة)'}), 503
-
-    if 'image' not in request.files:
-        return jsonify({'error': 'مفيش صورة مبعوتة'}), 400
-
-    try:
-        files = {'image': (request.files['image'].filename or 'card.png',
-                            request.files['image'].stream, 'image/png')}
-        data = {}
-        if request.form.get('number'):
-            data['number'] = request.form['number']
-        if request.form.get('caption'):
-            data['caption'] = request.form['caption']
-        headers = {'x-api-key': api_key} if api_key else {}
-
-        resp = requests.post(f'{bot_url}/send-image', files=files, data=data, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            return jsonify({'error': f'فشل سيرفر الواتساب: {resp.text[:200]}'}), 502
-        return jsonify(resp.json())
-    except Exception as e:
-        app.logger.exception('whatsapp_send failed')
-        return jsonify({'error': f'حصل خطأ في الاتصال بسيرفر الواتساب: {e}'}), 500
 
 
 @app.route('/api/mega-purchasing', methods=['POST'])
