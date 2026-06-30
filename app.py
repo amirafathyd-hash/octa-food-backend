@@ -967,7 +967,7 @@ def _build_station_workbook(items):
     wb = Workbook()
     wb.remove(wb.active)
     for entry in items:
-        title = (entry.get('sheet_name') or 'صنف')[:31]
+        title = (entry.get('sheet_name') or entry.get('meal_name') or 'صنف')[:31]
         safe_title = title
         n = 1
         existing = set(wb.sheetnames)
@@ -979,7 +979,7 @@ def _build_station_workbook(items):
         ar = entry.get('arabic_name', '')
         order_count = entry.get('order_count', '')
         ws.merge_cells('A1:D1')
-        ws['A1'] = f"{entry.get('sheet_name', '')}  {('— ' + ar) if ar else ''}  ({order_count} أوردر)"
+        ws['A1'] = f"{entry.get('sheet_name') or entry.get('meal_name', '')}  {('— ' + ar) if ar else ''}  ({order_count} أوردر)"
         ws['A1'].fill = _STATION_TITLE_FILL
         ws['A1'].font = _STATION_TITLE_FONT
         ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
@@ -1018,53 +1018,40 @@ def _build_station_workbook(items):
 
 @app.route('/api/smart-order/export-stations', methods=['POST'])
 def smart_order_export_stations():
-    """بتاخد نفس شكل /calculate-stations payload، بترجّع zip فيه ملف إكسل
-    لكل محطة (Rice/Breakfast/Desserts/Salads/Sauce/Hot_Marination)، كل ملف
-    فيه تاب لكل صنف بنفس الستايل المعتمد (بانر بني + جدول بنفسجي)."""
-    from station_calc import (
-        calc_rice_item, calc_ingredient_item, calc_salad_item,
-        calc_sauce_for_meal, STATION_ITEMS,
-    )
-    from smart_ordering import MEAL_PORTIONS, calculate_meal
-
+    """بتاخد النتايج اللي اتحسبت بالفعل وظاهرة في الداش بورد (مش بتعيد حساب
+    من الإكسل تاني — ده اللي كان بيسبب Worker Timeout لأنه بيفتح ملف توكيو
+    الرئيسي (90 شيت) من الصفر لكل وجبة مرتين، مرة وقت الحساب ومرة وقت التصدير):
+    {
+      "main_results": [ {نفس شكل نتيجة calculate_meal}, ... ],   // الوجبات الأصلية
+      "station_results": {
+        "rice": [...], "breakfast": [...], "dessert": [...],
+        "salads": [...], "sauce": [...]
+      }
+    }
+    وترجّع zip فيه ملف إكسل لكل محطة، نفس الستايل المعتمد."""
     payload = request.get_json(silent=True) or {}
-    results = {'rice': [], 'breakfast': [], 'dessert': [], 'salads': [], 'sauce': []}
+
+    results = {}
+    main_results = payload.get('main_results') or []
+    if main_results:
+        results['hot_marination'] = main_results
+
+    station_results = payload.get('station_results') or {}
+    for key in ('rice', 'breakfast', 'dessert', 'salads', 'sauce'):
+        items = station_results.get(key) or []
+        if items:
+            results[key] = items
+
+    if not results:
+        return jsonify({'error': 'مفيش نتايج اتحسبت عشان نصدّرها — احسب الإنتاج الأول'}), 400
 
     try:
-        for item in payload.get('rice', []):
-            results['rice'].append(calc_rice_item(item['sheet_name'], item['order_count']))
-        for item in payload.get('breakfast', []):
-            results['breakfast'].append(calc_ingredient_item('breakfast', item['sheet_name'], item['order_count']))
-        for item in payload.get('dessert', []):
-            results['dessert'].append(calc_ingredient_item('dessert', item['sheet_name'], item['order_count']))
-        for item in payload.get('salads', []):
-            results['salads'].append(calc_salad_item(item['sheet_name'], item['order_count']))
-
-        # الوجبات الرئيسية (Hot Section + Marination) — مفيش فصل برمجي نظيف
-        # بينهم في الملف الأصلي، فبيتجمعوا في ملف واحد اسمه Hot_Marination.
-        main_results = []
-        for item in payload.get('main_meals', []):
-            try:
-                main_results.append(calculate_meal(item['meal_name'], item['order_count']))
-            except Exception:
-                pass
-        if main_results:
-            results['hot_marination'] = main_results
-
-        for item in payload.get('main_meals', []):
-            meal_name = item.get('meal_name')
-            if meal_name in STATION_ITEMS['sauce'] and meal_name in MEAL_PORTIONS:
-                portion_g = MEAL_PORTIONS[meal_name][0]
-                results['sauce'].append(calc_sauce_for_meal(meal_name, item['order_count'], portion_g))
-
         labels = {'rice': 'Rice', 'breakfast': 'Breakfast', 'dessert': 'Desserts', 'salads': 'Salads',
                   'sauce': 'Sauce', 'hot_marination': 'Hot_Marination'}
         zip_buf = io.BytesIO()
         today = datetime.now().strftime('%Y-%m-%d')
         with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
             for station, items in results.items():
-                if not items:
-                    continue
                 wb = _build_station_workbook(items)
                 buf = io.BytesIO()
                 wb.save(buf)
@@ -1072,7 +1059,7 @@ def smart_order_export_stations():
 
         zip_buf.seek(0)
         return send_file(zip_buf, as_attachment=True,
-                          download_name=f'Production_Stations_{datetime.now().strftime("%Y-%m-%d")}.zip',
+                          download_name=f'Production_Stations_{today}.zip',
                           mimetype='application/zip')
     except Exception as e:
         app.logger.exception('smart_order_export_stations failed')
