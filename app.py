@@ -857,8 +857,28 @@ def _build_vegetables_workbook(station_vegetable_data):
             for row in rows:
                 all_rows.append({**row, '_station_label': STATION_LABELS.get(key, key)})
 
-    # تاب All Vegetables (دايمًا بيتضاف حتى لو فاضي)
+    # تاب All Vegetables (كل الصفوف raw)
     _write_sheet('All Vegetables', all_rows, with_station_col=True)
+
+    # تاب Summary — كل صنف مرة واحدة، الوزن اليومي مجمّع من كل المحطات
+    from collections import defaultdict
+    summary = {}  # name -> {category, daily_weight_total, daily_order_total, order_unit}
+    for row in all_rows:
+        name = row['name']
+        if name not in summary:
+            summary[name] = {
+                'name': name,
+                'category': row['category'],
+                'daily_weight': row['daily_weight'] or 0,
+                'daily_order': row['daily_order'] or 0,
+                'order_unit': row['order_unit'],
+            }
+        else:
+            summary[name]['daily_weight'] = (summary[name]['daily_weight'] or 0) + (row['daily_weight'] or 0)
+            summary[name]['daily_order']  = (summary[name]['daily_order']  or 0) + (row['daily_order']  or 0)
+
+    summary_rows = sorted(summary.values(), key=lambda r: r['name'].lower())
+    _write_sheet('Summary', summary_rows)
 
     if not wb.sheetnames:
         wb.create_sheet('فاضي')
@@ -913,11 +933,76 @@ def daily_ordering():
         wb_daily = openpyxl.Workbook()
         wb_daily.remove(wb_daily.active)
         vegetable_data = {}
+
+        # قراءة بيانات كل المحطات
+        all_daily_rows = {}  # name -> {unit, category, daily_weight, daily_order, order_unit}
         for key in STATION_ORDER:
             request.files[key].seek(0)
             _add_station_tab_daily(wb_daily, key, request.files[key])
             request.files[key].seek(0)
             vegetable_data[key] = _read_vegetable_rows(request.files[key], STATION_SHEET_MAP[key])
+            # جمع كل الأصناف من الـ Ordering sheet لعمل Summary
+            request.files[key].seek(0)
+            src_wb = openpyxl.load_workbook(request.files[key], data_only=True)
+            sheet_name = STATION_SHEET_MAP[key]
+            if sheet_name in src_wb.sheetnames:
+                src_ws = src_wb[sheet_name]
+                for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row, min_col=1, max_col=13, values_only=True):
+                    name = row[0]
+                    if not name or str(name).strip().lower() in ('', 'items'):
+                        continue
+                    daily_w = row[3] if len(row) > 3 else None
+                    if not isinstance(daily_w, (int, float)) or daily_w == 0:
+                        continue
+                    n = str(name).strip()
+                    unit = row[2] if len(row) > 2 else None
+                    cat  = row[1] if len(row) > 1 else None
+                    d_order = row[11] if len(row) > 11 else None
+                    o_unit  = row[12] if len(row) > 12 else None
+                    if n not in all_daily_rows:
+                        all_daily_rows[n] = {'name': n, 'category': cat or '', 'unit': unit or '',
+                                              'daily_weight': daily_w, 'daily_order': d_order or 0,
+                                              'order_unit': o_unit or ''}
+                    else:
+                        all_daily_rows[n]['daily_weight'] = (all_daily_rows[n]['daily_weight'] or 0) + daily_w
+                        all_daily_rows[n]['daily_order']  = (all_daily_rows[n]['daily_order']  or 0) + (d_order or 0)
+
+        # تاب Summary في Daily_Ordering.xlsx
+        summary_rows = sorted(all_daily_rows.values(), key=lambda r: r['name'].lower())
+        ws_sum = wb_daily.create_sheet(title='Summary')
+        ws_sum.sheet_view.rightToLeft = True
+        ws_sum.row_dimensions[1].height = 24
+        HEADER_FILL2 = PatternFill('solid', start_color='6600FF')
+        HEADER_FONT2 = Font(name='Tahoma', bold=True, color='FFFFFF', size=11)
+        from openpyxl.styles import Border, Side
+        THIN2 = Side(style='thin', color='D0C8F0')
+        BOX2  = Border(top=THIN2, bottom=THIN2, left=THIN2, right=THIN2)
+        EVEN2 = PatternFill('solid', start_color='F2EEFF')
+
+        headers_s = ['ITEMS', 'Category', 'Unit', 'Daily Weight', 'Daily Order', 'Order Unit']
+        widths_s   = [48, 16, 8, 16, 14, 14]
+        for c, (h, w) in enumerate(zip(headers_s, widths_s), start=1):
+            cell = ws_sum.cell(row=1, column=c, value=h)
+            cell.fill = HEADER_FILL2; cell.font = HEADER_FONT2
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = BOX2
+            ws_sum.column_dimensions[get_column_letter(c)].width = w
+
+        for i, row in enumerate(summary_rows):
+            r = i + 2
+            fill = EVEN2 if i % 2 == 0 else PatternFill('solid', start_color='FFFFFF')
+            vals = [row['name'], row['category'], row['unit'],
+                    row['daily_weight'], row['daily_order'], row['order_unit']]
+            aligns = ['right', 'center', 'center', 'center', 'center', 'center']
+            for c, (v, al) in enumerate(zip(vals, aligns), start=1):
+                cell = ws_sum.cell(row=r, column=c, value=v)
+                cell.fill = fill
+                cell.font = Font(name='Tahoma', size=11, bold=(c in (4, 5)))
+                cell.alignment = Alignment(horizontal=al, vertical='center')
+                cell.border = BOX2
+                if c in (4, 5) and isinstance(v, float):
+                    cell.number_format = '#,##0.00'
+        ws_sum.freeze_panes = 'A2'
 
         if not wb_daily.sheetnames:
             wb_daily.create_sheet('فاضي')
