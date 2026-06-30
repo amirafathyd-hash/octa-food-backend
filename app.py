@@ -1300,6 +1300,7 @@ def auto_weekly_purchasing():
 
 
 
+@app.route('/api/mega-purchasing', methods=['POST'])
 def mega_purchasing():
     missing = [k for k in STATION_ORDER if k not in request.files]
     if missing:
