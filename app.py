@@ -71,8 +71,11 @@ def health():
 
 @app.route('/api/upload-order-preview', methods=['POST'])
 def upload_order_preview():
-    """بيقرأ ملفات الأوردر ويرجع الأصناف بدون ما يحفظ في الداتابيز —
-    للاستخدام في أداة المطابقة السريعة (quick-match.html)."""
+    """بيقرأ ملفات الأوردر ويرجع الأصناف بدون ما يحفظ الكميات في الداتابيز —
+    للاستخدام في أداة المطابقة السريعة (quick-match.html).
+    ملحوظة: بيغذي (seed) قاعدة الأصناف الرئيسية master_items عشان مطابقة
+    الفواتير في نفس الأداة تلاقي أصناف تتقارن بيها - من غيرها match_invoice_item
+    بيرجع 'غير موجود' للكل لأن الـ db بيكون فاضي."""
     files = request.files.getlist('files')
     all_items = []
     errors = []
@@ -82,6 +85,7 @@ def upload_order_preview():
             path = tmp.name
         try:
             order = parse_order_pdf(path)
+            seed_from_order(order)
             date_iso = _to_iso(order['date'])
             for section in ('salads', 'dressing'):
                 for item in order[section]:
