@@ -69,6 +69,41 @@ def health():
     return jsonify({'status': 'ok'})
 
 
+@app.route('/api/upload-order-preview', methods=['POST'])
+def upload_order_preview():
+    """بيقرأ ملفات الأوردر ويرجع الأصناف بدون ما يحفظ في الداتابيز —
+    للاستخدام في أداة المطابقة السريعة (quick-match.html)."""
+    files = request.files.getlist('files')
+    all_items = []
+    errors = []
+    for f in files:
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+            f.save(tmp.name)
+            path = tmp.name
+        try:
+            order = parse_order_pdf(path)
+            date_iso = _to_iso(order['date'])
+            for section in ('salads', 'dressing'):
+                for item in order[section]:
+                    all_items.append({
+                        'item_date': date_iso,
+                        'item_key': item['name_en'].strip().upper(),
+                        'name_en': item['name_en'],
+                        'name_ar': item['name_ar'],
+                        'section': section,
+                        'qty_box': item['qty_box'],
+                        'qty_needed': item['qty_needed'],
+                        'unit': item['unit'].split('-')[0],
+                        'current_inventory': item['current_inventory'],
+                        'source_file': f.filename,
+                    })
+        except Exception as e:
+            errors.append({'file': f.filename, 'error': str(e)})
+        finally:
+            os.unlink(path)
+    return jsonify({'items': all_items, 'errors': errors})
+
+
 @app.route('/api/upload-order', methods=['POST'])
 def upload_order():
     """Accepts one or more order PDFs (multipart 'files'). Upserts qty_needed/box/inventory."""
