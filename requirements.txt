@@ -8,3 +8,5 @@ supabase==2.31.0
 requests==2.32.3
 pycel==1.0b30
 Pillow==11.1.0
+arabic-reshaper==3.0.1
+python-bidi==0.6.11
