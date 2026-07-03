@@ -7,3 +7,4 @@ rapidfuzz==3.14.5
 supabase==2.31.0
 requests==2.32.3
 pycel==1.0b30
+Pillow==11.1.0
