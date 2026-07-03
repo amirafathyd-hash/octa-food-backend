@@ -789,6 +789,8 @@ def _add_station_tab(wb, station_key, file_storage):
 
 
 VEGETABLE_CATEGORY_LABELS = {'خضروات', 'خضراوات'}
+FRUIT_CATEGORY_LABELS = {'فاكهة', 'فاكهه', 'فواكه'}
+PRODUCE_CATEGORY_LABELS = VEGETABLE_CATEGORY_LABELS | FRUIT_CATEGORY_LABELS
 
 
 def _read_vegetable_rows(file_storage, sheet_name):
@@ -941,8 +943,10 @@ def _build_vegetables_workbook(station_vegetable_data):
 
 def _add_station_tab_daily(wb, station_key, file_storage):
     """زي _add_station_tab بالظبط، بس بترجع أعمدة A:D بس (من غير الوزن
-    الأسبوعي في E)، وبتشيل أي صف يكون الوزن اليومي بتاعه (عمود D) صفر رقمي
-    بالظبط — صفوف العناوين والفئات (اللي عمود D فيها فاضي) بتفضل زي ما هي."""
+    الأسبوعي في E)، وبتشيل: (1) أي صف يكون الوزن اليومي بتاعه (عمود D) صفر
+    رقمي بالظبط، و(2) أي صف فئته 'خضروات/خضراوات/فاكهة' لأنها بتنزل في
+    Vegetables.xlsx لوحدها فمفيش داعي تتكرر هنا. صفوف العناوين والفئات
+    (اللي عمود D فيها فاضي) بتفضل زي ما هي."""
     file_storage.seek(0)
     src_wb = openpyxl.load_workbook(file_storage, data_only=True)
     sheet_name = STATION_SHEET_MAP[station_key]
@@ -957,6 +961,9 @@ def _add_station_tab_daily(wb, station_key, file_storage):
         d_value = row[3].value if len(row) > 3 else None
         if isinstance(d_value, (int, float)) and not isinstance(d_value, bool) and d_value == 0:
             continue  # الصف ده وزنه اليومي صفر بالظبط — نتخطاه بالكامل
+        category = row[1].value if len(row) > 1 else None
+        if category and str(category).strip() in PRODUCE_CATEGORY_LABELS:
+            continue  # خضروات/فاكهة - موجودة في Vegetables.xlsx لوحدها
         for cell in row:
             new_cell = out_ws.cell(row=out_row, column=cell.column, value=cell.value)
             if cell.has_style:
@@ -1031,9 +1038,11 @@ def daily_ordering():
                     daily_w = row[3] if len(row) > 3 else None
                     if not isinstance(daily_w, (int, float)) or daily_w == 0:
                         continue
+                    cat  = row[1] if len(row) > 1 else None
+                    if cat and str(cat).strip() in PRODUCE_CATEGORY_LABELS:
+                        continue  # خضروات/فاكهة - موجودة في Vegetables.xlsx لوحدها
                     n = str(name).strip()
                     unit = row[2] if len(row) > 2 else None
-                    cat  = row[1] if len(row) > 1 else None
                     d_order = row[11] if len(row) > 11 else None
                     o_unit  = row[12] if len(row) > 12 else None
                     if n not in all_daily_rows:
@@ -1268,6 +1277,9 @@ def auto_detect_stations():
                     daily_w = row[3] if len(row) > 3 else None
                     if not isinstance(daily_w, (int, float)) or daily_w == 0:
                         continue
+                    category0 = row[1] if len(row) > 1 else None
+                    if category0 and str(category0).strip() in PRODUCE_CATEGORY_LABELS:
+                        continue  # خضروات/فاكهة - موجودة في Vegetables.xlsx لوحدها
                     n = str(name).strip()
                     d_order = row[11] if len(row) > 11 else None
                     o_unit  = row[12] if len(row) > 12 else None
