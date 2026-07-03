@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice \
     poppler-utils \
     fonts-freefont-ttf \
+    libraqm0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
