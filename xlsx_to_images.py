@@ -67,16 +67,7 @@ def day_name_from_date_str(date_str):
     return DAY_NAMES_AR[n], n
 
 
-def add_title_bar(im, sheet_name, day_label, day_num):
-    """يضيف شريط عنوان فوق الصورة مباشرة - باستخدام محرك raqm بتاع Pillow
-    (نفس تقنية HarfBuzz+FriBidi اللي بيستخدمها المتصفح) عشان العربي يترسم
-    صح تلقائيًا من غير أي هاكات يدوية بتفشل مع حالات مختلفة."""
-    title = f"{sheet_name} — {day_label} ({day_num})"
-    global FONT_BOLD
-    if FONT_BOLD is None:
-        FONT_BOLD = _find_font()
-    font = ImageFont.truetype(FONT_BOLD, TITLE_FONT_SIZE, layout_engine=ImageFont.Layout.RAQM)
-
+def _draw_title_raqm(im, title, font):
     dummy_im = Image.new('RGB', (10, 10))
     dummy_draw = ImageDraw.Draw(dummy_im)
     bbox = dummy_draw.textbbox((0, 0), title, font=font, direction='rtl')
@@ -89,6 +80,50 @@ def add_title_bar(im, sheet_name, day_label, day_num):
                title, font=font, fill=TITLE_FG, direction='rtl')
     new_im.paste(im, (0, bar_h))
     return new_im
+
+
+def _draw_title_fallback(im, sheet_name, day_label, day_num, font_path):
+    """احتياطي لو libraqm مش متاح على السيرفر - بيرسم كل جزء (إنجليزي/عربي/رقم)
+    لوحده بترتيبه الطبيعي بدل الاعتماد على raqm، فمش بيحتاج شكل معقد."""
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+
+    font = ImageFont.truetype(font_path, TITLE_FONT_SIZE)
+    segments = [f"{sheet_name} — ", get_display(arabic_reshaper.reshape(day_label)), f" ({day_num})"]
+
+    dummy_im = Image.new('RGB', (10, 10))
+    dummy_draw = ImageDraw.Draw(dummy_im)
+    total_w = sum(dummy_draw.textbbox((0, 0), t, font=font)[2] for t in segments)
+    bbox_full = dummy_draw.textbbox((0, 0), "Ag" + day_label, font=font)
+    text_h = bbox_full[3] - bbox_full[1]
+    bar_h = text_h + TITLE_PAD_Y * 2
+
+    new_im = Image.new('RGB', (im.width, im.height + bar_h), TITLE_BG)
+    draw = ImageDraw.Draw(new_im)
+    x = (im.width - total_w) / 2
+    for t in segments:
+        bbox = draw.textbbox((0, 0), t, font=font)
+        draw.text((x - bbox[0], TITLE_PAD_Y - bbox[1]), t, font=font, fill=TITLE_FG)
+        x += bbox[2] - bbox[0]
+    new_im.paste(im, (0, bar_h))
+    return new_im
+
+
+def add_title_bar(im, sheet_name, day_label, day_num):
+    """يضيف شريط عنوان فوق الصورة مباشرة - باستخدام محرك raqm بتاع Pillow
+    (نفس تقنية HarfBuzz+FriBidi اللي بيستخدمها المتصفح) عشان العربي يترسم
+    صح تلقائيًا. لو raqm مش متاح على السيرفر، بيرجع لطريقة رسم بديلة."""
+    title = f"{sheet_name} — {day_label} ({day_num})"
+    global FONT_BOLD
+    if FONT_BOLD is None:
+        FONT_BOLD = _find_font()
+
+    try:
+        font = ImageFont.truetype(FONT_BOLD, TITLE_FONT_SIZE, layout_engine=ImageFont.Layout.RAQM)
+        return _draw_title_raqm(im, title, font)
+    except ImportError:
+        # مكتبة raqm نفسها مش متظبطة على السيرفر - استخدم الطريقة الاحتياطية
+        return _draw_title_fallback(im, sheet_name, day_label, day_num, FONT_BOLD)
 
 
 def prepare_sheet_for_export(xlsx_path, out_path):
