@@ -1,2 +1,0 @@
-[phases.setup]
-aptPkgs = ["libreoffice", "poppler-utils", "fonts-freefont-ttf"]
