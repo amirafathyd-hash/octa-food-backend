@@ -435,7 +435,10 @@ def tokyo_ordering_update_from_day_file():
 
     response = send_file(out_path, as_attachment=True,
                           download_name=f"Tokyo_Ordering_Updated_{report['day_name']}.xlsm")
-    response.headers['X-Match-Report'] = json.dumps(report, ensure_ascii=False)
+    # مهم: هيدرات HTTP لازم تكون ASCII بس - النص العربي في التقرير لازم يتحوّل
+    # لصيغة \uXXXX (ensure_ascii=True) وإلا السيرفر (gunicorn) بيرفض يبعت الرد
+    # كله بخطأ "Invalid HTTP Header" والمتصفح بيشوفه فشل اتصال تام (CORS مضلِّل).
+    response.headers['X-Match-Report'] = json.dumps(report, ensure_ascii=True)
     return response
 
 
