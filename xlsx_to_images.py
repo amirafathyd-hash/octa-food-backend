@@ -187,9 +187,13 @@ def pdf_pages_to_png(pdf_path, workdir, prefix='page'):
     return [os.path.join(workdir, f) for f in pages]
 
 
-def xlsx_sheets_to_images(xlsx_path, date_str, outdir):
+def xlsx_sheets_to_images(xlsx_path, date_str, outdir, day_num_override=None):
     os.makedirs(outdir, exist_ok=True)
-    day_label, day_num = day_name_from_date_str(date_str)
+    if day_num_override and 1 <= day_num_override <= 7:
+        day_num = day_num_override
+        day_label = DAY_NAMES_AR[day_num]
+    else:
+        day_label, day_num = day_name_from_date_str(date_str)
 
     with tempfile.TemporaryDirectory() as tmp:
         prepared_xlsx = os.path.join(tmp, 'prepared.xlsx')
@@ -216,10 +220,12 @@ def xlsx_sheets_to_images(xlsx_path, date_str, outdir):
         return saved
 
 
-def add_workbook_images_to_zip(zf, wb_or_path, date_str, folder='images', prefix=''):
+def add_workbook_images_to_zip(zf, wb_or_path, date_str, folder='images', prefix='', day_num_override=None):
     """بتاخد Workbook (كائن openpyxl) أو مسار ملف إكسيل، وبتضيف صورة PNG لكل
     تاب فيه جوه zip مفتوح بالفعل (zf) تحت فولدر `folder`. للاستخدام مباشرة
-    من app.py من غير ما تتعامل مع مسارات ملفات بنفسك."""
+    من app.py من غير ما تتعامل مع مسارات ملفات بنفسك.
+    day_num_override: رقم اليوم (١-٧) لو معروف مسبقًا (مثلاً من خلية R1)،
+    بيتجاوز حساب اليوم من date_str."""
     with tempfile.TemporaryDirectory() as tmp:
         if isinstance(wb_or_path, str):
             xlsx_path = wb_or_path
@@ -228,7 +234,7 @@ def add_workbook_images_to_zip(zf, wb_or_path, date_str, folder='images', prefix
             wb_or_path.save(xlsx_path)
 
         img_dir = os.path.join(tmp, 'imgs')
-        saved = xlsx_sheets_to_images(xlsx_path, date_str, img_dir)
+        saved = xlsx_sheets_to_images(xlsx_path, date_str, img_dir, day_num_override=day_num_override)
         for p in saved:
             arcname = f"{folder}/{prefix}{os.path.basename(p)}"
             zf.write(p, arcname)
