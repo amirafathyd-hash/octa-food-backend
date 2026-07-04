@@ -3,6 +3,8 @@ import requests
 import io
 import re
 import secrets
+import shutil
+import json
 import tempfile
 import zipfile
 import openpyxl
@@ -23,7 +25,7 @@ from item_db import load_db, seed_from_order
 from matcher import match_invoice_item
 from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
-from tokyo_ordering import read_current_inputs, write_updated_workbook
+from tokyo_ordering import read_current_inputs, write_updated_workbook, read_day_file_meals, merge_day_into_template
 from xlsx_to_images import add_workbook_images_to_zip
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
@@ -388,6 +390,38 @@ def tokyo_ordering_export():
     days = payload.get('days') or []
     out_path = write_updated_workbook(TOKYO_TEMPLATE_PATH, days)
     return send_file(out_path, as_attachment=True, download_name='Tokyo_Ordering_Updated.xlsm')
+
+
+@app.route('/api/tokyo-ordering/update-from-day-file', methods=['POST'])
+def tokyo_ordering_update_from_day_file():
+    """كارت محطة التجهيز: بترفع ملف يوم واحد بس (زي Octa_Food_Sat_....xlsx)،
+    والسيستم بيعرف اليوم تلقائي من شيت Update بتاعه، ويطابق الأصناف مع
+    عمود Meal name في All_Ingredients، ويحدّث Total Count/Total Grams بتاعت
+    نفس اليوم بس في ملف توكيو الأساسي (بيتحفظ التحديث على السيرفر عشان
+    الأيام اللي بترفعها بعد كده تتراكم على بعضها)، وبيرجّعلك الملف كامل
+    بالماكرو والمعادلات زي ما هي، + تقرير بالأصناف اللي اتطابقت واللي لأ."""
+    if not os.path.exists(TOKYO_TEMPLATE_PATH):
+        return jsonify({'error': 'ملف القالب tokyo_ordering_template.xlsm غير موجود على السيرفر'}), 404
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'ارفع ملف يوم واحد (اسمه file في الطلب)'}), 400
+
+    try:
+        day_no, meals = read_day_file_meals(f)
+    except Exception as e:
+        return jsonify({'error': f'تعذّر قراءة ملف اليوم: {e}'}), 400
+
+    try:
+        out_path, report = merge_day_into_template(TOKYO_TEMPLATE_PATH, day_no, meals)
+        shutil.copyfile(out_path, TOKYO_TEMPLATE_PATH)  # حفظ التحديث على القالب نفسه عشان يتراكم
+    except Exception as e:
+        app.logger.exception('tokyo_ordering_update_from_day_file failed')
+        return jsonify({'error': f'حصل خطأ أثناء الدمج: {e}'}), 500
+
+    response = send_file(out_path, as_attachment=True,
+                          download_name=f"Tokyo_Ordering_Updated_{report['day_name']}.xlsm")
+    response.headers['X-Match-Report'] = json.dumps(report, ensure_ascii=False)
+    return response
 
 
 def _next_month(month):
@@ -1007,7 +1041,6 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
     return zip_buf
 
 
-@app.route('/api/daily-ordering', methods=['POST'])
 def _read_report_day_number(files_by_key):
     """بتدوّر على رقم اليوم (١=السبت ... ٧=الجمعة) في خلية R1 في أول شيت متاح
     من ملفات المحطات الستة. بترجع (day_num, None) لو لقت رقم صحيح من 1 لـ7،
@@ -1037,6 +1070,7 @@ def _read_report_day_number(files_by_key):
     return None
 
 
+@app.route('/api/daily-ordering', methods=['POST'])
 def daily_ordering():
     """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع zip فيه
     ملفين: Daily_Ordering.xlsx (تاب لكل محطة بأعمدة A:D، أي صف وزنه اليومي
