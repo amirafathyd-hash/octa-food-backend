@@ -980,10 +980,12 @@ def _add_station_tab_daily(wb, station_key, file_storage):
     return out_ws
 
 
-def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True):
+def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num_override=None):
     """بتبني zip فيه Daily_Ordering + Vegetables (إكسيل) + صورة PNG لكل تاب
     فيهم لو with_images=True (لو توليد الصور فشل لأي سبب - مثلاً LibreOffice
-    مش متظبط على السيرفر - بيرجع الإكسيل عادي بدون ما يكسر الطلب كله)."""
+    مش متظبط على السيرفر - بيرجع الإكسيل عادي بدون ما يكسر الطلب كله).
+    day_num_override: رقم اليوم (١=السبت...٧=الجمعة) لو اتقرا من خلية R1 في
+    ملفات المحطات، عشان يتحط في عنوان كل صورة بدل ما يتحسب من تاريخ السيرفر."""
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         buf1 = io.BytesIO(); wb_daily.save(buf1)
@@ -993,8 +995,10 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True):
 
         if with_images:
             try:
-                add_workbook_images_to_zip(zf, wb_daily, today, prefix='DailyOrdering_')
-                add_workbook_images_to_zip(zf, wb_veg, today, prefix='Vegetables_')
+                add_workbook_images_to_zip(zf, wb_daily, today, prefix='DailyOrdering_',
+                                            day_num_override=day_num_override)
+                add_workbook_images_to_zip(zf, wb_veg, today, prefix='Vegetables_',
+                                            day_num_override=day_num_override)
             except Exception as e:
                 app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
                 zf.writestr('images/تعذر_توليد_الصور.txt',
@@ -1004,6 +1008,35 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True):
 
 
 @app.route('/api/daily-ordering', methods=['POST'])
+def _read_report_day_number(files_by_key):
+    """بتدوّر على رقم اليوم (١=السبت ... ٧=الجمعة) في خلية R1 في أول شيت متاح
+    من ملفات المحطات الستة. بترجع (day_num, None) لو لقت رقم صحيح من 1 لـ7،
+    أو (None, None) لو مفيش أي ملف فيه رقم صالح."""
+    for key in STATION_ORDER:
+        f = files_by_key.get(key)
+        if not f:
+            continue
+        try:
+            f.seek(0)
+            wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
+            sheet_name = STATION_SHEET_MAP.get(key)
+            ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.worksheets[0]
+            raw = ws['R1'].value
+            wb.close()
+            f.seek(0)
+            try:
+                n = int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= 7:
+                return n
+        except Exception:
+            f.seek(0)
+            continue
+    app.logger.warning('تعذّر قراءة رقم اليوم من R1 في أي ملف - هيتحسب من تاريخ السيرفر بدل منه')
+    return None
+
+
 def daily_ordering():
     """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع zip فيه
     ملفين: Daily_Ordering.xlsx (تاب لكل محطة بأعمدة A:D، أي صف وزنه اليومي
@@ -1096,7 +1129,8 @@ def daily_ordering():
         wb_veg = _build_vegetables_workbook(vegetable_data)
 
         today = datetime.now().strftime('%Y-%m-%d')
-        zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today)
+        day_num_override = _read_report_day_number({k: request.files[k] for k in STATION_ORDER})
+        zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today, day_num_override=day_num_override)
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
                           mimetype='application/zip')
@@ -1301,7 +1335,8 @@ def auto_detect_stations():
         wb_veg = _build_vegetables_workbook(vegetable_data)
 
         today = datetime.now().strftime('%Y-%m-%d')
-        zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today)
+        day_num_override = _read_report_day_number(station_files)
+        zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today, day_num_override=day_num_override)
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
                           mimetype='application/zip')
