@@ -34,6 +34,21 @@ app = Flask(__name__)
 CORS(app)  # allow calls from the Netlify frontend domain
 
 
+@app.after_request
+def _ensure_cors_headers(response):
+    """CORS(app) بيضيف الهيدرات دي للردود العادية بس - في حالات معينة (زي رد
+    خطأ 400/500 راجع من جوه دالة، أو استثناء قبل ما الطلب يوصل للـ view function)
+    الهيدرات ممكن متتحطش، فالمتصفح بيرفض حتى يعرض رسالة الخطأ الحقيقية ويطلع
+    "Failed to fetch" بدل كده. الكود ده بيضمن إن كل رد (نجح أو فشل) شايل الهيدر."""
+    origin = request.headers.get('Origin')
+    if origin:
+        response.headers.setdefault('Access-Control-Allow-Origin', origin)
+        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token')
+        response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        response.headers.setdefault('Access-Control-Expose-Headers', 'X-Match-Report')
+    return response
+
+
 def _to_iso(date_str):
     """'1-Apr-2026' -> '2026-04-01'"""
     return datetime.strptime(date_str, '%d-%b-%Y').strftime('%Y-%m-%d')
@@ -1041,6 +1056,7 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
     return zip_buf
 
 
+@app.route('/api/daily-ordering', methods=['POST'])
 def _read_report_day_number(files_by_key):
     """بتدوّر على رقم اليوم (١=السبت ... ٧=الجمعة) في خلية R1 في أول شيت متاح
     من ملفات المحطات الستة. بترجع (day_num, None) لو لقت رقم صحيح من 1 لـ7،
@@ -1070,7 +1086,6 @@ def _read_report_day_number(files_by_key):
     return None
 
 
-@app.route('/api/daily-ordering', methods=['POST'])
 def daily_ordering():
     """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع zip فيه
     ملفين: Daily_Ordering.xlsx (تاب لكل محطة بأعمدة A:D، أي صف وزنه اليومي
