@@ -421,6 +421,104 @@ def tokyo_ordering_update_from_day_file():
     return response
 
 
+@app.route('/api/sauce-receipt/create', methods=['POST'])
+def sauce_receipt_create():
+    """بتاخد قايمة أيام/صفوف الصوص (اللي طلعت من زرار استخراج الصوص) وتعمل
+    سجل جديد في sauce_receipts، وترجّع id تستخدمه في بناء رابط تبعته للمسؤول
+    على واتساب يدويًا (زي: pixivo.org/sauce-receipt.html?id=...)."""
+    payload = request.get_json(silent=True) or {}
+    days = payload.get('days') or []
+    if not days:
+        return jsonify({'error': 'مفيش بيانات صوص مبعوتة'}), 400
+    sb = get_client()
+    res = execute_with_retry(sb.table('sauce_receipts').insert({
+        'days': days, 'status': 'pending',
+    }))
+    row_id = res.data[0]['id']
+    return jsonify({'id': row_id})
+
+
+@app.route('/api/sauce-receipt/<receipt_id>', methods=['GET'])
+def sauce_receipt_get(receipt_id):
+    """اندبوينت عام (من غير تسجيل دخول) - صفحة الاستلام sauce-receipt.html
+    بتناديه عشان تعرض للمسؤول الأصناف اللي محتاجة يملأ كمياتها."""
+    sb = get_client()
+    res = execute_with_retry(sb.table('sauce_receipts').select('*').eq('id', receipt_id))
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'الرابط ده مش موجود أو انتهى'}), 404
+    receipt = rows[0]
+    return jsonify({
+        'id': receipt['id'], 'days': receipt['days'], 'status': receipt['status'],
+        'created_at': receipt['created_at'],
+    })
+
+
+@app.route('/api/sauce-receipt/<receipt_id>/submit', methods=['POST'])
+def sauce_receipt_submit(receipt_id):
+    """المسؤول بيدوس Submit في صفحة الاستلام - بتاخد الكميات المستلمة الفعلية،
+    تحسب الزيادة/النقص لكل صنف، تحفظها، وتسجّل إشعار في upload_log عشان يظهر
+    في لوحة التحكم الرئيسية إن الاستلام خلص وبكل التفاصيل."""
+    payload = request.get_json(silent=True) or {}
+    submitted_days = payload.get('days') or []
+    if not submitted_days:
+        return jsonify({'error': 'مفيش بيانات استلام مبعوتة'}), 400
+
+    sb = get_client()
+    res = execute_with_retry(sb.table('sauce_receipts').select('*').eq('id', receipt_id))
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'الرابط ده مش موجود أو انتهى'}), 404
+    receipt = rows[0]
+
+    # اربط كل صف مُستلَم بالصف الأصلي (بالـ key) واحسب الزيادة/النقص
+    expected_by_key = {}
+    for day in receipt['days']:
+        for r in day.get('rows', []):
+            expected_by_key[r['key']] = r
+
+    result_days = []
+    summary_lines = []
+    for day in submitted_days:
+        day_name = day.get('day', '')
+        result_rows = []
+        for r in day.get('rows', []):
+            exp = expected_by_key.get(r.get('key'), {})
+            pm_expected = exp.get('expectedProteinMix') or 0
+            tp_expected = exp.get('expectedTopping')
+            pm_received = r.get('proteinMixReceived') or 0
+            tp_received = r.get('toppingReceived') or 0
+            total_expected = pm_expected + (tp_expected or 0)
+            total_received = pm_received + (tp_received or 0)
+            excess = max(0, total_received - total_expected)
+            shortage = max(0, total_expected - total_received)
+            result_rows.append({
+                'key': r.get('key'), 'title': exp.get('title', ''),
+                'proteinMixReceived': pm_received, 'toppingReceived': tp_received,
+                'excess': excess, 'shortage': shortage,
+            })
+            if excess or shortage:
+                summary_lines.append(
+                    f"{day_name} - {exp.get('title','')}: "
+                    f"{'زيادة ' + str(round(excess,2)) if excess else ''}"
+                    f"{'نقص ' + str(round(shortage,2)) if shortage else ''}"
+                )
+        result_days.append({'day': day_name, 'rows': result_rows})
+
+    execute_with_retry(sb.table('sauce_receipts').update({
+        'status': 'submitted',
+        'submitted_days': result_days,
+        'submitted_at': datetime.now(timezone.utc).isoformat(),
+    }).eq('id', receipt_id))
+
+    notice = 'تم استلام الصوص بالكامل، كل الكميات مطابقة ✅' if not summary_lines else (
+        'تم استلام الصوص - فيه فروقات محتاجة مراجعة:\n' + '\n'.join(summary_lines))
+    _log('sauce_receipt', f'رابط استلام {receipt_id[:8]}', None, notice,
+         level='warning' if summary_lines else 'info')
+
+    return jsonify({'ok': True, 'has_discrepancy': bool(summary_lines)})
+
+
 def _next_month(month):
     y, m = map(int, month.split('-'))
     return f'{y+1}-01-01' if m == 12 else f'{y}-{m+1:02d}-01'
