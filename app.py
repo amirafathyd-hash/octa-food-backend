@@ -1331,11 +1331,11 @@ def auto_detect_stations():
         except Exception as e:
             undetected.append(f'{f.filename} (خطأ: {e})')
 
-    missing = [k for k in STATION_ORDER if k not in station_files]
-    if missing:
+    if not station_files:
         return jsonify({
-            'error': f'مش قادر أحدد محطة ملفات: {undetected}. محطات ناقصة: {missing}'
+            'error': f'مش قادر أحدد محطة أي ملف من اللي رفعتهم: {undetected}'
         }), 400
+    detected_keys = list(station_files.keys())
 
     # خطوة 2: نفس منطق daily_ordering بالضبط
     try:
@@ -1344,7 +1344,7 @@ def auto_detect_stations():
         vegetable_data = {}
         all_daily_rows = {}
 
-        for key in STATION_ORDER:
+        for key in detected_keys:
             f = station_files[key]
             f.seek(0)
             _add_station_tab_daily(wb_daily, key, f)
@@ -1418,24 +1418,24 @@ def auto_weekly_purchasing():
         except Exception:
             pass
 
-    missing = [k for k in STATION_ORDER if k not in station_files]
-    if missing:
-        return jsonify({'error': f'محطات ناقصة أو مش قادر أحددها: {missing}'}), 400
+    if not station_files:
+        return jsonify({'error': 'مش قادر أحدد محطة أي ملف من اللي رفعتهم'}), 400
+    detected_keys = list(station_files.keys())
 
     try:
         station_data = {}
-        for key in STATION_ORDER:
+        for key in detected_keys:
             station_files[key].seek(0)
             _, rows = _read_station_rows(station_files[key], STATION_SHEET_MAP[key])
             station_data[key] = rows
 
         wb_full, cols = _build_purchasing_workbook(station_data)
-        for key in STATION_ORDER:
+        for key in detected_keys:
             station_files[key].seek(0)
             _add_station_tab(wb_full, key, station_files[key])
 
         wb_kitchen, _ = _build_purchasing_workbook(station_data)
-        for key in STATION_ORDER:
+        for key in detected_keys:
             station_files[key].seek(0)
             ws_station = _add_station_tab(wb_kitchen, key, station_files[key])
             if ws_station:
