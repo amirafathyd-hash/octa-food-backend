@@ -895,11 +895,11 @@ def _build_vegetables_workbook(station_vegetable_data):
     THIN = Side(style='thin', color='D0C8F0')
     BOX  = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
 
-    COL_WIDTHS_NORMAL = [48, 14, 16, 14, 14]  # A:E (بدون عمود المحطة)
-    COL_WIDTHS_ALL    = [18, 48, 14, 16, 14, 14]  # A:F (مع عمود المحطة)
+    COL_WIDTHS_NORMAL = [48, 14, 16, 14]  # A:D (بدون عمود المحطة ولا Daily Weight)
+    COL_WIDTHS_ALL    = [18, 48, 14, 16, 14]  # A:E (مع عمود المحطة، بدون Daily Weight)
 
-    HEADERS_NORMAL = ['ITEMS', 'Category', 'Daily Weight', 'Daily Order', 'Order Unit']
-    HEADERS_ALL    = ['Station', 'ITEMS', 'Category', 'Daily Weight', 'Daily Order', 'Order Unit']
+    HEADERS_NORMAL = ['ITEMS', 'Category', 'Daily Order', 'Order Unit']
+    HEADERS_ALL    = ['Station', 'ITEMS', 'Category', 'Daily Order', 'Order Unit']
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -939,11 +939,6 @@ def _build_vegetables_workbook(station_vegetable_data):
             cell = ws.cell(row=r, column=c, value=row['category'])
             cell.fill = fill; cell.font = DATA_FONT; cell.border = BOX
             cell.alignment = CENTER; c += 1
-            # Daily Weight
-            cell = ws.cell(row=r, column=c, value=row['daily_weight'])
-            cell.fill = fill; cell.font = NUM_FONT; cell.border = BOX
-            cell.alignment = CENTER
-            cell.number_format = '#,##0.00'; c += 1
             # Daily Order
             cell = ws.cell(row=r, column=c, value=row['daily_order'])
             cell.fill = fill; cell.font = NUM_FONT; cell.border = BOX
@@ -1241,11 +1236,11 @@ def _build_summary_sheet(ws, rows, with_unit_col=False):
     ws.freeze_panes = 'A2'
 
     if with_unit_col:
-        headers = ['ITEMS', 'Category', 'Unit', 'Daily Weight', 'Daily Order', 'Order Unit']
-        widths  = [48, 16, 8, 16, 14, 14]
+        headers = ['ITEMS', 'Category', 'Unit', 'Daily Weight']
+        widths  = [48, 16, 8, 16]
     else:
-        headers = ['ITEMS', 'Category', 'Daily Weight', 'Daily Order', 'Order Unit']
-        widths  = [48, 16, 16, 14, 14]
+        headers = ['ITEMS', 'Category', 'Daily Weight']
+        widths  = [48, 16, 16]
 
     for c, (h, w) in enumerate(zip(headers, widths), start=1):
         cell = ws.cell(row=1, column=c, value=h)
@@ -1256,11 +1251,9 @@ def _build_summary_sheet(ws, rows, with_unit_col=False):
     for i, row in enumerate(rows):
         r = i + 2
         fill = EVEN if i % 2 == 0 else ODD
-        vals = ([row['name'], row.get('category', ''), row.get('unit', ''),
-                 row['daily_weight'], row.get('daily_order', 0), row.get('order_unit', '')]
+        vals = ([row['name'], row.get('category', ''), row.get('unit', ''), row['daily_weight']]
                 if with_unit_col else
-                [row['name'], row.get('category', ''),
-                 row['daily_weight'], row.get('daily_order', 0), row.get('order_unit', '')])
+                [row['name'], row.get('category', ''), row['daily_weight']])
         for c, v in enumerate(vals, start=1):
             cell = ws.cell(row=r, column=c, value=v)
             cell.fill = fill; cell.border = BOX
