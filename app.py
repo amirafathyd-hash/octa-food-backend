@@ -421,6 +421,20 @@ def tokyo_ordering_update_from_day_file():
     return response
 
 
+@app.route('/api/sauce-receipt/list', methods=['GET'])
+def sauce_receipt_list():
+    """قايمة كل روابط الاستلام (الأحدث الأول) - محتاجة تسجيل دخول، تستخدمها
+    صفحة sauce-notifications.html عشان تعرض لك أول ما حد يبعت البيانات."""
+    username, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(100)
+    )
+    return jsonify({'receipts': res.data or []})
+
+
 @app.route('/api/sauce-receipt/create', methods=['POST'])
 def sauce_receipt_create():
     """بتاخد قايمة أيام/صفوف الصوص (اللي طلعت من زرار استخراج الصوص) وتعمل
