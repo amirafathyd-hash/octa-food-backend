@@ -435,6 +435,32 @@ def sauce_receipt_list():
     return jsonify({'receipts': res.data or []})
 
 
+@app.route('/api/sauce-receipt/<receipt_id>', methods=['DELETE'])
+def sauce_receipt_delete(receipt_id):
+    """حذف رابط استلام بالكامل - محتاج تسجيل دخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    execute_with_retry(sb.table('sauce_receipts').delete().eq('id', receipt_id))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/sauce-receipt/<receipt_id>/reopen', methods=['POST'])
+def sauce_receipt_reopen(receipt_id):
+    """يرجّع رابط اتبعت خلاص لحالة 'pending' تاني عشان يتملى/يتعدّل من الأول -
+    محتاج تسجيل دخول. مش بتمسح آخر بيانات مُرسلة (submitted_days) خالص، بس
+    بتفتح الرابط يقبل إرسال جديد يستبدلها."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    execute_with_retry(sb.table('sauce_receipts').update({
+        'status': 'pending',
+    }).eq('id', receipt_id))
+    return jsonify({'ok': True})
+
+
 @app.route('/api/sauce-receipt/create', methods=['POST'])
 def sauce_receipt_create():
     """بتاخد قايمة أيام/صفوف الصوص (اللي طلعت من زرار استخراج الصوص) وتعمل
