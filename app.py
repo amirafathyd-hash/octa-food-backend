@@ -33,6 +33,9 @@ TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_te
 app = Flask(__name__)
 CORS(app)  # allow calls from the Netlify frontend domain
 
+from appointments_api import appointments_bp
+app.register_blueprint(appointments_bp)
+
 
 @app.after_request
 def _ensure_cors_headers(response):
