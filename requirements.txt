@@ -10,3 +10,5 @@ pycel==1.0b30
 Pillow==11.1.0
 arabic-reshaper==3.0.1
 python-bidi==0.6.11
+pywebpush==2.0.0
+py-vapid==1.9.0
