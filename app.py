@@ -7,6 +7,8 @@ import shutil
 import json
 import tempfile
 import zipfile
+import smtplib
+from email.message import EmailMessage
 import openpyxl
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
@@ -29,6 +31,13 @@ from tokyo_ordering import read_day_file_meals, merge_day_into_template
 from xlsx_to_images import add_workbook_images_to_zip
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
+
+# إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
+SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
+SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
+SMTP_USER = os.environ.get('SMTP_USER')
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')
+NOTIFY_EMAIL_TO = os.environ.get('NOTIFY_EMAIL_TO')
 
 app = Flask(__name__)
 CORS(app)  # allow calls from the Netlify frontend domain
@@ -585,6 +594,60 @@ def sauce_receipt_submit_day(receipt_id):
 
     return jsonify({'ok': True, 'day': day_name, 'submitted_at': now_iso, 'is_edit': is_edit,
                      'has_discrepancy': bool(summary_lines)})
+
+
+@app.route('/api/sauce-receipt/<receipt_id>/email-day', methods=['POST'])
+def sauce_receipt_email_day(receipt_id):
+    """بتاخد ملف الإكسيل بتاع يوم واحد (نفس الملف اللي بينزل عند المستخدم بالظبط،
+    مبعوت من الفرونت إند كـ multipart file) وتبعته بالإيميل مرفق مباشرة للإيميل
+    اللي كتبه العامل نفسه في خانة "إيميل المستلم" — من غير ما تفتح أي برنامج
+    ميل، الإرسال بيتم من السيرفر على طول. لو NOTIFY_EMAIL_TO متظبطة، بتتبعتلها
+    نسخة BCC كمان (سجلّ عندك) بدون ما تظهر للمستلم الأساسي."""
+    if not (SMTP_USER and SMTP_PASSWORD):
+        return jsonify({'error': 'إعدادات الإيميل لسه مش متظبطة على السيرفر (SMTP_USER / SMTP_PASSWORD)'}), 503
+
+    day_name = request.form.get('day', '')
+    to_email = (request.form.get('to') or '').strip()
+    if not to_email or '@' not in to_email:
+        return jsonify({'error': 'إيميل المستلم ناقص أو غير صحيح'}), 400
+
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'error': 'مفيش ملف مرفوع'}), 400
+
+    file_bytes = file.read()
+
+    msg = EmailMessage()
+    msg['Subject'] = f'استلام الصوص — يوم {day_name} — {datetime.now().strftime("%Y-%m-%d")}'
+    msg['From'] = SMTP_USER
+    msg['To'] = to_email
+    if NOTIFY_EMAIL_TO:
+        msg['Bcc'] = NOTIFY_EMAIL_TO
+    msg.set_content(
+        f'تم استلام صوص يوم {day_name}.\n'
+        f'الملف المرفق فيه كل التفاصيل (المتوقع، المستلم فعليًا، الزيادة والنقص).\n'
+        f'رقم رابط الاستلام: {receipt_id}'
+    )
+    msg.add_attachment(
+        file_bytes,
+        maintype='application',
+        subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        filename=file.filename or f'sauce-receipt-{day_name}.xlsx',
+    )
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+    except Exception as e:
+        app.logger.exception('sauce_receipt_email_day failed to send email')
+        return jsonify({'error': f'تعذر إرسال الإيميل: {e}'}), 500
+
+    _log('sauce_receipt', f'رابط استلام {receipt_id[:8]} - يوم {day_name}', None,
+         f'اتبعتت نسخة بالإيميل لملف يوم {day_name} إلى {to_email}', level='info')
+
+    return jsonify({'ok': True})
 
 
 @app.route('/api/sauce-receipt/<receipt_id>/submit', methods=['POST'])
@@ -1591,6 +1654,25 @@ def auto_detect_stations():
 
         today = datetime.now().strftime('%Y-%m-%d')
         day_num_override = _read_report_day_number(station_files)
+
+        # ?only=daily أو ?only=vegetables — بيرجّع ملف واحد بس (مش zip)، عشان
+        # الواجهة تقدر تفصل زرار "Daily Ordering" عن زرار "Vegetables" لوحدهم.
+        only = request.args.get('only')
+        if only == 'daily':
+            buf = io.BytesIO()
+            wb_daily.save(buf)
+            buf.seek(0)
+            return send_file(buf, as_attachment=True,
+                              download_name=f'Daily_Ordering_{today}.xlsx',
+                              mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        if only == 'vegetables':
+            buf = io.BytesIO()
+            wb_veg.save(buf)
+            buf.seek(0)
+            return send_file(buf, as_attachment=True,
+                              download_name=f'Vegetables_{today}.xlsx',
+                              mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
         zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today, day_num_override=day_num_override)
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
