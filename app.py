@@ -484,24 +484,114 @@ def sauce_receipt_create():
 @app.route('/api/sauce-receipt/<receipt_id>', methods=['GET'])
 def sauce_receipt_get(receipt_id):
     """اندبوينت عام (من غير تسجيل دخول) - صفحة الاستلام sauce-receipt.html
-    بتناديه عشان تعرض للمسؤول الأصناف اللي محتاجة يملأ كمياتها."""
+    بتناديه عشان تعرض للمسؤول الأصناف اللي محتاجة يملأ كمياتها.
+    بيرجّع submitted_days كمان (لو موجودة) عشان الصفحة تقدر تعرض آخر قيم
+    اتبعتت لكل يوم ووقت آخر تعديل، وتسيب المستخدم يعدّل تاني براحته."""
     sb = get_client()
     res = execute_with_retry(sb.table('sauce_receipts').select('*').eq('id', receipt_id))
     rows = res.data or []
     if not rows:
         return jsonify({'error': 'الرابط ده مش موجود أو انتهى'}), 404
     receipt = rows[0]
+    submitted_days = receipt.get('submitted_days') or {}
+    if isinstance(submitted_days, list):
+        # صيغة قديمة (List) من قبل التحديث - نتجاهلها ونبدأ فاضية بالصيغة الجديدة (dict لكل يوم)
+        submitted_days = {}
     return jsonify({
         'id': receipt['id'], 'days': receipt['days'], 'status': receipt['status'],
+        'submitted_days': submitted_days,
         'created_at': receipt['created_at'],
     })
 
 
+@app.route('/api/sauce-receipt/<receipt_id>/submit-day', methods=['POST'])
+def sauce_receipt_submit_day(receipt_id):
+    """بتسجّل استلام يوم واحد بس من الرابط، من غير ما تقفل باقي الأيام أو
+    تمنع تعديل اليوم ده تاني بعدين - الرابط يفضل قابل للفتح والتعديل أي وقت.
+    كل مرة يتبعت فيها نفس اليوم، بيتسجّل وقت وتاريخ التعديل، وبيوصل إشعار
+    جديد للوحة التحكم (يظهر في sauce-notifications.html) يوضّح لو ده أول
+    إرسال أو تعديل على إرسال سابق."""
+    payload = request.get_json(silent=True) or {}
+    day_name = payload.get('day')
+    submitted_rows = payload.get('rows') or []
+    if not day_name or not submitted_rows:
+        return jsonify({'error': 'محتاج اسم اليوم وبيانات الصفوف'}), 400
+
+    sb = get_client()
+    res = execute_with_retry(sb.table('sauce_receipts').select('*').eq('id', receipt_id))
+    found = res.data or []
+    if not found:
+        return jsonify({'error': 'الرابط ده مش موجود أو انتهى'}), 404
+    receipt = found[0]
+
+    # اربط الصفوف المُستلَمة بالبيانات الأصلية المتوقعة لنفس اليوم واحسب الزيادة/النقص
+    expected_by_key = {}
+    for day in receipt['days']:
+        if day.get('day') == day_name:
+            for r in day.get('rows', []):
+                expected_by_key[r['key']] = r
+            break
+
+    result_rows = []
+    summary_lines = []
+    for r in submitted_rows:
+        exp = expected_by_key.get(r.get('key'), {})
+        pm_expected = exp.get('expectedProteinMix') or 0
+        tp_expected = exp.get('expectedTopping')
+        pm_received = r.get('proteinMixReceived') or 0
+        tp_received = r.get('toppingReceived') or 0
+        total_expected = pm_expected + (tp_expected or 0)
+        total_received = pm_received + (tp_received or 0)
+        excess = max(0, total_received - total_expected)
+        shortage = max(0, total_expected - total_received)
+        result_rows.append({
+            'key': r.get('key'), 'title': exp.get('title', ''),
+            'proteinMixReceived': pm_received, 'toppingReceived': tp_received,
+            'excess': excess, 'shortage': shortage,
+        })
+        if excess or shortage:
+            summary_lines.append(
+                f"{exp.get('title','')}: "
+                f"{'زيادة ' + str(round(excess,2)) if excess else ''}"
+                f"{'نقص ' + str(round(shortage,2)) if shortage else ''}"
+            )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    submitted_days = receipt.get('submitted_days') or {}
+    if isinstance(submitted_days, list):
+        submitted_days = {}
+    is_edit = day_name in submitted_days
+    prev_edit_count = (submitted_days.get(day_name) or {}).get('edit_count', 0)
+    submitted_days[day_name] = {
+        'rows': result_rows,
+        'submitted_at': now_iso,
+        'edit_count': prev_edit_count + 1,
+    }
+
+    execute_with_retry(sb.table('sauce_receipts').update({
+        'submitted_days': submitted_days,
+        'submitted_at': now_iso,  # وقت آخر تعديل عمومًا على الرابط كله
+    }).eq('id', receipt_id))
+
+    day_time_cairo = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime('%Y-%m-%d %I:%M %p')
+    action_word = 'تعديل' if is_edit else 'استلام'
+    notice = f'تم {action_word} صوص يوم {day_name} — الساعة {day_time_cairo} (توقيت القاهرة)'
+    if is_edit:
+        notice += f' — ده تعديل رقم {prev_edit_count + 1} على نفس اليوم'
+    if summary_lines:
+        notice += '\nفيه فروقات محتاجة مراجعة:\n' + '\n'.join(summary_lines)
+    _log('sauce_receipt', f'رابط استلام {receipt_id[:8]} - يوم {day_name}', None, notice,
+         level='warning' if summary_lines else 'info')
+
+    return jsonify({'ok': True, 'day': day_name, 'submitted_at': now_iso, 'is_edit': is_edit,
+                     'has_discrepancy': bool(summary_lines)})
+
+
 @app.route('/api/sauce-receipt/<receipt_id>/submit', methods=['POST'])
 def sauce_receipt_submit(receipt_id):
-    """المسؤول بيدوس Submit في صفحة الاستلام - بتاخد الكميات المستلمة الفعلية،
-    تحسب الزيادة/النقص لكل صنف، تحفظها، وتسجّل إشعار في upload_log عشان يظهر
-    في لوحة التحكم الرئيسية إن الاستلام خلص وبكل التفاصيل."""
+    """[أقدم إصدار - بيستقبل كل الأيام مرة واحدة] سايبها شغالة للتوافق مع
+    أي نسخة قديمة مفتوحة عند حد، بس sauce-receipt.html الجديدة بتستخدم
+    /submit-day بدل منها (إرسال كل يوم لوحده، وتسمح بالتعديل بعد كده)."""
     payload = request.get_json(silent=True) or {}
     submitted_days = payload.get('days') or []
     if not submitted_days:
