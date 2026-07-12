@@ -1109,6 +1109,67 @@ def weight_log_photo(entry_id):
     return send_file(io.BytesIO(img_bytes), mimetype=mime)
 
 
+# ============================================================
+# أصناف كل يوم (Weight Log Items) — القايمة اللي العامل يختار منها بدل
+# ما يكتب اسم الصنف حر، مأخوذة من ملف "مشروع صدى" بالترتيب بالظبط
+# ============================================================
+WEIGHT_LOG_DAYS = ['السبت', 'الأحد', 'الاثنين', 'الثلاثاء', 'الاربعاء', 'خميس', 'الجمعة']
+
+
+@app.route('/api/weight-log/items', methods=['GET'])
+def weight_log_items_list():
+    """بترجّع أصناف يوم معيّن بالترتيب بالظبط زي ما هو متسجل. للعامل بس
+    (بتوكينه)."""
+    if not _weight_log_worker_ok():
+        return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
+    day = (request.args.get('day') or '').strip()
+    if not day:
+        return jsonify({'error': 'حدد اليوم'}), 400
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('weight_log_items').select('id, item_name')
+        .eq('day_name', day).order('sort_order')
+    )
+    return jsonify({'items': res.data or []})
+
+
+@app.route('/api/weight-log/items', methods=['POST'])
+def weight_log_items_add():
+    """العامل بيضيف صنف جديد لليوم ده - بيتسجل في القائمة عشان يفضل موجود
+    لاستخدامه تاني في أي يوم زي ده جاي. لو الاسم موجود بالفعل (حتى بحروف
+    مختلفة كبيرة/صغيرة) بيرجّع نفس الصنف الموجود من غير ما يكرره."""
+    if not _weight_log_worker_ok():
+        return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
+    payload = request.get_json(silent=True) or {}
+    day = (payload.get('day') or '').strip()
+    item_name = (payload.get('item_name') or '').strip()
+    if not day or not item_name:
+        return jsonify({'error': 'محتاج اليوم واسم الصنف'}), 400
+
+    sb = get_client()
+    existing = execute_with_retry(
+        sb.table('weight_log_items').select('id, item_name')
+        .eq('day_name', day).ilike('item_name', item_name)
+    )
+    if existing.data:
+        return jsonify({'ok': True, 'item': existing.data[0]})
+
+    max_order_res = execute_with_retry(
+        sb.table('weight_log_items').select('sort_order')
+        .eq('day_name', day).order('sort_order', desc=True).limit(1)
+    )
+    next_order = (max_order_res.data[0]['sort_order'] + 1) if max_order_res.data else 0
+    try:
+        res = execute_with_retry(
+            sb.table('weight_log_items').insert(
+                {'day_name': day, 'item_name': item_name, 'sort_order': next_order}
+            )
+        )
+    except Exception as e:
+        return jsonify({'error': f'تعذر إضافة الصنف: {e}'}), 400
+    return jsonify({'ok': True, 'item': (res.data or [{}])[0]})
+
+
 STATION_SHEET_MAP = {
     'breakfast': 'Ordering',
     'desserts': 'Ordering',
