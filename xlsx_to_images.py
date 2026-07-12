@@ -188,12 +188,23 @@ def pdf_pages_to_png(pdf_path, workdir, prefix='page'):
 
 
 def xlsx_sheets_to_images(xlsx_path, date_str, outdir, day_num_override=None):
+    """day_num_override ممكن يكون:
+    - int من 1 لـ7: نفس السلوك القديم، بيتطبق على كل التابات بنفس الرقم.
+    - dict {sheet_title: day_num}: كل تاب ياخد رقم اليوم بتاعه هو (من ملفه هو)،
+      ولو تاب معين مش موجود في الـ dict أو رقمه مش صالح، بيرجع لليوم المحسوب
+      من date_str كـ fallback.
+    - None: كل التابات تاخد اليوم المحسوب من date_str.
+    """
     os.makedirs(outdir, exist_ok=True)
-    if day_num_override and 1 <= day_num_override <= 7:
-        day_num = day_num_override
-        day_label = DAY_NAMES_AR[day_num]
-    else:
-        day_label, day_num = day_name_from_date_str(date_str)
+
+    default_day_label, default_day_num = day_name_from_date_str(date_str)
+
+    per_sheet_override = {}
+    if isinstance(day_num_override, dict):
+        per_sheet_override = day_num_override
+    elif day_num_override and 1 <= day_num_override <= 7:
+        default_day_num = day_num_override
+        default_day_label = DAY_NAMES_AR[day_num_override]
 
     with tempfile.TemporaryDirectory() as tmp:
         prepared_xlsx = os.path.join(tmp, 'prepared.xlsx')
@@ -208,6 +219,14 @@ def xlsx_sheets_to_images(xlsx_path, date_str, outdir, day_num_override=None):
         saved = []
         for i, page_path in enumerate(pages):
             sheet_name = sheet_names[i] if i < len(sheet_names) else f"page{i+1}"
+
+            sheet_day_num = per_sheet_override.get(sheet_name)
+            if sheet_day_num and 1 <= sheet_day_num <= 7:
+                day_num = sheet_day_num
+                day_label = DAY_NAMES_AR[day_num]
+            else:
+                day_num = default_day_num
+                day_label = default_day_label
 
             im = Image.open(page_path)
             im = autocrop_white(im)
@@ -224,8 +243,8 @@ def add_workbook_images_to_zip(zf, wb_or_path, date_str, folder='images', prefix
     """بتاخد Workbook (كائن openpyxl) أو مسار ملف إكسيل، وبتضيف صورة PNG لكل
     تاب فيه جوه zip مفتوح بالفعل (zf) تحت فولدر `folder`. للاستخدام مباشرة
     من app.py من غير ما تتعامل مع مسارات ملفات بنفسك.
-    day_num_override: رقم اليوم (١-٧) لو معروف مسبقًا (مثلاً من خلية R1)،
-    بيتجاوز حساب اليوم من date_str."""
+    day_num_override: رقم اليوم (١-٧) واحد للكل، أو dict {sheet_title: day_num}
+    عشان كل تاب ياخد رقم اليوم بتاع ملفه هو (مثلاً من خلية R1)."""
     with tempfile.TemporaryDirectory() as tmp:
         if isinstance(wb_or_path, str):
             xlsx_path = wb_or_path
