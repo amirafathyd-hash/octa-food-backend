@@ -915,6 +915,52 @@ def update_texts():
 
 
 # ============================================================
+# إعدادات ثيم السيستم (ألوان، خط، أنيميشن، وضع ليلي) — صف واحد بس، بيتطبق
+# على كل صفحات النظام اللي فيها texts-runtime.js تلقائي
+# ============================================================
+DEFAULT_THEME = {
+    'primary_color': '#EC1510', 'primary_dark_color': '#C01210', 'ink_color': '#1A1A1A',
+    'muted_color': '#8A8A8A', 'soft_color': '#FFF6F5', 'line_color': '#F1D8D6', 'ok_color': '#1F8A4C',
+    'font_family': 'Tahoma, Arial, sans-serif', 'font_label': 'Tahoma (افتراضي)',
+    'animations_enabled': True, 'dark_mode_enabled': False,
+    'dark_bg': '#17120F', 'dark_surface': '#241C17', 'dark_text': '#F2EAE4',
+    'dark_muted': '#B3A79C', 'dark_border': '#3B2E25',
+}
+
+
+@app.route('/api/theme', methods=['GET'])
+def get_theme():
+    """عام من غير لوجين - كل صفحة بتجيب إعدادات الثيم منه."""
+    sb = get_client()
+    res = execute_with_retry(sb.table('system_theme').select('*').eq('id', 1))
+    rows = res.data or []
+    theme = {**DEFAULT_THEME, **(rows[0] if rows else {})}
+    return jsonify({'theme': theme})
+
+
+@app.route('/api/theme', methods=['PUT'])
+def update_theme():
+    """محمي بتسجيل الدخول - تحديث إعدادات الثيم من داش بورد التصميم."""
+    username, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    allowed_keys = set(DEFAULT_THEME.keys())
+    updates = {k: v for k, v in payload.items() if k in allowed_keys}
+    if not updates:
+        return jsonify({'error': 'مفيش إعدادات للحفظ'}), 400
+    updates['updated_at'] = datetime.now(timezone.utc).isoformat()
+    updates['updated_by'] = username
+
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('system_theme').update(updates).eq('id', 1))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+# ============================================================
 # سجل الأصناف والأوزان اليدوي (Weight Log) — لينك ثابت للعامل من غير لوجين
 # ============================================================
 # التوكين ده جزء من اللينك اللي بيتبعت للعامل مرة واحدة ويفضل يستخدمه يوميًا.
