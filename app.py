@@ -1342,8 +1342,9 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
     """بتبني zip فيه Daily_Ordering + Vegetables (إكسيل) + صورة PNG لكل تاب
     فيهم لو with_images=True (لو توليد الصور فشل لأي سبب - مثلاً LibreOffice
     مش متظبط على السيرفر - بيرجع الإكسيل عادي بدون ما يكسر الطلب كله).
-    day_num_override: رقم اليوم (١=السبت...٧=الجمعة) لو اتقرا من خلية R1 في
-    ملفات المحطات، عشان يتحط في عنوان كل صورة بدل ما يتحسب من تاريخ السيرفر."""
+    day_num_override: رقم اليوم (١=السبت...٧=الجمعة) واحد للكل، أو dict
+    {tab_name: day_num} عشان كل تاب ياخد رقم اليوم بتاع ملف المحطة بتاعه هو
+    (متقري من خلية R1 في كل ملف لوحده)، بدل ما يتحسب من تاريخ السيرفر."""
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         buf1 = io.BytesIO(); wb_daily.save(buf1)
@@ -1385,11 +1386,13 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
 
 
 @app.route('/api/daily-ordering', methods=['POST'])
-def _read_report_day_number(files_by_key):
-    """بتدوّر على رقم اليوم (١=السبت ... ٧=الجمعة) في خلية R1 في أول شيت (Sheet)
-    زي ما هو في كل ملف من ملفات المحطات الستة/السبعة، من غير ما تفترض اسم شيت
-    محدد مسبقًا (مش بتستخدم STATION_SHEET_MAP هنا خالص). بترجع أول رقم صحيح
-    من 1 لـ7 تلاقيه، أو None لو مفيش أي ملف فيه رقم صالح."""
+def _read_report_day_numbers_per_station(files_by_key):
+    """بترجع dict {station_key: day_num} — كل ملف من ملفات المحطات بيتقرا لوحده
+    (مش بتوقف عند أول ملف لاقيه)، ورقم اليوم بتاعه (١=السبت...٧=الجمعة) بيتاخد
+    من خلية R1 في أول شيت (Sheet) بتاع الملف ده بالظبط زي ما هو، من غير ما
+    تفترض اسم شيت محدد مسبقًا. الملفات اللي مفيش فيها رقم صالح من 1 لـ7 في R1
+    (أو حصل فيها خطأ) بتتسيب برة الـ dict."""
+    result = {}
     for key in STATION_ORDER:
         f = files_by_key.get(key)
         if not f:
@@ -1406,12 +1409,24 @@ def _read_report_day_number(files_by_key):
             except (TypeError, ValueError):
                 continue
             if 1 <= n <= 7:
-                return n
+                result[key] = n
         except Exception:
             f.seek(0)
             continue
-    app.logger.warning('تعذّر قراءة رقم اليوم من R1 في أي ملف - هيتحسب من تاريخ السيرفر بدل منه')
-    return None
+    if not result:
+        app.logger.warning('تعذّر قراءة رقم اليوم من R1 في أي ملف من ملفات المحطات - هيتحسب من تاريخ السيرفر بدل منه')
+    return result
+
+
+def _day_numbers_by_tab(day_numbers_by_station):
+    """بتحوّل {station_key: day_num} لـ {tab_name: day_num} عشان xlsx_to_images
+    تقدر تطابق كل تاب في الإكسيل الناتج (Daily_Ordering أو Vegetables) برقم
+    اليوم بتاع ملف المحطة اللي طلع منها التاب ده بالظبط."""
+    return {
+        STATION_TAB_NAMES[key]: day_num
+        for key, day_num in day_numbers_by_station.items()
+        if key in STATION_TAB_NAMES
+    }
 
 
 def daily_ordering():
@@ -1506,8 +1521,9 @@ def daily_ordering():
         wb_veg = _build_vegetables_workbook(vegetable_data)
 
         today = datetime.now().strftime('%Y-%m-%d')
-        day_num_override = _read_report_day_number({k: request.files[k] for k in STATION_ORDER})
-        zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today, day_num_override=day_num_override)
+        day_numbers_by_station = _read_report_day_numbers_per_station({k: request.files[k] for k in STATION_ORDER})
+        day_num_by_tab = _day_numbers_by_tab(day_numbers_by_station)
+        zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today, day_num_override=day_num_by_tab)
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
                           mimetype='application/zip')
@@ -1710,7 +1726,8 @@ def auto_detect_stations():
         wb_veg = _build_vegetables_workbook(vegetable_data)
 
         today = datetime.now().strftime('%Y-%m-%d')
-        day_num_override = _read_report_day_number(station_files)
+        day_numbers_by_station = _read_report_day_numbers_per_station(station_files)
+        day_num_override = _day_numbers_by_tab(day_numbers_by_station)
 
         # ?only=daily أو ?only=vegetables — بيرجّع zip فيه ملف واحد بس + صوره،
         # عشان الواجهة تقدر تفصل زرار "Daily Ordering" عن زرار "Vegetables" لوحدهم
