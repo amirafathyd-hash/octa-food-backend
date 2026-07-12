@@ -1388,11 +1388,13 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
 def _read_report_day_numbers_per_station(files_by_key):
     """بترجع dict {station_key: day_num} — كل ملف من ملفات المحطات بيتقرا لوحده
     (مش بتوقف عند أول ملف لاقيه)، ورقم اليوم بتاعه (١=السبت...٧=الجمعة) بيتاخد
-    من خلية R1 — وبما إن R1 ممكن تكون في أي تاب جوه نفس الملف (مش لازم أول
-    تاب: ممكن تكون في 'All_Ingredients' أو 'Marination' أو 'Ordering' حسب
-    الملف)، بندوّر في كل تابات الملف ده لحد ما نلاقي رقم صحيح من 1 لـ7،
-    ووقف عند أول واحد نلاقيه. الملفات اللي مفيش في أي تاب فيها رقم صالح
-    (أو حصل خطأ) بتتسيب برة الـ dict."""
+    من خلية R1. لكل محطة، بندوّر الأول على شيتها بالاسم المعروف من
+    STATION_SHEET_MAP (مهم جدًا لو نفس الملف بالظبط مستخدم لمحطتين مختلفين
+    في نفس الوقت - زي ملف توكيو اللي بيتحط لـ hot و marination مع بعض،
+    عشان hot تاخد R1 بتاعة All_Ingredients ومارينيشن تاخد R1 بتاعة
+    Marination_Ordering، مش نفس الرقم للاتنين). لو الشيت بالاسم ده مش
+    موجود أو R1 بتاعه مش رقم صالح، بترجع تدوّر في كل تابات نفس الملف
+    كـ fallback. الملفات اللي مفيش في أي تاب فيها رقم صالح بتتسيب برة الـ dict."""
     result = {}
     for key in STATION_ORDER:
         f = files_by_key.get(key)
@@ -1402,18 +1404,34 @@ def _read_report_day_numbers_per_station(files_by_key):
             f.seek(0)
             wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
             found = None
-            for ws in wb.worksheets:
-                try:
-                    raw = ws['R1'].value
-                except Exception:
-                    continue
+
+            # 1) جرّب الأول شيت المحطة المعروف بالاسم (يفرّق بين hot وmarination
+            #    حتى لو الاتنين بيتقروا من نفس الملف بالظبط)
+            named_sheet = STATION_SHEET_MAP.get(key)
+            if named_sheet and named_sheet in wb.sheetnames:
+                raw = wb[named_sheet]['R1'].value
                 try:
                     n = int(str(raw).strip())
+                    if 1 <= n <= 7:
+                        found = n
                 except (TypeError, ValueError):
-                    continue
-                if 1 <= n <= 7:
-                    found = n
-                    break
+                    pass
+
+            # 2) لو مالقتش حاجة بالاسم المعروف، دوّر في كل تابات الملف
+            if found is None:
+                for ws in wb.worksheets:
+                    try:
+                        raw = ws['R1'].value
+                    except Exception:
+                        continue
+                    try:
+                        n = int(str(raw).strip())
+                    except (TypeError, ValueError):
+                        continue
+                    if 1 <= n <= 7:
+                        found = n
+                        break
+
             wb.close()
             f.seek(0)
             if found is not None:
