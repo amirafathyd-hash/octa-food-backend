@@ -941,15 +941,16 @@ def _weight_log_edit_authorized():
     return bool(auth_token and _check_session(auth_token))
 
 
-def _cairo_day_bounds_utc(offset_days=0):
-    """بترجع (start_utc_iso, end_utc_iso) لبداية ونهاية يوم بتوقيت القاهرة
-    (UTC+2 ثابت - Egypt مبقتش بتطبّق توقيت صيفي)، عشان نفلتر 'إنهاردة' صح."""
+def _weight_log_day_bounds_utc(offset_days=0):
+    """بترجع (start_utc_iso, end_utc_iso) لبداية ونهاية يوم بتوقيت السعودية
+    (UTC+3 ثابت - مفيش توقيت صيفي)، عشان نفلتر 'إنهاردة' صح في نظام الأصناف
+    والأوزان تحديدًا."""
     from datetime import timedelta
-    cairo_now = datetime.now(timezone.utc) + timedelta(hours=2) + timedelta(days=offset_days)
-    day_start_cairo = cairo_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end_cairo = day_start_cairo + timedelta(days=1)
-    start_utc = day_start_cairo - timedelta(hours=2)
-    end_utc = day_end_cairo - timedelta(hours=2)
+    ksa_now = datetime.now(timezone.utc) + timedelta(hours=3) + timedelta(days=offset_days)
+    day_start_ksa = ksa_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end_ksa = day_start_ksa + timedelta(days=1)
+    start_utc = day_start_ksa - timedelta(hours=3)
+    end_utc = day_end_ksa - timedelta(hours=3)
     return start_utc.isoformat(), end_utc.isoformat()
 
 
@@ -1001,7 +1002,7 @@ def weight_log_mine():
     وفتحها تاني. من غير لوجين، بتوكين العامل بس."""
     if not _weight_log_worker_ok():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
-    start_iso, end_iso = _cairo_day_bounds_utc()
+    start_iso, end_iso = _weight_log_day_bounds_utc()
     sb = get_client()
     res = execute_with_retry(
         sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at')
