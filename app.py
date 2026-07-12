@@ -1327,6 +1327,25 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
     return zip_buf
 
 
+def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_override=None):
+    """زي _build_daily_ordering_zip بالظبط بس لملف واحد بس (مش اتنين) — مستخدمة
+    في زرار "Daily Ordering" أو "Vegetables" لوحدهم، عشان صور التابات PNG
+    تفضل متضافة زي ما كانت أول ما الزرارين كانوا مدموجين في واحد."""
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        buf = io.BytesIO(); wb.save(buf)
+        zf.writestr(f'{file_label}_{today}.xlsx', buf.getvalue())
+        try:
+            add_workbook_images_to_zip(zf, wb, today, prefix=image_prefix,
+                                        day_num_override=day_num_override)
+        except Exception as e:
+            app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
+            zf.writestr('images/تعذر_توليد_الصور.txt',
+                         f'حصل خطأ أثناء توليد الصور: {e}')
+    zip_buf.seek(0)
+    return zip_buf
+
+
 @app.route('/api/daily-ordering', methods=['POST'])
 def _read_report_day_number(files_by_key):
     """بتدوّر على رقم اليوم (١=السبت ... ٧=الجمعة) في خلية R1 في أول شيت متاح
@@ -1655,23 +1674,20 @@ def auto_detect_stations():
         today = datetime.now().strftime('%Y-%m-%d')
         day_num_override = _read_report_day_number(station_files)
 
-        # ?only=daily أو ?only=vegetables — بيرجّع ملف واحد بس (مش zip)، عشان
-        # الواجهة تقدر تفصل زرار "Daily Ordering" عن زرار "Vegetables" لوحدهم.
+        # ?only=daily أو ?only=vegetables — بيرجّع zip فيه ملف واحد بس + صوره،
+        # عشان الواجهة تقدر تفصل زرار "Daily Ordering" عن زرار "Vegetables" لوحدهم
+        # (لسه بيرجع zip مش xlsx خام، عشان صور التابات متضاعش زي الأول).
         only = request.args.get('only')
         if only == 'daily':
-            buf = io.BytesIO()
-            wb_daily.save(buf)
-            buf.seek(0)
-            return send_file(buf, as_attachment=True,
-                              download_name=f'Daily_Ordering_{today}.xlsx',
-                              mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            zip_buf = _build_single_workbook_zip(wb_daily, today, 'Daily_Ordering', 'DailyOrdering_', day_num_override)
+            return send_file(zip_buf, as_attachment=True,
+                              download_name=f'Daily_Ordering_{today}.zip',
+                              mimetype='application/zip')
         if only == 'vegetables':
-            buf = io.BytesIO()
-            wb_veg.save(buf)
-            buf.seek(0)
-            return send_file(buf, as_attachment=True,
-                              download_name=f'Vegetables_{today}.xlsx',
-                              mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            zip_buf = _build_single_workbook_zip(wb_veg, today, 'Vegetables', 'Vegetables_', day_num_override)
+            return send_file(zip_buf, as_attachment=True,
+                              download_name=f'Vegetables_{today}.zip',
+                              mimetype='application/zip')
 
         zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today, day_num_override=day_num_override)
         return send_file(zip_buf, as_attachment=True,
