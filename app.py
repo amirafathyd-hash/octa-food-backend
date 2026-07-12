@@ -922,13 +922,42 @@ def update_texts():
 # للعامل لينك جديد بالتوكين الجديد.
 WEIGHT_LOG_TOKEN = 'pNrAYo0cIwXhdsgVdXKSJYCGAS8'
 
+# توكين منفصل تمامًا لمركز التخزين (عرض بس، من غير لوجين) - ابعته لأي حد
+# عايزه يطّلع على الأرشيف كامل من غير ما يدخل السيستم خالص. لو حبيت تسحب
+# صلاحية حد وصله بالغلط، غيّر القيمة دي وهيبقى معاه لينك قديم مبيشتغلش.
+WEIGHT_LOG_VIEW_TOKEN = 'vXq3mZpLd8RwTfKhY0eB2nCsUj7A'
+
+
+def _weight_log_worker_ok():
+    token = request.values.get('token') or (request.form.get('token') if request.method != 'GET' else None)
+    return bool(token) and token == WEIGHT_LOG_TOKEN
+
+
+def _weight_log_edit_authorized():
+    """التعديل/الحذف مسموح إما بتوكين العامل نفسه، أو بتسجيل دخول الأدمن."""
+    if _weight_log_worker_ok():
+        return True
+    auth_token = request.headers.get('X-Auth-Token')
+    return bool(auth_token and _check_session(auth_token))
+
+
+def _cairo_day_bounds_utc(offset_days=0):
+    """بترجع (start_utc_iso, end_utc_iso) لبداية ونهاية يوم بتوقيت القاهرة
+    (UTC+2 ثابت - Egypt مبقتش بتطبّق توقيت صيفي)، عشان نفلتر 'إنهاردة' صح."""
+    from datetime import timedelta
+    cairo_now = datetime.now(timezone.utc) + timedelta(hours=2) + timedelta(days=offset_days)
+    day_start_cairo = cairo_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end_cairo = day_start_cairo + timedelta(days=1)
+    start_utc = day_start_cairo - timedelta(hours=2)
+    end_utc = day_end_cairo - timedelta(hours=2)
+    return start_utc.isoformat(), end_utc.isoformat()
+
 
 @app.route('/api/weight-log', methods=['POST'])
 def weight_log_add():
     """بيستقبل صنف واحد (اسم + وزن + صورة اختيارية) من صفحة العامل. من غير
     لوجين، بس محمي بتوكين ثابت في اللينك نفسه."""
-    token = request.form.get('token') or request.args.get('token')
-    if not token or token != WEIGHT_LOG_TOKEN:
+    if not _weight_log_worker_ok():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
 
     item_name = (request.form.get('item_name') or '').strip()
@@ -955,37 +984,105 @@ def weight_log_add():
         'weight': weight_val,
         'photo_base64': photo_b64,
         'logged_at': datetime.now(timezone.utc).isoformat(),
+        'deleted': False,
     }
     try:
-        execute_with_retry(sb.table('weight_log_entries').insert(row))
+        res = execute_with_retry(sb.table('weight_log_entries').insert(row))
+        new_row = (res.data or [{}])[0]
     except Exception as e:
         return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
-    return jsonify({'ok': True})
+    return jsonify({'ok': True, 'id': new_row.get('id')})
+
+
+@app.route('/api/weight-log/mine', methods=['GET'])
+def weight_log_mine():
+    """للعامل بس - بترجّع أصناف إنهاردة اللي هو سجّلها (بتوقيت القاهرة)،
+    عشان يقدر يراجع اللي بعته وهو لسه فاتح نفس اللينك، حتى لو قفل الصفحة
+    وفتحها تاني. من غير لوجين، بتوكين العامل بس."""
+    if not _weight_log_worker_ok():
+        return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
+    start_iso, end_iso = _cairo_day_bounds_utc()
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at')
+        .gte('logged_at', start_iso).lt('logged_at', end_iso)
+        .eq('deleted', False)
+        .order('logged_at', desc=True)
+    )
+    return jsonify({'entries': res.data or []})
 
 
 @app.route('/api/weight-log', methods=['GET'])
 def weight_log_list():
-    """للداش بورد بتاعتك بس - محمي بنفس نظام تسجيل الدخول العادي."""
+    """للداش بورد الشغّالة بتاعتك - محمي بتسجيل الدخول. بترجّع الأصناف
+    الغير محذوفة بس (اللي اتمسح هيفضل موجود في مركز التخزين بس مش هنا)."""
     _, err = _require_auth()
     if err:
         return err
     sb = get_client()
     res = execute_with_retry(
         sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at')
+        .eq('deleted', False)
         .order('logged_at', desc=True)
     )
     return jsonify({'entries': res.data or []})
 
 
-@app.route('/api/weight-log/<int:entry_id>', methods=['DELETE'])
-def weight_log_delete(entry_id):
-    """حذف صنف اتسجل غلط - محمي بتسجيل الدخول."""
-    _, err = _require_auth()
-    if err:
-        return err
+@app.route('/api/weight-log/archive', methods=['GET'])
+def weight_log_archive():
+    """مركز التخزين - بيرجّع كل حاجة اتسجلت على الإطلاق (حتى اللي اتمسح من
+    الداش بورد الشغّالة)، عشان الأرشيف يفضل كامل زي ما هو دايمًا. محمي
+    بتوكين عرض منفصل تمامًا عن توكين العامل، من غير لوجين."""
+    token = request.args.get('view_token')
+    if not token or token != WEIGHT_LOG_VIEW_TOKEN:
+        return jsonify({'error': 'الرابط ده مش صحيح'}), 403
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at, deleted')
+        .order('logged_at', desc=True)
+    )
+    return jsonify({'entries': res.data or []})
+
+
+@app.route('/api/weight-log/<int:entry_id>', methods=['PUT'])
+def weight_log_update(entry_id):
+    """تعديل اسم الصنف أو الوزن - مسموح للعامل (بتوكينه) أو للأدمن (بلوجينه)،
+    قبل الإرسال أو بعده، وبيتحدّث في كل الأماكن (الداش بورد ومركز التخزين)."""
+    if not _weight_log_edit_authorized():
+        return jsonify({'error': 'مش مسموح'}), 403
+    payload = request.get_json(silent=True) or {}
+    updates = {}
+    if 'item_name' in payload:
+        name = (payload.get('item_name') or '').strip()
+        if not name:
+            return jsonify({'error': 'اسم الصنف مينفعش يبقى فاضي'}), 400
+        updates['item_name'] = name
+    if 'weight' in payload:
+        try:
+            updates['weight'] = float(payload.get('weight'))
+        except (TypeError, ValueError):
+            return jsonify({'error': 'الوزن لازم يكون رقم'}), 400
+    if not updates:
+        return jsonify({'error': 'مفيش حاجة للتعديل'}), 400
+
     sb = get_client()
     try:
-        execute_with_retry(sb.table('weight_log_entries').delete().eq('id', entry_id))
+        execute_with_retry(sb.table('weight_log_entries').update(updates).eq('id', entry_id))
+    except Exception as e:
+        return jsonify({'error': f'تعذر التعديل: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/weight-log/<int:entry_id>', methods=['DELETE'])
+def weight_log_delete(entry_id):
+    """حذف ناعم بس - الصنف بيختفي من الداش بورد الشغّالة ومن صفحة العامل،
+    بس بيفضل موجود في مركز التخزين للأبد. مسموح للعامل (بتوكينه) أو للأدمن
+    (بلوجينه)."""
+    if not _weight_log_edit_authorized():
+        return jsonify({'error': 'مش مسموح'}), 403
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('weight_log_entries').update({'deleted': True}).eq('id', entry_id))
     except Exception as e:
         return jsonify({'error': f'تعذر الحذف: {e}'}), 400
     return jsonify({'ok': True})
