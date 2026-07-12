@@ -875,6 +875,44 @@ def change_user_password(user_id):
     return jsonify({'ok': True})
 
 
+# ============================================================
+# نظام إدارة نصوص السيستم (Texts Dashboard) — Supabase table: system_texts
+# key TEXT PRIMARY KEY, value TEXT, page TEXT, updated_at, updated_by
+# ============================================================
+@app.route('/api/texts', methods=['GET'])
+def get_texts():
+    """بيرجّع كل النصوص كـ map { key: value }. مفيش auth هنا عشان أي صفحة
+    (حتى صفحة اللوجين) تقدر تجيب النصوص بتاعتها من غير ما تتوقف على تسجيل الدخول."""
+    sb = get_client()
+    res = execute_with_retry(sb.table('system_texts').select('key, value'))
+    texts = {row['key']: row['value'] for row in (res.data or [])}
+    return jsonify({'texts': texts})
+
+
+@app.route('/api/texts', methods=['PUT'])
+def update_texts():
+    """بيحفظ تعديلات على نص أو أكتر دفعة واحدة. Body: { "texts": { "key": "value", ... } }"""
+    username, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    updates = payload.get('texts') or {}
+    if not isinstance(updates, dict) or not updates:
+        return jsonify({'error': 'مفيش نصوص للحفظ'}), 400
+
+    sb = get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {'key': k, 'value': v, 'updated_at': now, 'updated_by': username}
+        for k, v in updates.items()
+    ]
+    try:
+        execute_with_retry(sb.table('system_texts').upsert(rows, on_conflict='key'))
+    except Exception as e:
+        return jsonify({'error': f'تعذر حفظ النصوص: {e}'}), 400
+    return jsonify({'ok': True, 'count': len(rows)})
+
+
 STATION_SHEET_MAP = {
     'breakfast': 'Ordering',
     'desserts': 'Ordering',
