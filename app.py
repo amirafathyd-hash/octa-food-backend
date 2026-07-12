@@ -1385,13 +1385,14 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
     return zip_buf
 
 
-@app.route('/api/daily-ordering', methods=['POST'])
 def _read_report_day_numbers_per_station(files_by_key):
     """بترجع dict {station_key: day_num} — كل ملف من ملفات المحطات بيتقرا لوحده
     (مش بتوقف عند أول ملف لاقيه)، ورقم اليوم بتاعه (١=السبت...٧=الجمعة) بيتاخد
-    من خلية R1 في أول شيت (Sheet) بتاع الملف ده بالظبط زي ما هو، من غير ما
-    تفترض اسم شيت محدد مسبقًا. الملفات اللي مفيش فيها رقم صالح من 1 لـ7 في R1
-    (أو حصل فيها خطأ) بتتسيب برة الـ dict."""
+    من خلية R1 — وبما إن R1 ممكن تكون في أي تاب جوه نفس الملف (مش لازم أول
+    تاب: ممكن تكون في 'All_Ingredients' أو 'Marination' أو 'Ordering' حسب
+    الملف)، بندوّر في كل تابات الملف ده لحد ما نلاقي رقم صحيح من 1 لـ7،
+    ووقف عند أول واحد نلاقيه. الملفات اللي مفيش في أي تاب فيها رقم صالح
+    (أو حصل خطأ) بتتسيب برة الـ dict."""
     result = {}
     for key in STATION_ORDER:
         f = files_by_key.get(key)
@@ -1400,16 +1401,23 @@ def _read_report_day_numbers_per_station(files_by_key):
         try:
             f.seek(0)
             wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
-            ws = wb.worksheets[0]
-            raw = ws['R1'].value
+            found = None
+            for ws in wb.worksheets:
+                try:
+                    raw = ws['R1'].value
+                except Exception:
+                    continue
+                try:
+                    n = int(str(raw).strip())
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= n <= 7:
+                    found = n
+                    break
             wb.close()
             f.seek(0)
-            try:
-                n = int(str(raw).strip())
-            except (TypeError, ValueError):
-                continue
-            if 1 <= n <= 7:
-                result[key] = n
+            if found is not None:
+                result[key] = found
         except Exception:
             f.seek(0)
             continue
@@ -1429,6 +1437,7 @@ def _day_numbers_by_tab(day_numbers_by_station):
     }
 
 
+@app.route('/api/daily-ordering', methods=['POST'])
 def daily_ordering():
     """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع zip فيه
     ملفين: Daily_Ordering.xlsx (تاب لكل محطة بأعمدة A:D، أي صف وزنه اليومي
