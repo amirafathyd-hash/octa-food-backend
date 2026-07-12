@@ -903,7 +903,7 @@ def update_texts():
     sb = get_client()
     now = datetime.now(timezone.utc).isoformat()
     rows = [
-        {'key': k, 'value': v, 'updated_at': now, 'updated_by': username}
+        {'key': k, 'value': v, 'page': k.split('.')[0], 'updated_at': now, 'updated_by': username}
         for k, v in updates.items()
     ]
     try:
