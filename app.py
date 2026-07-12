@@ -1386,9 +1386,10 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
 
 @app.route('/api/daily-ordering', methods=['POST'])
 def _read_report_day_number(files_by_key):
-    """بتدوّر على رقم اليوم (١=السبت ... ٧=الجمعة) في خلية R1 في أول شيت متاح
-    من ملفات المحطات الستة. بترجع (day_num, None) لو لقت رقم صحيح من 1 لـ7،
-    أو (None, None) لو مفيش أي ملف فيه رقم صالح."""
+    """بتدوّر على رقم اليوم (١=السبت ... ٧=الجمعة) في خلية R1 في أول شيت (Sheet)
+    زي ما هو في كل ملف من ملفات المحطات الستة/السبعة، من غير ما تفترض اسم شيت
+    محدد مسبقًا (مش بتستخدم STATION_SHEET_MAP هنا خالص). بترجع أول رقم صحيح
+    من 1 لـ7 تلاقيه، أو None لو مفيش أي ملف فيه رقم صالح."""
     for key in STATION_ORDER:
         f = files_by_key.get(key)
         if not f:
@@ -1396,8 +1397,7 @@ def _read_report_day_number(files_by_key):
         try:
             f.seek(0)
             wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
-            sheet_name = STATION_SHEET_MAP.get(key)
-            ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.worksheets[0]
+            ws = wb.worksheets[0]
             raw = ws['R1'].value
             wb.close()
             f.seek(0)
