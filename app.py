@@ -3,6 +3,7 @@ import requests
 import io
 import re
 import secrets
+import base64
 import shutil
 import json
 import tempfile
@@ -911,6 +912,104 @@ def update_texts():
     except Exception as e:
         return jsonify({'error': f'تعذر حفظ النصوص: {e}'}), 400
     return jsonify({'ok': True, 'count': len(rows)})
+
+
+# ============================================================
+# سجل الأصناف والأوزان اليدوي (Weight Log) — لينك ثابت للعامل من غير لوجين
+# ============================================================
+# التوكين ده جزء من اللينك اللي بيتبعت للعامل مرة واحدة ويفضل يستخدمه يوميًا.
+# لو حبيت تغيّره في أي وقت (مثلاً لو حد غريب وصله)، غيّر القيمة دي وابعت
+# للعامل لينك جديد بالتوكين الجديد.
+WEIGHT_LOG_TOKEN = 'pNrAYo0cIwXhdsgVdXKSJYCGAS8'
+
+
+@app.route('/api/weight-log', methods=['POST'])
+def weight_log_add():
+    """بيستقبل صنف واحد (اسم + وزن + صورة اختيارية) من صفحة العامل. من غير
+    لوجين، بس محمي بتوكين ثابت في اللينك نفسه."""
+    token = request.form.get('token') or request.args.get('token')
+    if not token or token != WEIGHT_LOG_TOKEN:
+        return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
+
+    item_name = (request.form.get('item_name') or '').strip()
+    weight_raw = (request.form.get('weight') or '').strip()
+    if not item_name:
+        return jsonify({'error': 'اكتب اسم الصنف'}), 400
+    try:
+        weight_val = float(weight_raw)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'الوزن لازم يكون رقم'}), 400
+
+    photo_b64 = None
+    photo_file = request.files.get('photo')
+    if photo_file and photo_file.filename:
+        photo_bytes = photo_file.read()
+        if len(photo_bytes) > 6 * 1024 * 1024:
+            return jsonify({'error': 'الصورة كبيرة جدًا (أكبر من 6 ميجا)'}), 400
+        mime = photo_file.mimetype or 'image/jpeg'
+        photo_b64 = f'data:{mime};base64,' + base64.b64encode(photo_bytes).decode('ascii')
+
+    sb = get_client()
+    row = {
+        'item_name': item_name,
+        'weight': weight_val,
+        'photo_base64': photo_b64,
+        'logged_at': datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        execute_with_retry(sb.table('weight_log_entries').insert(row))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/weight-log', methods=['GET'])
+def weight_log_list():
+    """للداش بورد بتاعتك بس - محمي بنفس نظام تسجيل الدخول العادي."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at')
+        .order('logged_at', desc=True)
+    )
+    return jsonify({'entries': res.data or []})
+
+
+@app.route('/api/weight-log/<int:entry_id>', methods=['DELETE'])
+def weight_log_delete(entry_id):
+    """حذف صنف اتسجل غلط - محمي بتسجيل الدخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('weight_log_entries').delete().eq('id', entry_id))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحذف: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/weight-log/<int:entry_id>/photo', methods=['GET'])
+def weight_log_photo(entry_id):
+    """بترجّع الصورة كملف مباشر (مش base64) - مستخدمة كلينك جوه ملف الإكسيل
+    المُصدَّر، عشان الفايل يفضل خفيف بدل ما يشيل الصور جواه."""
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('weight_log_entries').select('photo_base64').eq('id', entry_id)
+    )
+    rows = res.data or []
+    if not rows or not rows[0].get('photo_base64'):
+        return jsonify({'error': 'مفيش صورة للصنف ده'}), 404
+    data_url = rows[0]['photo_base64']
+    try:
+        header, b64data = data_url.split(',', 1)
+        mime = header.split(':')[1].split(';')[0]
+        img_bytes = base64.b64decode(b64data)
+    except Exception:
+        return jsonify({'error': 'الصورة تالفة'}), 400
+    return send_file(io.BytesIO(img_bytes), mimetype=mime)
 
 
 STATION_SHEET_MAP = {
