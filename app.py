@@ -1171,6 +1171,116 @@ def weight_log_items_add():
     return jsonify({'ok': True, 'item': (res.data or [{}])[0]})
 
 
+# ============================================================
+# مخزون الخضار اليومي للأقسام (Veg Inventory) — لينك ثابت للعامل من غير
+# لوجين، نموذج واحد لكل يوم قابل للتحديث طول اليوم (زي شيت الصوص بالظبط)
+# ============================================================
+VEG_INVENTORY_TOKEN = 'hR7wKqLm2XdNpTs9BvYcGz4eAf6J'
+
+
+def _veg_inventory_worker_ok():
+    token = request.values.get('token') or (request.get_json(silent=True) or {}).get('token')
+    return bool(token) and token == VEG_INVENTORY_TOKEN
+
+
+def _veg_inventory_edit_authorized():
+    if _veg_inventory_worker_ok():
+        return True
+    auth_token = request.headers.get('X-Auth-Token')
+    return bool(auth_token and _check_session(auth_token))
+
+
+def _riyadh_today_date():
+    from datetime import timedelta
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).date().isoformat()
+
+
+@app.route('/api/veg-inventory/items', methods=['GET'])
+def veg_inventory_items_list():
+    """قايمة الأصناف الثابتة (خضروات/أعشاب/فواكه) بالترتيب - للعامل بتوكينه."""
+    if not _veg_inventory_worker_ok():
+        return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('veg_inventory_items').select('id, item_name, category, unit').order('sort_order')
+    )
+    return jsonify({'items': res.data or []})
+
+
+@app.route('/api/veg-inventory/today', methods=['GET'])
+def veg_inventory_today_get():
+    """بترجّع قيم إنهاردة المحفوظة لحد دلوقتي (لو العامل رجع يعدّل) - للعامل
+    بتوكينه."""
+    if not _veg_inventory_worker_ok():
+        return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
+    today = _riyadh_today_date()
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('veg_inventory_entries').select('item_name, remaining_stock, updated_at')
+        .eq('entry_date', today)
+    )
+    rows = res.data or []
+    last_updated = max((r['updated_at'] for r in rows), default=None)
+    return jsonify({
+        'date': today,
+        'entries': {r['item_name']: r['remaining_stock'] for r in rows},
+        'last_updated': last_updated,
+    })
+
+
+@app.route('/api/veg-inventory/today', methods=['POST'])
+def veg_inventory_today_save():
+    """العامل بيحفظ/يحدّث قيم إنهاردة - upsert لكل صنف مبعوت. Body:
+    { "token": "...", "entries": { "اسم الصنف": 1200, ... } }"""
+    if not _veg_inventory_worker_ok():
+        return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
+    payload = request.get_json(silent=True) or {}
+    entries = payload.get('entries') or {}
+    if not isinstance(entries, dict) or not entries:
+        return jsonify({'error': 'مفيش قيم للحفظ'}), 400
+
+    today = _riyadh_today_date()
+    now = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for item_name, value in entries.items():
+        if value is None or str(value).strip() == '':
+            continue
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return jsonify({'error': f'قيمة غير صحيحة للصنف "{item_name}"'}), 400
+        rows.append({'entry_date': today, 'item_name': item_name, 'remaining_stock': val, 'updated_at': now})
+
+    if not rows:
+        return jsonify({'error': 'مفيش قيم صحيحة للحفظ'}), 400
+
+    sb = get_client()
+    try:
+        execute_with_retry(
+            sb.table('veg_inventory_entries').upsert(rows, on_conflict='entry_date,item_name')
+        )
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
+    return jsonify({'ok': True, 'date': today, 'updated_at': now, 'count': len(rows)})
+
+
+@app.route('/api/veg-inventory', methods=['GET'])
+def veg_inventory_list_all():
+    """للداش بورد بتاعتك - محمي بتسجيل الدخول. بترجّع كل الأيام المسجلة."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    entries_res = execute_with_retry(
+        sb.table('veg_inventory_entries').select('entry_date, item_name, remaining_stock, updated_at')
+        .order('entry_date', desc=True)
+    )
+    items_res = execute_with_retry(
+        sb.table('veg_inventory_items').select('item_name, category, unit').order('sort_order')
+    )
+    return jsonify({'entries': entries_res.data or [], 'items': items_res.data or []})
+
+
 STATION_SHEET_MAP = {
     'breakfast': 'Ordering',
     'desserts': 'Ordering',
