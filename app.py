@@ -1272,13 +1272,103 @@ def veg_inventory_list_all():
         return err
     sb = get_client()
     entries_res = execute_with_retry(
-        sb.table('veg_inventory_entries').select('entry_date, item_name, remaining_stock, updated_at')
+        sb.table('veg_inventory_entries').select('id, entry_date, item_name, remaining_stock, updated_at')
         .order('entry_date', desc=True)
     )
     items_res = execute_with_retry(
         sb.table('veg_inventory_items').select('item_name, category, unit').order('sort_order')
     )
     return jsonify({'entries': entries_res.data or [], 'items': items_res.data or []})
+
+
+@app.route('/api/veg-inventory/entry/<int:entry_id>', methods=['PUT'])
+def veg_inventory_entry_update(entry_id):
+    """تعديل قيمة صنف في يوم معيّن - محمي بتسجيل الدخول (الداش بورد بتاعتك)."""
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    if 'remaining_stock' not in payload:
+        return jsonify({'error': 'مفيش قيمة للتعديل'}), 400
+    try:
+        val = float(payload.get('remaining_stock'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'القيمة لازم تكون رقم'}), 400
+
+    sb = get_client()
+    try:
+        execute_with_retry(
+            sb.table('veg_inventory_entries')
+            .update({'remaining_stock': val, 'updated_at': datetime.now(timezone.utc).isoformat()})
+            .eq('id', entry_id)
+        )
+    except Exception as e:
+        return jsonify({'error': f'تعذر التعديل: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/veg-inventory/entry/<int:entry_id>', methods=['DELETE'])
+def veg_inventory_entry_delete(entry_id):
+    """حذف قيمة صنف اتسجلت غلط ليوم معيّن - محمي بتسجيل الدخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('veg_inventory_entries').delete().eq('id', entry_id))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحذف: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/veg-inventory/day/<entry_date>', methods=['PUT'])
+def veg_inventory_day_update(entry_date):
+    """تعديل يوم كامل دفعة واحدة من الداش بورد - محمي بتسجيل الدخول.
+    Body: { "entries": { "اسم الصنف": 1200, ... } } - بيعمل upsert لكل صنف
+    مبعوت، ومش بيلمس الأصناف اللي مبعتتش."""
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    entries = payload.get('entries') or {}
+    if not isinstance(entries, dict) or not entries:
+        return jsonify({'error': 'مفيش قيم للحفظ'}), 400
+
+    now = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for item_name, value in entries.items():
+        if value is None or str(value).strip() == '':
+            continue
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return jsonify({'error': f'قيمة غير صحيحة للصنف "{item_name}"'}), 400
+        rows.append({'entry_date': entry_date, 'item_name': item_name, 'remaining_stock': val, 'updated_at': now})
+
+    if not rows:
+        return jsonify({'error': 'مفيش قيم صحيحة للحفظ'}), 400
+
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('veg_inventory_entries').upsert(rows, on_conflict='entry_date,item_name'))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
+    return jsonify({'ok': True, 'updated_at': now, 'count': len(rows)})
+
+
+@app.route('/api/veg-inventory/day/<entry_date>', methods=['DELETE'])
+def veg_inventory_day_delete(entry_date):
+    """حذف يوم كامل دفعة واحدة (كل الأصناف المسجلة للتاريخ ده) - محمي
+    بتسجيل الدخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('veg_inventory_entries').delete().eq('entry_date', entry_date))
+    except Exception as e:
+        return jsonify({'error': f'تعذر حذف اليوم: {e}'}), 400
+    return jsonify({'ok': True})
 
 
 STATION_SHEET_MAP = {
