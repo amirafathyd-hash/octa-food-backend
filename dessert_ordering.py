@@ -5,6 +5,7 @@ import tempfile
 from collections import defaultdict, deque
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 
 DESSERT_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "Tokyo_Dessert_Ordering.xlsm")
@@ -174,6 +175,48 @@ def _rounded(value):
     return value
 
 
+def _cell_payload(ws_formula, ws_values, row, col):
+    formula_cell = ws_formula.cell(row=row, column=col)
+    value_cell = ws_values.cell(row=row, column=col)
+    formula = formula_cell.value if isinstance(formula_cell.value, str) and formula_cell.value.startswith("=") else None
+    return {
+        "address": formula_cell.coordinate,
+        "row": row,
+        "col": col,
+        "value": _rounded(value_cell.value if formula else formula_cell.value),
+        "formula": formula,
+        "editable": formula is None,
+        "fill": _fill_rgb(formula_cell),
+        "bold": bool(formula_cell.font.bold),
+        "align": formula_cell.alignment.horizontal,
+        "number_format": formula_cell.number_format,
+    }
+
+
+def extract_workbook_state(workbook_path):
+    wb_formula = load_workbook(workbook_path, data_only=False, keep_vba=True)
+    wb_values = load_workbook(workbook_path, data_only=True, keep_vba=True)
+    sheets = []
+    for sheet_name in wb_formula.sheetnames:
+        ws_formula = wb_formula[sheet_name]
+        ws_values = wb_values[sheet_name]
+        rows = []
+        max_row = ws_formula.max_row
+        max_col = ws_formula.max_column
+        for row in range(1, max_row + 1):
+            rows.append([_cell_payload(ws_formula, ws_values, row, col) for col in range(1, max_col + 1)])
+        sheets.append({
+            "name": sheet_name,
+            "max_row": max_row,
+            "max_col": max_col,
+            "columns": [get_column_letter(col) for col in range(1, max_col + 1)],
+            "rows": rows,
+        })
+    wb_formula.close()
+    wb_values.close()
+    return {"sheets": sheets}
+
+
 def extract_dashboard_state(workbook_path):
     wb = load_workbook(workbook_path, data_only=True)
     ws = wb["Ordering"]
@@ -226,6 +269,40 @@ def update_dessert_ordering_from_upload(file_storage, template_path=DESSERT_TEMP
     updated_xlsm, report = _write_counts(template_path, uploaded_rows)
     recalculated_xlsx = recalc_workbook_to_xlsx(updated_xlsm)
     state = extract_dashboard_state(recalculated_xlsx)
+    state.update(extract_workbook_state(recalculated_xlsx))
     report["matched_count"] = len(report["matched"])
     report["unmatched_count"] = len(report["unmatched"])
     return state, report
+
+
+def get_dessert_template_state(template_path=DESSERT_TEMPLATE_PATH):
+    if not os.path.exists(template_path):
+        raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
+    recalculated_xlsx = recalc_workbook_to_xlsx(template_path)
+    state = extract_dashboard_state(recalculated_xlsx)
+    state.update(extract_workbook_state(recalculated_xlsx))
+    return state
+
+
+def recalculate_dessert_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
+    if not os.path.exists(template_path):
+        raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
+    wb = load_workbook(template_path, data_only=False, keep_vba=True)
+    for edit in edits or []:
+        sheet = edit.get("sheet")
+        address = edit.get("address")
+        value = edit.get("value")
+        if not sheet or not address or sheet not in wb.sheetnames:
+            continue
+        cell = wb[sheet][address]
+        if isinstance(cell.value, str) and cell.value.startswith("="):
+            continue
+        number = _as_number(value)
+        cell.value = number if number is not None and str(value).strip() != "" else value
+    out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
+    wb.save(out_path)
+    wb.close()
+    recalculated_xlsx = recalc_workbook_to_xlsx(out_path)
+    state = extract_dashboard_state(recalculated_xlsx)
+    state.update(extract_workbook_state(recalculated_xlsx))
+    return state
