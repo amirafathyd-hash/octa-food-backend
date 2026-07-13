@@ -280,9 +280,8 @@ def update_dessert_ordering_from_upload(file_storage, template_path=DESSERT_TEMP
 def get_dessert_template_state(template_path=DESSERT_TEMPLATE_PATH):
     if not os.path.exists(template_path):
         raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
-    recalculated_xlsx = recalc_workbook_to_xlsx(template_path)
-    state = extract_dashboard_state(recalculated_xlsx)
-    state.update(extract_workbook_state(recalculated_xlsx))
+    state = extract_dashboard_state(template_path)
+    state.update(extract_workbook_state(template_path))
     return state
 
 
