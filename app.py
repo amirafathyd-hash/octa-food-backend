@@ -1135,6 +1135,22 @@ def weight_log_delete(entry_id):
     return jsonify({'ok': True})
 
 
+@app.route('/api/weight-log/<int:entry_id>/permanent', methods=['DELETE'])
+def weight_log_permanent_delete(entry_id):
+    """حذف نهائي فعلي من قاعدة البيانات - مش زي الحذف الناعم العادي، الصنف
+    ده هيختفي من كل حتة بما فيها مركز التخزين نفسه، ومفيش رجوع فيه. أدمن
+    بس (بلوجينه)، مش بتوكين العامل."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('weight_log_entries').delete().eq('id', entry_id))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحذف النهائي: {e}'}), 400
+    return jsonify({'ok': True})
+
+
 @app.route('/api/weight-log/<int:entry_id>/photo', methods=['GET'])
 def weight_log_photo(entry_id):
     """بترجّع الصورة كملف مباشر (مش base64) - مستخدمة كلينك جوه ملف الإكسيل
