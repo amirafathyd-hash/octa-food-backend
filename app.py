@@ -29,6 +29,7 @@ from matcher import match_invoice_item
 from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
 from tokyo_ordering import read_day_file_meals, merge_day_into_template
+from dessert_ordering import update_dessert_ordering_from_upload
 from xlsx_to_images import add_workbook_images_to_zip
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
@@ -432,6 +433,22 @@ def tokyo_ordering_update_from_day_file():
     # كله بخطأ "Invalid HTTP Header" والمتصفح بيشوفه فشل اتصال تام (CORS مضلِّل).
     response.headers['X-Match-Report'] = json.dumps(report, ensure_ascii=True)
     return response
+
+
+@app.route('/api/dessert-ordering/update', methods=['POST'])
+def dessert_ordering_update():
+    """محطة تجهيز الديسرت: ترفع ملف أعداد الوجبات، نكتب الأعداد في
+    Ordering!AF:AG، نشغل حسابات الإكسيل عبر LibreOffice، ونرجع أرقام الداشبورد
+    بعد التحديث."""
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'ارفع ملف الأعداد باسم file'}), 400
+    try:
+        state, report = update_dessert_ordering_from_upload(f)
+        return jsonify({'ok': True, 'report': report, 'state': state})
+    except Exception as e:
+        app.logger.exception('dessert_ordering_update failed')
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/sauce-receipt/list', methods=['GET'])
