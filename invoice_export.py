@@ -105,6 +105,34 @@ _BROKEN_ROW_RE = re.compile(
 _ORPHAN_PAREN_RE = re.compile(r'^' + NUM + r'\s*\($')
 
 
+# أول بند في أي صفحة جديدة (بعد فاصل الصفحات) أحيانًا بيتقرأ بترتيب مختلف شوية
+# عن باقي البنود: مسافة زيادة بين الكمية والوحدة، ونسبة الخصم "0.0%" بتتلزّق
+# جوه نفس السطر بدل ما تكون سطر منفصل، وعلامة % بتيجي بعد رقم الضريبة بدل
+# قبله. الفانكشن دي بتكتشف الشكل ده وتصلّحه لنفس الشكل القياسي قبل أي تحليل.
+_MISPLACED_DISCOUNT_ROW_RE = re.compile(
+    r'^(?P<prefix>\d+\s+.+?\s+' + NUM + r')\s+'
+    r'(?P<unit>[\u0600-\u06FF]+)\s+'
+    r'\d+\.?\d*%\s+'
+    r'(?P<before_tax>' + NUM + r')\s+'
+    r'(?P<tax_pct>\d+)\s*%\s+'
+    r'(?P<rest>' + NUM + r'\)\s*\(\s*' + NUM + r')$'
+)
+
+
+def fix_misplaced_discount_rows(lines):
+    fixed = []
+    for line in lines:
+        m = _MISPLACED_DISCOUNT_ROW_RE.match(line.strip())
+        if m:
+            fixed.append(
+                f"{m.group('prefix')}{m.group('unit')} {m.group('before_tax')} "
+                f"%{m.group('tax_pct')} {m.group('rest')}"
+            )
+        else:
+            fixed.append(line)
+    return fixed
+
+
 def reassemble_split_rows(lines):
     out = list(lines)
     n = len(out)
@@ -145,6 +173,7 @@ def parse_items(fixed_lines):
     )
     qty_unit_re = re.compile(r'^(?P<qty>' + NUM + r')(?P<unit>[\u0600-\u06FF]+)$')
 
+    fixed_lines = fix_misplaced_discount_rows(fixed_lines)
     fixed_lines = reassemble_split_rows(fixed_lines)
 
     items = []
