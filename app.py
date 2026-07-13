@@ -1185,7 +1185,7 @@ def weight_log_items_add():
     """العامل بيضيف صنف جديد لليوم ده - بيتسجل في القائمة عشان يفضل موجود
     لاستخدامه تاني في أي يوم زي ده جاي. لو الاسم موجود بالفعل (حتى بحروف
     مختلفة كبيرة/صغيرة) بيرجّع نفس الصنف الموجود من غير ما يكرره."""
-    if not _weight_log_worker_ok():
+    if not _weight_log_worker_ok() and not _weight_log_edit_authorized():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
     payload = request.get_json(silent=True) or {}
     day = (payload.get('day') or '').strip()
@@ -1215,6 +1215,77 @@ def weight_log_items_add():
     except Exception as e:
         return jsonify({'error': f'تعذر إضافة الصنف: {e}'}), 400
     return jsonify({'ok': True, 'item': (res.data or [{}])[0]})
+
+
+@app.route('/api/weight-log/items/all', methods=['GET'])
+def weight_log_items_all():
+    """كل أصناف كل الأيام مع بعض - للداش بورد بتاعتك بس، محمي بتسجيل الدخول
+    (مش بتوكين العامل، عشان الحذف/الترتيب حساسين)."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('weight_log_items').select('id, day_name, item_name, sort_order').order('day_name').order('sort_order')
+    )
+    return jsonify({'items': res.data or []})
+
+
+@app.route('/api/weight-log/items/<int:item_id>', methods=['PUT'])
+def weight_log_items_update(item_id):
+    """تعديل اسم صنف - محمي بتسجيل الدخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    new_name = (payload.get('item_name') or '').strip()
+    if not new_name:
+        return jsonify({'error': 'اسم الصنف مينفعش يبقى فاضي'}), 400
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('weight_log_items').update({'item_name': new_name}).eq('id', item_id))
+    except Exception as e:
+        return jsonify({'error': f'تعذر التعديل: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/weight-log/items/<int:item_id>', methods=['DELETE'])
+def weight_log_items_delete(item_id):
+    """حذف صنف من قايمة يوم معيّن - محمي بتسجيل الدخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('weight_log_items').delete().eq('id', item_id))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحذف: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/weight-log/items/reorder', methods=['PUT'])
+def weight_log_items_reorder():
+    """إعادة ترتيب أصناف يوم معيّن دفعة واحدة - محمي بتسجيل الدخول.
+    Body: { "day": "السبت", "order": [id1, id2, id3, ...] } - بترقّم الأصناف
+    بنفس ترتيبها في القايمة المبعوتة (0, 1, 2...)."""
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    day = (payload.get('day') or '').strip()
+    order = payload.get('order') or []
+    if not day or not isinstance(order, list) or not order:
+        return jsonify({'error': 'محتاج اليوم وترتيب الأصناف'}), 400
+    sb = get_client()
+    try:
+        for idx, item_id in enumerate(order):
+            execute_with_retry(
+                sb.table('weight_log_items').update({'sort_order': idx})
+                .eq('id', item_id).eq('day_name', day)
+            )
+    except Exception as e:
+        return jsonify({'error': f'تعذر حفظ الترتيب: {e}'}), 400
+    return jsonify({'ok': True})
 
 
 # ============================================================
