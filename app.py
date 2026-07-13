@@ -1524,8 +1524,9 @@ def promo_delete(promo_id):
 @app.route('/api/promo/public/<token>', methods=['GET'])
 def promo_public_get(token):
     """الصفحة اللي العميل بيفتحها - من غير لوجين. أول فتح بيسجّل توقيت
-    بداية العداد التنازلي، وأي فتح بعد كده بيرجّع نفس التوقيت (العداد
-    مايرجعش يبدأ من الأول)."""
+    الفتح ويطلع عادي، وأي فتح بعد كده (حتى لو نفس الجهاز) بيرجّع
+    already_seen=true عشان الواجهة تعرض رسالة "اتستخدم قبل كده" بدل
+    العجلة والكود تاني."""
     sb = get_client()
     res = execute_with_retry(sb.table('promo_codes').select('*').eq('token', token))
     rows = res.data or []
@@ -1533,7 +1534,9 @@ def promo_public_get(token):
         return jsonify({'error': 'الرابط ده مش صحيح'}), 404
     row = rows[0]
 
-    if not row.get('first_opened_at'):
+    already_seen = bool(row.get('first_opened_at'))
+
+    if not already_seen:
         now_iso = datetime.now(timezone.utc).isoformat()
         try:
             execute_with_retry(
@@ -1543,7 +1546,9 @@ def promo_public_get(token):
         except Exception:
             pass
 
-    return jsonify({'promo': _promo_row_to_public(row)})
+    result = _promo_row_to_public(row)
+    result['already_seen'] = already_seen
+    return jsonify({'promo': result})
 
 
 STATION_SHEET_MAP = {
