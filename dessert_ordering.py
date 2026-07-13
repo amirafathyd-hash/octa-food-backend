@@ -117,9 +117,32 @@ def _write_counts(template_path, uploaded_rows):
                 unmatched.append(slot["meal_name"])
 
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
+    _sync_ordering_counts_to_recipe_sheets(wb)
     wb.save(out_path)
     wb.close()
     return out_path, {"matched": matched, "unmatched": unmatched, "uploaded_count": len(uploaded_rows)}
+
+
+def _extract_ag_reference(value):
+    text = str(value or "").strip().upper()
+    if text.startswith("="):
+        text = text[1:]
+    return text if text.startswith("AG") else None
+
+
+def _sync_ordering_counts_to_recipe_sheets(wb):
+    if "Ordering" not in wb.sheetnames:
+        return
+    ws = wb["Ordering"]
+    for row in range(3, ws.max_row + 1):
+        sheet_name = ws[f"AA{row}"].value
+        if not sheet_name or sheet_name not in wb.sheetnames:
+            continue
+        count_ref = _extract_ag_reference(ws[f"AC{row}"].value)
+        count = ws[count_ref].value if count_ref else ws[f"AC{row}"].value
+        if count in (None, ""):
+            continue
+        wb[sheet_name]["V1"] = count
 
 
 def _soffice_bin():
@@ -300,6 +323,7 @@ def recalculate_dessert_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
             continue
         number = _as_number(value)
         cell.value = number if number is not None and str(value).strip() != "" else value
+    _sync_ordering_counts_to_recipe_sheets(wb)
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
     wb.save(out_path)
     wb.close()
