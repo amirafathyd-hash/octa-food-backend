@@ -12,6 +12,17 @@ DESSERT_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "Tokyo_D
 
 MEAL_HEADER_KEYS = {"meal name", "meal", "اسم الوجبة", "الصنف"}
 COUNT_HEADER_KEYS = {"total count", "count", "عدد", "العدد", "إجمالي العدد"}
+DAY_NAME_TO_NO = {
+    "السبت": 1,
+    "الأحد": 2,
+    "الاحد": 2,
+    "الاثنين": 3,
+    "الثلاثاء": 4,
+    "الأربعاء": 5,
+    "الاربعاء": 5,
+    "الخميس": 6,
+    "الجمعة": 7,
+}
 
 
 def _norm(value):
@@ -46,11 +57,32 @@ def _find_meal_count_columns(ws):
     return None
 
 
+def _detect_day_no(ws):
+    for row in range(1, min(ws.max_row, 25) + 1):
+        for col in range(1, min(ws.max_column, 5) + 1):
+            text = str(ws.cell(row=row, column=col).value or "").strip()
+            if text in DAY_NAME_TO_NO:
+                return DAY_NAME_TO_NO[text], text
+    return None, None
+
+
+def _find_update_table(ws):
+    for row in range(1, min(ws.max_row, 40) + 1):
+        label = _norm(ws.cell(row=row, column=1).value)
+        total_count = _norm(ws.cell(row=row - 1, column=12).value) if row > 1 else ""
+        if label == "row labels" and total_count == "total count":
+            return row + 1, 1, 12
+    return 10, 1, 12
+
+
 def read_uploaded_meal_counts(file_storage):
     file_storage.seek(0)
     wb = load_workbook(file_storage, data_only=True, read_only=True)
     try:
+        day_no, day_name = None, None
         for ws in wb.worksheets:
+            if day_no is None:
+                day_no, day_name = _detect_day_no(ws)
             found = _find_meal_count_columns(ws)
             if not found:
                 continue
@@ -63,18 +95,20 @@ def read_uploaded_meal_counts(file_storage):
                     continue
                 rows.append({"meal_name": str(meal).strip(), "count": count})
             if rows:
-                return rows
+                return {"rows": rows, "day_no": day_no, "day_name": day_name}
 
         if "Update" in wb.sheetnames:
             ws = wb["Update"]
+            day_no, day_name = _detect_day_no(ws)
+            start_row, meal_col, count_col = _find_update_table(ws)
             rows = []
-            for row in range(10, ws.max_row + 1):
-                meal = ws.cell(row=row, column=1).value
-                count = _as_number(ws.cell(row=row, column=12).value)
+            for row in range(start_row, ws.max_row + 1):
+                meal = ws.cell(row=row, column=meal_col).value
+                count = _as_number(ws.cell(row=row, column=count_col).value)
                 if meal and count is not None:
                     rows.append({"meal_name": str(meal).strip(), "count": count})
             if rows:
-                return rows
+                return {"rows": rows, "day_no": day_no, "day_name": day_name}
     finally:
         wb.close()
         file_storage.seek(0)
@@ -339,8 +373,16 @@ def extract_dashboard_state(workbook_path):
 def update_dessert_ordering_from_upload(file_storage, template_path=DESSERT_TEMPLATE_PATH):
     if not os.path.exists(template_path):
         raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
-    uploaded_rows = read_uploaded_meal_counts(file_storage)
+    upload_data = read_uploaded_meal_counts(file_storage)
+    uploaded_rows = upload_data["rows"]
     updated_xlsm, report = _write_counts(template_path, uploaded_rows)
+    if upload_data.get("day_no"):
+        wb = load_workbook(updated_xlsm, data_only=False, keep_vba=True)
+        wb["Ordering"]["R1"] = upload_data["day_no"]
+        wb.save(updated_xlsm)
+        wb.close()
+        report["day_no"] = upload_data["day_no"]
+        report["day_name"] = upload_data.get("day_name")
     recalculated_xlsx = recalc_with_ordering_aggregates(updated_xlsm)
     state = extract_dashboard_state(recalculated_xlsx)
     state.update(extract_workbook_state(recalculated_xlsx))
