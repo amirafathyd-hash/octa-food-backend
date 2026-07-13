@@ -1,0 +1,231 @@
+import os
+import shutil
+import subprocess
+import tempfile
+from collections import defaultdict, deque
+
+from openpyxl import load_workbook
+
+
+DESSERT_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "Tokyo_Dessert_Ordering.xlsm")
+
+MEAL_HEADER_KEYS = {"meal name", "meal", "اسم الوجبة", "الصنف"}
+COUNT_HEADER_KEYS = {"total count", "count", "عدد", "العدد", "إجمالي العدد"}
+
+
+def _norm(value):
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _as_number(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_meal_count_columns(ws):
+    max_row = min(ws.max_row, 60)
+    max_col = min(ws.max_column, 80)
+    for row in range(1, max_row + 1):
+        meal_col = None
+        count_col = None
+        for col in range(1, max_col + 1):
+            text = _norm(ws.cell(row=row, column=col).value)
+            if text in MEAL_HEADER_KEYS:
+                meal_col = col
+            if text in COUNT_HEADER_KEYS:
+                count_col = col
+        if meal_col and count_col:
+            return row, meal_col, count_col
+    return None
+
+
+def read_uploaded_meal_counts(file_storage):
+    file_storage.seek(0)
+    wb = load_workbook(file_storage, data_only=True, read_only=True)
+    try:
+        for ws in wb.worksheets:
+            found = _find_meal_count_columns(ws)
+            if not found:
+                continue
+            header_row, meal_col, count_col = found
+            rows = []
+            for row in range(header_row + 1, ws.max_row + 1):
+                meal = ws.cell(row=row, column=meal_col).value
+                count = _as_number(ws.cell(row=row, column=count_col).value)
+                if not meal or count is None:
+                    continue
+                rows.append({"meal_name": str(meal).strip(), "count": count})
+            if rows:
+                return rows
+
+        if "Update" in wb.sheetnames:
+            ws = wb["Update"]
+            rows = []
+            for row in range(10, ws.max_row + 1):
+                meal = ws.cell(row=row, column=1).value
+                count = _as_number(ws.cell(row=row, column=12).value)
+                if meal and count is not None:
+                    rows.append({"meal_name": str(meal).strip(), "count": count})
+            if rows:
+                return rows
+    finally:
+        wb.close()
+        file_storage.seek(0)
+
+    raise ValueError("مش لاقي أعمدة Meal name / Total Count في ملف الرفع")
+
+
+def _target_meal_slots(ws):
+    slots = []
+    for row in range(2, ws.max_row + 1):
+        meal = ws[f"AF{row}"].value
+        if meal:
+            slots.append({"row": row, "meal_name": str(meal).strip()})
+    return slots
+
+
+def _write_counts(template_path, uploaded_rows):
+    wb = load_workbook(template_path, data_only=False, keep_vba=True)
+    ws = wb["Ordering"]
+    slots = _target_meal_slots(ws)
+
+    matched = []
+    unmatched = []
+
+    if len(uploaded_rows) == len(slots):
+        for slot, item in zip(slots, uploaded_rows):
+            ws[f"AG{slot['row']}"] = item["count"]
+            matched.append({"row": slot["row"], "meal_name": slot["meal_name"], "count": item["count"]})
+    else:
+        by_name = defaultdict(deque)
+        for item in uploaded_rows:
+            by_name[_norm(item["meal_name"])].append(item["count"])
+        for slot in slots:
+            queue = by_name.get(_norm(slot["meal_name"]))
+            if queue:
+                count = queue.popleft()
+                ws[f"AG{slot['row']}"] = count
+                matched.append({"row": slot["row"], "meal_name": slot["meal_name"], "count": count})
+            else:
+                unmatched.append(slot["meal_name"])
+
+    out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
+    wb.save(out_path)
+    wb.close()
+    return out_path, {"matched": matched, "unmatched": unmatched, "uploaded_count": len(uploaded_rows)}
+
+
+def _soffice_bin():
+    return os.environ.get("SOFFICE_BIN") or shutil.which("soffice") or "soffice"
+
+
+def recalc_workbook_to_xlsx(xlsm_path):
+    out_dir = tempfile.mkdtemp(prefix="dessert_recalc_")
+    profile_dir = tempfile.mkdtemp(prefix="dessert_lo_profile_")
+    cmd = [
+        _soffice_bin(),
+        f"-env:UserInstallation=file://{profile_dir}",
+        "--headless",
+        "--convert-to",
+        "xlsx",
+        "--outdir",
+        out_dir,
+        xlsm_path,
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "LibreOffice failed").strip())
+    base = os.path.splitext(os.path.basename(xlsm_path))[0] + ".xlsx"
+    return os.path.join(out_dir, base)
+
+
+def _fill_rgb(cell):
+    color = cell.fill.fgColor
+    if color and color.type == "rgb" and color.rgb:
+        return "#" + color.rgb[-6:]
+    return None
+
+
+def _meal_group_fill(row):
+    if 3 <= row <= 9:
+        return "#E2F0D9"
+    if 11 <= row <= 15:
+        return "#DDEBF7"
+    if 17 <= row <= 23:
+        return "#FFF2CC"
+    if 25 <= row <= 28:
+        return "#EDEDED"
+    if 30 <= row <= 33:
+        return "#FCE4D6"
+    if 35 <= row <= 38:
+        return "#D9E2F3"
+    return "#FFFFFF"
+
+
+def _rounded(value):
+    if isinstance(value, float):
+        return round(value, 3)
+    return value
+
+
+def extract_dashboard_state(workbook_path):
+    wb = load_workbook(workbook_path, data_only=True)
+    ws = wb["Ordering"]
+
+    meals = []
+    for row in range(2, ws.max_row + 1):
+        meal = ws[f"AF{row}"].value
+        if meal:
+            meals.append({
+                "row": row,
+                "meal_name": meal,
+                "count": _rounded(ws[f"AG{row}"].value),
+                "fill": _fill_rgb(ws[f"AF{row}"]) or _meal_group_fill(row),
+            })
+
+    ingredients = []
+    for row in range(1, ws.max_row + 1):
+        item = ws.cell(row=row, column=1).value
+        category = ws.cell(row=row, column=2).value
+        if row != 1 and not item and not category:
+            continue
+        ingredients.append({
+            "row": row,
+            "item": item,
+            "category": category,
+            "unit": ws.cell(row=row, column=3).value,
+            "daily_weight": _rounded(ws.cell(row=row, column=4).value),
+            "weekly_weight": _rounded(ws.cell(row=row, column=5).value),
+            "yield": _rounded(ws.cell(row=row, column=6).value),
+            "order_base": _rounded(ws.cell(row=row, column=7).value),
+            "order_unit": ws.cell(row=row, column=8).value,
+            "price": _rounded(ws.cell(row=row, column=9).value),
+            "cost_per_unit": _rounded(ws.cell(row=row, column=10).value),
+            "weekly_order": _rounded(ws.cell(row=row, column=11).value),
+            "daily_order": _rounded(ws.cell(row=row, column=12).value),
+            "final_unit": ws.cell(row=row, column=13).value,
+            "weekly_price": _rounded(ws.cell(row=row, column=14).value),
+            "daily_price": _rounded(ws.cell(row=row, column=15).value),
+            "fill": _fill_rgb(ws.cell(row=row, column=1)),
+        })
+
+    wb.close()
+    return {"meals": meals, "ingredients": ingredients}
+
+
+def update_dessert_ordering_from_upload(file_storage, template_path=DESSERT_TEMPLATE_PATH):
+    if not os.path.exists(template_path):
+        raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
+    uploaded_rows = read_uploaded_meal_counts(file_storage)
+    updated_xlsm, report = _write_counts(template_path, uploaded_rows)
+    recalculated_xlsx = recalc_workbook_to_xlsx(updated_xlsm)
+    state = extract_dashboard_state(recalculated_xlsx)
+    report["matched_count"] = len(report["matched"])
+    report["unmatched_count"] = len(report["unmatched"])
+    return state, report
