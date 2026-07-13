@@ -134,15 +134,20 @@ def _sync_ordering_counts_to_recipe_sheets(wb):
     if "Ordering" not in wb.sheetnames:
         return
     ws = wb["Ordering"]
+    selected_day = _as_number(ws["R1"].value)
+    selected_day = int(selected_day) if selected_day is not None else None
     for row in range(3, ws.max_row + 1):
         sheet_name = ws[f"AA{row}"].value
         if not sheet_name or sheet_name not in wb.sheetnames:
             continue
+        row_day = _as_number(ws[f"AB{row}"].value)
+        row_day = int(row_day) if row_day is not None else None
         count_ref = _extract_ag_reference(ws[f"AC{row}"].value)
         count = ws[count_ref].value if count_ref else ws[f"AC{row}"].value
-        if count in (None, ""):
-            continue
-        wb[sheet_name]["V1"] = count
+        if selected_day is not None and row_day is not None and row_day != selected_day:
+            wb[sheet_name]["V1"] = 0
+        elif count not in (None, ""):
+            wb[sheet_name]["V1"] = count
 
 
 def _soffice_bin():
