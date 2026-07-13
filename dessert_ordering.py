@@ -134,20 +134,64 @@ def _sync_ordering_counts_to_recipe_sheets(wb):
     if "Ordering" not in wb.sheetnames:
         return
     ws = wb["Ordering"]
+    for row in range(3, ws.max_row + 1):
+        sheet_name = ws[f"AA{row}"].value
+        if not sheet_name or sheet_name not in wb.sheetnames:
+            continue
+        count_ref = _extract_ag_reference(ws[f"AC{row}"].value)
+        count = ws[count_ref].value if count_ref else ws[f"AC{row}"].value
+        if count not in (None, ""):
+            wb[sheet_name]["V1"] = count
+
+
+def _build_ordering_aggregates(calculated_workbook_path):
+    wb = load_workbook(calculated_workbook_path, data_only=True)
+    ws = wb["Ordering"]
     selected_day = _as_number(ws["R1"].value)
     selected_day = int(selected_day) if selected_day is not None else None
+    daily = defaultdict(float)
+    weekly = defaultdict(float)
+
     for row in range(3, ws.max_row + 1):
         sheet_name = ws[f"AA{row}"].value
         if not sheet_name or sheet_name not in wb.sheetnames:
             continue
         row_day = _as_number(ws[f"AB{row}"].value)
         row_day = int(row_day) if row_day is not None else None
-        count_ref = _extract_ag_reference(ws[f"AC{row}"].value)
-        count = ws[count_ref].value if count_ref else ws[f"AC{row}"].value
-        if selected_day is not None and row_day is not None and row_day != selected_day:
-            wb[sheet_name]["V1"] = 0
-        elif count not in (None, ""):
-            wb[sheet_name]["V1"] = count
+        recipe = wb[sheet_name]
+        for recipe_row in range(5, recipe.max_row + 1):
+            ingredient = recipe[f"B{recipe_row}"].value
+            quantity = _as_number(recipe[f"H{recipe_row}"].value)
+            if not ingredient or quantity is None:
+                continue
+            weekly[ingredient] += quantity
+            if selected_day is None or row_day == selected_day:
+                daily[ingredient] += quantity
+
+    wb.close()
+    return daily, weekly
+
+
+def _write_ordering_aggregates(xlsm_path, daily, weekly):
+    wb = load_workbook(xlsm_path, data_only=False, keep_vba=True)
+    ws = wb["Ordering"]
+    for row in range(3, ws.max_row + 1):
+        ingredient = ws[f"A{row}"].value
+        if not ingredient:
+            continue
+        ws[f"D{row}"] = round(daily.get(ingredient, 0), 6)
+        ws[f"E{row}"] = round(weekly.get(ingredient, 0), 6)
+    out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
+    wb.save(out_path)
+    wb.close()
+    return out_path
+
+
+def recalc_with_ordering_aggregates(xlsm_path):
+    first_xlsx = recalc_workbook_to_xlsx(xlsm_path)
+    daily, weekly = _build_ordering_aggregates(first_xlsx)
+    aggregated_xlsm = _write_ordering_aggregates(xlsm_path, daily, weekly)
+    return recalc_workbook_to_xlsx(aggregated_xlsm)
 
 
 def _soffice_bin():
@@ -297,7 +341,7 @@ def update_dessert_ordering_from_upload(file_storage, template_path=DESSERT_TEMP
         raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
     uploaded_rows = read_uploaded_meal_counts(file_storage)
     updated_xlsm, report = _write_counts(template_path, uploaded_rows)
-    recalculated_xlsx = recalc_workbook_to_xlsx(updated_xlsm)
+    recalculated_xlsx = recalc_with_ordering_aggregates(updated_xlsm)
     state = extract_dashboard_state(recalculated_xlsx)
     state.update(extract_workbook_state(recalculated_xlsx))
     report["matched_count"] = len(report["matched"])
@@ -332,7 +376,7 @@ def recalculate_dessert_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
     wb.save(out_path)
     wb.close()
-    recalculated_xlsx = recalc_workbook_to_xlsx(out_path)
+    recalculated_xlsx = recalc_with_ordering_aggregates(out_path)
     state = extract_dashboard_state(recalculated_xlsx)
     state.update(extract_workbook_state(recalculated_xlsx))
     return state
