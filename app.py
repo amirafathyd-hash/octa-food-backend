@@ -29,7 +29,11 @@ from matcher import match_invoice_item
 from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
 from tokyo_ordering import read_day_file_meals, merge_day_into_template
-from dessert_ordering import update_dessert_ordering_from_upload
+from dessert_ordering import (
+    get_dessert_template_state,
+    recalculate_dessert_with_edits,
+    update_dessert_ordering_from_upload,
+)
 from xlsx_to_images import add_workbook_images_to_zip
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
@@ -448,6 +452,25 @@ def dessert_ordering_update():
         return jsonify({'ok': True, 'report': report, 'state': state})
     except Exception as e:
         app.logger.exception('dessert_ordering_update failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dessert-ordering/template', methods=['GET'])
+def dessert_ordering_template():
+    try:
+        return jsonify({'ok': True, 'state': get_dessert_template_state()})
+    except Exception as e:
+        app.logger.exception('dessert_ordering_template failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dessert-ordering/recalculate', methods=['POST'])
+def dessert_ordering_recalculate():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify({'ok': True, 'state': recalculate_dessert_with_edits(payload.get('edits') or [])})
+    except Exception as e:
+        app.logger.exception('dessert_ordering_recalculate failed')
         return jsonify({'error': str(e)}), 500
 
 
