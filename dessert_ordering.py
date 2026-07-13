@@ -154,6 +154,8 @@ def _fill_rgb(cell):
 
 
 def _meal_group_fill(row):
+    if row > 38:
+        return "#FFFFFF"
     if 3 <= row <= 9:
         return "#E2F0D9"
     if 11 <= row <= 15:
@@ -229,7 +231,7 @@ def extract_dashboard_state(workbook_path):
                 "row": row,
                 "meal_name": meal,
                 "count": _rounded(ws[f"AG{row}"].value),
-                "fill": _fill_rgb(ws[f"AF{row}"]) or _meal_group_fill(row),
+                "fill": _meal_group_fill(row) if row > 38 else (_fill_rgb(ws[f"AF{row}"]) or _meal_group_fill(row)),
             })
 
     ingredients = []
