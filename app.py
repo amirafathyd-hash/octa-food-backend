@@ -1435,28 +1435,35 @@ def _promo_row_to_public(row):
 
 @app.route('/api/promo', methods=['POST'])
 def promo_create():
-    """إنشاء كود بروموشن جديد بلينك فريد - محمي بتسجيل الدخول."""
+    """إنشاء كود بروموشن جديد بلينك فريد - محمي بتسجيل الدخول. الكود بيتولّد
+    تلقائي (OCT + أرقام عشوائية)، مش بيتكتب يدوي."""
     _, err = _require_auth()
     if err:
         return err
     payload = request.get_json(silent=True) or {}
-    code = (payload.get('code') or '').strip()
     title = (payload.get('title') or '').strip()
     discount_text = (payload.get('discount_text') or '').strip()
     try:
         duration_hours = int(payload.get('duration_hours') or 24)
     except (TypeError, ValueError):
         duration_hours = 24
-    if not code or not title or not discount_text:
-        return jsonify({'error': 'اكتب الكود والعنوان ووصف الخصم'}), 400
+    if not title or not discount_text:
+        return jsonify({'error': 'اكتب العنوان ووصف الخصم'}), 400
     if duration_hours < 1:
         return jsonify({'error': 'مدة الصلاحية لازم تكون ساعة على الأقل'}), 400
 
     sb = get_client()
-    existing = execute_with_retry(sb.table('promo_codes').select('id').ilike('code', code))
-    if existing.data:
-        return jsonify({'error': f'الكود "{code}" مستخدم قبل كده — اختار كود تاني'}), 400
 
+    def generate_unique_code():
+        for _ in range(15):
+            candidate = 'OCT' + ''.join(secrets.choice('0123456789') for _ in range(5))
+            existing = execute_with_retry(sb.table('promo_codes').select('id').ilike('code', candidate))
+            if not existing.data:
+                return candidate
+        # احتياطي نادر جدًا لو الـ15 محاولة كلهم اتكرروا - بنضيف جزء من توكين عشوائي
+        return 'OCT' + secrets.token_hex(4).upper()
+
+    code = generate_unique_code()
     token = secrets.token_urlsafe(16)
     row = {
         'token': token, 'code': code, 'title': title,
