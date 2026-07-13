@@ -1417,6 +1417,128 @@ def veg_inventory_day_delete(entry_date):
     return jsonify({'ok': True})
 
 
+# ============================================================
+# أكواد البروموشن (Promo Codes) — لينك فريد لكل عميل، عداد تنازلي بيبدأ من
+# أول لحظة فتح، استخدام مرة واحدة بس
+# ============================================================
+def _promo_row_to_public(row):
+    """بتجهّز الصف عشان يترجع للعميل (من غير id داخلي زيادة عن اللازم)."""
+    return {
+        'code': row['code'],
+        'title': row['title'],
+        'discount_text': row['discount_text'],
+        'duration_hours': row['duration_hours'],
+        'first_opened_at': row['first_opened_at'],
+        'used': row['used'],
+    }
+
+
+@app.route('/api/promo', methods=['POST'])
+def promo_create():
+    """إنشاء كود بروموشن جديد بلينك فريد - محمي بتسجيل الدخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    code = (payload.get('code') or '').strip()
+    title = (payload.get('title') or '').strip()
+    discount_text = (payload.get('discount_text') or '').strip()
+    try:
+        duration_hours = int(payload.get('duration_hours') or 24)
+    except (TypeError, ValueError):
+        duration_hours = 24
+    if not code or not title or not discount_text:
+        return jsonify({'error': 'اكتب الكود والعنوان ووصف الخصم'}), 400
+    if duration_hours < 1:
+        return jsonify({'error': 'مدة الصلاحية لازم تكون ساعة على الأقل'}), 400
+
+    sb = get_client()
+    existing = execute_with_retry(sb.table('promo_codes').select('id').ilike('code', code))
+    if existing.data:
+        return jsonify({'error': f'الكود "{code}" مستخدم قبل كده — اختار كود تاني'}), 400
+
+    token = secrets.token_urlsafe(16)
+    row = {
+        'token': token, 'code': code, 'title': title,
+        'discount_text': discount_text, 'duration_hours': duration_hours,
+    }
+    try:
+        res = execute_with_retry(sb.table('promo_codes').insert(row))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الإنشاء: {e}'}), 400
+    return jsonify({'ok': True, 'promo': (res.data or [{}])[0]})
+
+
+@app.route('/api/promo', methods=['GET'])
+def promo_list():
+    """للداش بورد بتاعتك - محمي بتسجيل الدخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(sb.table('promo_codes').select('*').order('created_at', desc=True))
+    return jsonify({'promos': res.data or []})
+
+
+@app.route('/api/promo/<int:promo_id>/mark-used', methods=['PUT'])
+def promo_mark_used(promo_id):
+    """تعليم الكود كمستخدم - بيحصل لما خدمة العملاء تطبّق الخصم فعليًا."""
+    username, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        execute_with_retry(
+            sb.table('promo_codes').update({
+                'used': True,
+                'used_at': datetime.now(timezone.utc).isoformat(),
+                'used_by_note': username,
+            }).eq('id', promo_id)
+        )
+    except Exception as e:
+        return jsonify({'error': f'تعذر التحديث: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/promo/<int:promo_id>', methods=['DELETE'])
+def promo_delete(promo_id):
+    """إلغاء/حذف كود بروموشن - محمي بتسجيل الدخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('promo_codes').delete().eq('id', promo_id))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحذف: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/promo/public/<token>', methods=['GET'])
+def promo_public_get(token):
+    """الصفحة اللي العميل بيفتحها - من غير لوجين. أول فتح بيسجّل توقيت
+    بداية العداد التنازلي، وأي فتح بعد كده بيرجّع نفس التوقيت (العداد
+    مايرجعش يبدأ من الأول)."""
+    sb = get_client()
+    res = execute_with_retry(sb.table('promo_codes').select('*').eq('token', token))
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'الرابط ده مش صحيح'}), 404
+    row = rows[0]
+
+    if not row.get('first_opened_at'):
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            execute_with_retry(
+                sb.table('promo_codes').update({'first_opened_at': now_iso}).eq('id', row['id'])
+            )
+            row['first_opened_at'] = now_iso
+        except Exception:
+            pass
+
+    return jsonify({'promo': _promo_row_to_public(row)})
+
+
 STATION_SHEET_MAP = {
     'breakfast': 'Ordering',
     'desserts': 'Ordering',
