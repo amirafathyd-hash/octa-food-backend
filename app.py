@@ -776,6 +776,35 @@ def sauce_receipt_list():
     return jsonify({'receipts': res.data or []})
 
 
+@app.route('/api/receipt-notifications/list', methods=['GET'])
+def receipt_notifications_list():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    sauce_res = execute_with_retry(
+        sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(100)
+    )
+    veg_res = execute_with_retry(
+        sb.table('upload_log')
+        .select('*')
+        .eq('file_type', 'vegetables_receipt')
+        .order('created_at', desc=True)
+        .limit(100)
+    )
+    return jsonify({'sauce_receipts': sauce_res.data or [], 'vegetable_receipts': veg_res.data or []})
+
+
+@app.route('/api/receipt-notifications/vegetables/<log_id>', methods=['DELETE'])
+def receipt_notifications_vegetables_delete(log_id):
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    execute_with_retry(sb.table('upload_log').delete().eq('id', log_id))
+    return jsonify({'ok': True})
+
+
 @app.route('/api/sauce-receipt/<receipt_id>', methods=['DELETE'])
 def sauce_receipt_delete(receipt_id):
     """حذف رابط استلام بالكامل - محتاج تسجيل دخول."""
@@ -2957,6 +2986,45 @@ def vegetables_receipt_email():
         app.logger.exception('vegetables_receipt_email failed')
         return jsonify({'error': f'تعذر إرسال الإيميل: {e}'}), 500
     return jsonify({'ok': True})
+
+
+def _as_float_for_receipt(value):
+    if value is None or value == '':
+        return 0
+    try:
+        return float(str(value).replace(',', '').strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+@app.route('/api/vegetables-receipt/submit', methods=['POST'])
+def vegetables_receipt_submit():
+    payload = request.get_json(silent=True) or {}
+    rows = payload.get('rows') or []
+    if not rows:
+        return jsonify({'error': 'مفيش بيانات استلام خضروات مبعوتة'}), 400
+    received_count = sum(1 for r in rows if str(r.get('received') or '').strip())
+    signed_count = sum(1 for r in rows if str(r.get('signature') or '').strip())
+    total_required = sum((_as_float_for_receipt(r.get('daily_order')) or 0) for r in rows)
+    total_received = sum((_as_float_for_receipt(r.get('received')) or 0) for r in rows)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload_log = {
+        'kind': 'vegetables_receipt',
+        'submitted_at': now_iso,
+        'rows_count': len(rows),
+        'received_count': received_count,
+        'signed_count': signed_count,
+        'total_required': round(total_required, 3),
+        'total_received': round(total_received, 3),
+    }
+    _log(
+        'vegetables_receipt',
+        'استلام الخضروات',
+        None,
+        json.dumps(payload_log, ensure_ascii=False),
+        level='info',
+    )
+    return jsonify({'ok': True, 'submitted_at': now_iso, **payload_log})
 
 
 @app.route('/api/auto-weekly-purchasing', methods=['POST'])
