@@ -108,6 +108,22 @@ def _apply_edits(wb, edits):
         wb[sheet][address] = number if number is not None and str(value).strip() != "" else value
 
 
+def _recipe_sheet_names(wb):
+    return [name for name in wb.sheetnames if name not in ("List of Meals", "Ordering")]
+
+
+def _selected_day_recipe_sheets(workbook_path, day_no, per_day=7):
+    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        recipes = _recipe_sheet_names(wb)
+    finally:
+        wb.close()
+    day = max(1, int(_as_number(day_no) or 1))
+    start = (day - 1) * per_day
+    selected = recipes[start:start + per_day]
+    return selected or recipes[:per_day]
+
+
 def _norm_text(value):
     return " ".join(str(value or "").replace("\u00a0", " ").split()).strip().lower()
 
@@ -169,7 +185,7 @@ def extract_dashboard_state(workbook_path):
     ordering = wb["Ordering"]
 
     sauce = []
-    recipe_sheet_names = [name for name in wb.sheetnames if name not in ("List of Meals", "Ordering")]
+    recipe_sheet_names = _recipe_sheet_names(wb)
     for sheet_name in recipe_sheet_names:
         ws = wb[sheet_name]
         name = ws["B2"].value or sheet_name
@@ -286,9 +302,26 @@ def export_sauce_excel_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH):
     return xlsx, {"day_no": day}
 
 
-def export_sauce_pdf_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH):
+def export_sauce_pdf_with_edits(edits, day_no=1, template_path=SAUCE_TEMPLATE_PATH):
     xlsx, day = _updated_workbook(edits, template_path)
-    return export_workbook_to_pdf(xlsx), {"day_no": day}
+    selected = _selected_day_recipe_sheets(xlsx, day_no)
+    wb = load_workbook(xlsx)
+    try:
+        for sheet_name in list(wb.sheetnames):
+            if sheet_name not in selected:
+                del wb[sheet_name]
+        for ws in wb.worksheets:
+            ws.page_setup.orientation = "landscape"
+            ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.page_setup.fitToWidth = 1
+        if selected and selected[0] in wb.sheetnames:
+            wb.active = wb.sheetnames.index(selected[0])
+        out_path = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False).name
+        wb.save(out_path)
+    finally:
+        wb.close()
+    return export_workbook_to_pdf(out_path), {"day_no": int(_as_number(day_no) or day), "sheets": selected}
 
 
 def replace_sauce_template(file_storage, template_path=SAUCE_TEMPLATE_PATH):
