@@ -3041,14 +3041,18 @@ def vegetables_receipt_submit():
     total_required = sum((_as_float_for_receipt(r.get('daily_order')) or 0) for r in rows)
     total_received = sum((_as_float_for_receipt(r.get('received')) or 0) for r in rows)
     now_iso = datetime.now(timezone.utc).isoformat()
+    missing_count = max(0, len(rows) - received_count)
     payload_log = {
         'kind': 'vegetables_receipt',
         'submitted_at': now_iso,
         'rows_count': len(rows),
         'received_count': received_count,
         'signed_count': signed_count,
+        'missing_count': missing_count,
+        'status': 'complete' if missing_count == 0 else ('partial' if received_count else 'pending'),
         'total_required': round(total_required, 3),
         'total_received': round(total_received, 3),
+        'rows': rows,
     }
     _log(
         'vegetables_receipt',
