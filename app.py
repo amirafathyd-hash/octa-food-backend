@@ -2942,15 +2942,48 @@ def vegetables_receipt_data():
         rows = _vegetable_summary_rows_from_station_data(vegetable_data)
         if not rows:
             return jsonify({'error': 'مفيش خضروات في الملفات المرفوعة'}), 400
+        receipt_id = secrets.token_urlsafe(8)
+        created_at = datetime.now(timezone.utc).isoformat()
+        _log(
+            'vegetables_receipt_link',
+            receipt_id,
+            None,
+            json.dumps({'id': receipt_id, 'title': 'استلام الخضروات', 'created_at': created_at, 'rows': rows}, ensure_ascii=False),
+            level='info',
+        )
         return jsonify({
             'ok': True,
+            'id': receipt_id,
             'title': 'استلام الخضروات',
-            'created_at': datetime.now().isoformat(),
+            'created_at': created_at,
             'rows': rows,
         })
     except Exception as e:
         app.logger.exception('vegetables_receipt_data failed')
         return jsonify({'error': f'حصل خطأ في تجهيز رابط الخضار: {e}'}), 500
+
+
+@app.route('/api/vegetables-receipt/<receipt_id>', methods=['GET'])
+def vegetables_receipt_get(receipt_id):
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('upload_log')
+        .select('*')
+        .eq('file_type', 'vegetables_receipt_link')
+        .eq('file_name', receipt_id)
+        .order('created_at', desc=True)
+        .limit(1)
+    )
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'رابط استلام الخضروات غير موجود'}), 404
+    try:
+        payload = json.loads(rows[0].get('message') or '{}')
+    except Exception:
+        payload = {}
+    if not payload.get('rows'):
+        return jsonify({'error': 'بيانات رابط الخضروات غير مكتملة'}), 500
+    return jsonify(payload)
 
 
 @app.route('/api/vegetables-receipt/email', methods=['POST'])
