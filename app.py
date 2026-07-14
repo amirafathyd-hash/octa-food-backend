@@ -828,6 +828,8 @@ def _customer_review_from_log(row):
     except Exception:
         data = {}
     data.setdefault('id', f"log-{row.get('id')}")
+    data.setdefault('log_id', row.get('id'))
+    data.setdefault('editable', True)
     data.setdefault('source', 'مدخلات جديدة')
     data.setdefault('created_at', row.get('created_at'))
     return data
@@ -835,7 +837,7 @@ def _customer_review_from_log(row):
 
 @app.route('/api/customer-reviews', methods=['GET'])
 def customer_reviews_list():
-    _, err = _require_auth()
+    _, err = _require_review_auth()
     if err:
         return err
     seed = _load_customer_reviews_seed()
@@ -858,7 +860,7 @@ def customer_reviews_list():
 
 @app.route('/api/customer-reviews', methods=['POST'])
 def customer_reviews_create():
-    _, err = _require_auth()
+    username, err = _require_review_auth()
     if err:
         return err
     payload = request.get_json(silent=True) or {}
@@ -882,10 +884,45 @@ def customer_reviews_create():
         'notes': payload.get('notes') or '',
         'ratings': payload.get('ratings') or [],
         'suggestions': payload.get('suggestions') or [],
+        'followup_of': payload.get('followup_of') or '',
+        'review_status': payload.get('review_status') or 'تقييم جديد',
+        'created_by': username,
         'raw': payload,
         'created_at': now_iso,
     }
     _log('customer_review', name or phone, record['call_date'], json.dumps(record, ensure_ascii=False), level='info')
+    return jsonify({'ok': True, 'record': record})
+
+
+@app.route('/api/customer-reviews/<log_id>', methods=['PUT'])
+def customer_reviews_update(log_id):
+    username, err = _require_review_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('upload_log').select('*').eq('id', log_id).eq('file_type', 'customer_review').limit(1)
+    )
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'التقييم غير موجود أو غير قابل للتعديل'}), 404
+    record = _customer_review_from_log(rows[0])
+    for key in [
+        'customer_name', 'customer_phone', 'package', 'city', 'subscription_count',
+        'time_suitable', 'call_duration', 'call_date', 'notes', 'star_rating',
+        'review_status', 'ratings', 'suggestions'
+    ]:
+        if key in payload:
+            record[key] = payload[key]
+    record['customer_phone'] = re.sub(r'\D+', '', str(record.get('customer_phone') or ''))
+    record['updated_at'] = datetime.now(timezone.utc).isoformat()
+    record['updated_by'] = username
+    execute_with_retry(sb.table('upload_log').update({
+        'file_name': record.get('customer_name') or record.get('customer_phone') or rows[0].get('file_name'),
+        'item_date': record.get('call_date') or rows[0].get('item_date'),
+        'message': json.dumps(record, ensure_ascii=False),
+    }).eq('id', log_id))
     return jsonify({'ok': True, 'record': record})
 
 
@@ -1163,6 +1200,10 @@ def _next_month(month):
 
 
 SESSION_DAYS = 7
+ADMIN_ROLE = 'admin'
+REVIEW_ROLE = 'review'
+DEFAULT_REVIEW_USERNAME = os.environ.get('CUSTOMER_REVIEWS_DEFAULT_USER', 'customer-reviews@octafood.com')
+DEFAULT_REVIEW_PASSWORD = os.environ.get('CUSTOMER_REVIEWS_DEFAULT_PASSWORD', '@123456')
 
 
 def _new_session(username):
@@ -1199,6 +1240,72 @@ def _require_auth():
     return username, None
 
 
+def _role_events():
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('upload_log')
+            .select('*')
+            .eq('file_type', 'user_role')
+            .order('created_at', desc=True)
+            .limit(1000)
+        )
+    except Exception:
+        return {}
+    roles = {}
+    for row in (res.data or []):
+        try:
+            data = json.loads(row.get('message') or '{}')
+        except Exception:
+            data = {}
+        username = data.get('username') or row.get('file_name')
+        role = data.get('role') or ADMIN_ROLE
+        if username and username not in roles:
+            roles[username] = REVIEW_ROLE if role == REVIEW_ROLE else ADMIN_ROLE
+    return roles
+
+
+def _role_for_username(username):
+    if username == DEFAULT_REVIEW_USERNAME:
+        return REVIEW_ROLE
+    return _role_events().get(username, ADMIN_ROLE)
+
+
+def _set_user_role(username, role):
+    role = REVIEW_ROLE if role == REVIEW_ROLE else ADMIN_ROLE
+    _log('user_role', username, None, json.dumps({
+        'username': username,
+        'role': role,
+    }, ensure_ascii=False), level='info')
+
+
+def _ensure_default_review_user():
+    sb = get_client()
+    try:
+        existing = execute_with_retry(
+            sb.table('app_users').select('id').eq('username', DEFAULT_REVIEW_USERNAME).limit(1)
+        )
+        if not (existing.data or []):
+            execute_with_retry(sb.table('app_users').insert({
+                'username': DEFAULT_REVIEW_USERNAME,
+                'password_hash': generate_password_hash(DEFAULT_REVIEW_PASSWORD),
+            }))
+        if _role_events().get(DEFAULT_REVIEW_USERNAME) != REVIEW_ROLE:
+            _set_user_role(DEFAULT_REVIEW_USERNAME, REVIEW_ROLE)
+    except Exception:
+        pass
+
+
+def _require_review_auth():
+    username, err = _require_auth()
+    if err:
+        return None, err
+    role = _role_for_username(username)
+    if role not in (ADMIN_ROLE, REVIEW_ROLE):
+        return None, (jsonify({'error': 'صلاحية تقييمات العملاء غير متاحة لهذا المستخدم'}), 403)
+    return username, None
+
+
 @app.route('/api/setup-first-user', methods=['POST'])
 def setup_first_user():
     """شغّال بس أول مرة (لما جدول app_users يكون فاضي)، عشان تعمل أول حساب admin.
@@ -1228,6 +1335,9 @@ def login():
     if not username or not password:
         return jsonify({'error': 'اليوزر نيم والباسورد مطلوبين'}), 400
 
+    if username == DEFAULT_REVIEW_USERNAME:
+        _ensure_default_review_user()
+
     sb = get_client()
     res = execute_with_retry(sb.table('app_users').select('*').eq('username', username))
     rows = res.data or []
@@ -1235,7 +1345,7 @@ def login():
         return jsonify({'error': 'اليوزر نيم أو الباسورد غلط'}), 401
 
     token = _new_session(username)
-    return jsonify({'token': token, 'username': username})
+    return jsonify({'token': token, 'username': username, 'role': _role_for_username(username)})
 
 
 @app.route('/api/verify-session', methods=['GET'])
@@ -1244,7 +1354,7 @@ def verify_session():
     username = _check_session(token)
     if not username:
         return jsonify({'valid': False}), 401
-    return jsonify({'valid': True, 'username': username})
+    return jsonify({'valid': True, 'username': username, 'role': _role_for_username(username)})
 
 
 @app.route('/api/logout', methods=['POST'])
@@ -1262,9 +1372,16 @@ def list_users():
     _, err = _require_auth()
     if err:
         return err
+    _ensure_default_review_user()
     sb = get_client()
     res = execute_with_retry(sb.table('app_users').select('id, username, created_at').order('created_at'))
-    return jsonify({'users': res.data or []})
+    roles = _role_events()
+    users = []
+    for user in (res.data or []):
+        row = dict(user)
+        row['role'] = REVIEW_ROLE if row.get('username') == DEFAULT_REVIEW_USERNAME else roles.get(row.get('username'), ADMIN_ROLE)
+        users.append(row)
+    return jsonify({'users': users})
 
 
 @app.route('/api/users', methods=['POST'])
@@ -1275,6 +1392,7 @@ def create_user():
     payload = request.get_json(silent=True) or {}
     username = (payload.get('username') or '').strip()
     password = payload.get('password') or ''
+    role = payload.get('role') or ADMIN_ROLE
     if not username or not password:
         return jsonify({'error': 'اليوزر نيم والباسورد مطلوبين'}), 400
     if len(password) < 4:
@@ -1287,6 +1405,7 @@ def create_user():
         }))
     except Exception as e:
         return jsonify({'error': f'تعذر إضافة اليوزر (ممكن يكون موجود قبل كده): {e}'}), 400
+    _set_user_role(username, role)
     return jsonify({'ok': True})
 
 
