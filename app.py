@@ -36,6 +36,7 @@ from dessert_ordering import (
     export_dessert_pdf_with_edits,
     get_dessert_template_state,
     recalculate_dessert_with_edits,
+    replace_dessert_template,
     update_dessert_ordering_from_upload,
 )
 from xlsx_to_images import add_workbook_images_to_zip
@@ -465,6 +466,19 @@ def dessert_ordering_template():
         return jsonify({'ok': True, 'state': get_dessert_template_state()})
     except Exception as e:
         app.logger.exception('dessert_ordering_template failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dessert-ordering/replace-template', methods=['POST'])
+def dessert_ordering_replace_template():
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'ارفع ملف الشيت الرئيسي الجديد باسم file'}), 400
+    try:
+        state, report = replace_dessert_template(f)
+        return jsonify({'ok': True, 'report': report, 'state': state})
+    except Exception as e:
+        app.logger.exception('dessert_ordering_replace_template failed')
         return jsonify({'error': str(e)}), 500
 
 
