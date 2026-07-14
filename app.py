@@ -805,15 +805,21 @@ def receipt_notifications_vegetables_delete(log_id):
     return jsonify({'ok': True})
 
 
-CUSTOMER_REVIEWS_SEED_PATH = os.path.join(os.path.dirname(__file__), 'data', 'customer_reviews_seed.json')
+CUSTOMER_REVIEWS_SEED_PATHS = [
+    os.path.join(os.path.dirname(__file__), 'data', 'customer_reviews_seed.json'),
+    os.path.join(os.path.dirname(__file__), 'customer_reviews_seed.json'),
+]
 
 
 def _load_customer_reviews_seed():
-    try:
-        with open(CUSTOMER_REVIEWS_SEED_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {'summary': [], 'records': []}
+    for path in CUSTOMER_REVIEWS_SEED_PATHS:
+        try:
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception:
+            continue
+    return {'summary': [], 'records': []}
 
 
 def _customer_review_from_log(row):
