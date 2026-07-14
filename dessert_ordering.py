@@ -329,8 +329,8 @@ def _prepare_pdf_workbook(calculated_workbook_path, day_no):
         ws.sheet_properties.pageSetUpPr.fitToPage = True
         ws.page_margins.left = 0.25
         ws.page_margins.right = 0.25
-        ws.page_margins.top = 0.65
-        ws.page_margins.bottom = 0.55
+        ws.page_margins.top = 0.95
+        ws.page_margins.bottom = 0.75
         ws.oddHeader.center.text = "&A"
         ws.oddHeader.center.size = 14
         ws.oddHeader.center.font = "Arial,Bold"
