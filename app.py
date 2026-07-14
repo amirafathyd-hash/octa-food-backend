@@ -2477,7 +2477,23 @@ def _vegetable_summary_rows_from_station_data(vegetable_data):
 
 
 def _detect_uploaded_station_files(uploaded):
-    station_files, undetected = _detect_uploaded_station_files(uploaded)
+    station_files = {}
+    undetected = []
+    for f in uploaded:
+        try:
+            wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
+            kind = _detect_station_from_workbook(wb)
+            wb.close()
+            f.seek(0)
+            if kind == 'tokyo':
+                station_files['hot'] = f
+                station_files['marination'] = f
+            elif kind:
+                station_files[kind] = f
+            else:
+                undetected.append(f.filename)
+        except Exception as e:
+            undetected.append(f'{f.filename} (خطأ: {e})')
     return station_files, undetected
 
 
