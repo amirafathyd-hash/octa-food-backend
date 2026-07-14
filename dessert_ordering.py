@@ -178,6 +178,20 @@ def _sync_ordering_counts_to_recipe_sheets(wb):
             wb[sheet_name]["V1"] = count
 
 
+def _apply_edits_to_workbook(wb, edits):
+    for edit in edits or []:
+        sheet = edit.get("sheet")
+        address = edit.get("address")
+        value = edit.get("value")
+        if not sheet or not address or sheet not in wb.sheetnames:
+            continue
+        cell = wb[sheet][address]
+        if isinstance(cell.value, str) and cell.value.startswith("="):
+            continue
+        number = _as_number(value)
+        cell.value = number if number is not None and str(value).strip() != "" else value
+
+
 def _build_ordering_aggregates(calculated_workbook_path):
     wb = load_workbook(calculated_workbook_path, data_only=True)
     ws = wb["Ordering"]
@@ -250,6 +264,86 @@ def recalc_workbook_to_xlsx(xlsm_path):
         raise RuntimeError((proc.stderr or proc.stdout or "LibreOffice failed").strip())
     base = os.path.splitext(os.path.basename(xlsm_path))[0] + ".xlsx"
     return os.path.join(out_dir, base)
+
+
+def _export_workbook_to_pdf(workbook_path):
+    out_dir = tempfile.mkdtemp(prefix="dessert_pdf_")
+    profile_dir = tempfile.mkdtemp(prefix="dessert_lo_pdf_profile_")
+    cmd = [
+        _soffice_bin(),
+        f"-env:UserInstallation=file://{profile_dir}",
+        "--headless",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        out_dir,
+        workbook_path,
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "LibreOffice PDF export failed").strip())
+    base = os.path.splitext(os.path.basename(workbook_path))[0] + ".pdf"
+    return os.path.join(out_dir, base)
+
+
+def _selected_recipe_sheets(wb, day_no):
+    ws = wb["Ordering"]
+    sheets = []
+    for row in range(3, ws.max_row + 1):
+        sheet_name = ws[f"AA{row}"].value
+        row_day = _as_number(ws[f"AB{row}"].value)
+        if not sheet_name or sheet_name not in wb.sheetnames or row_day is None:
+            continue
+        if int(row_day) == int(day_no):
+            sheets.append(sheet_name)
+    return sheets
+
+
+def _last_recipe_row(ws):
+    last = 4
+    for row in range(5, ws.max_row + 1):
+        if any(ws.cell(row=row, column=col).value not in (None, "") for col in range(1, 9)):
+            last = row
+    return last
+
+
+def _prepare_pdf_workbook(calculated_workbook_path, day_no):
+    wb = load_workbook(calculated_workbook_path)
+    recipe_sheets = _selected_recipe_sheets(wb, day_no)
+    if not recipe_sheets:
+        wb.close()
+        raise ValueError(f"مفيش شيتات وصفات لليوم {day_no}")
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        ws.sheet_state = "visible" if sheet_name in recipe_sheets else "hidden"
+        if sheet_name not in recipe_sheets:
+            continue
+
+        last_row = _last_recipe_row(ws)
+        ws.print_area = f"A2:H{last_row}"
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 1
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_margins.left = 0.25
+        ws.page_margins.right = 0.25
+        ws.page_margins.top = 0.65
+        ws.page_margins.bottom = 0.55
+        ws.oddHeader.center.text = "&A"
+        ws.oddHeader.center.size = 14
+        ws.oddHeader.center.font = "Arial,Bold"
+        ws.oddHeader.right.text = f"Day {int(day_no)}"
+        ws.oddHeader.right.size = 12
+        ws.oddHeader.right.font = "Arial,Bold"
+        ws.oddFooter.center.text = "Page &P of &N"
+
+    wb.active = wb.sheetnames.index(recipe_sheets[0])
+    out_path = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False).name
+    wb.save(out_path)
+    wb.close()
+    return out_path, recipe_sheets
 
 
 def _fill_rgb(cell):
@@ -391,6 +485,23 @@ def update_dessert_ordering_from_upload(file_storage, template_path=DESSERT_TEMP
     return state, report
 
 
+def export_dessert_pdf_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
+    if not os.path.exists(template_path):
+        raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
+    wb = load_workbook(template_path, data_only=False, keep_vba=True)
+    _apply_edits_to_workbook(wb, edits)
+    day_no = _as_number(wb["Ordering"]["R1"].value) or 1
+    _sync_ordering_counts_to_recipe_sheets(wb)
+    out_xlsm = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
+    wb.save(out_xlsm)
+    wb.close()
+
+    recalculated_xlsx = recalc_with_ordering_aggregates(out_xlsm)
+    pdf_workbook, recipe_sheets = _prepare_pdf_workbook(recalculated_xlsx, day_no)
+    pdf_path = _export_workbook_to_pdf(pdf_workbook)
+    return pdf_path, {"day_no": int(day_no), "sheets": recipe_sheets}
+
+
 def get_dessert_template_state(template_path=DESSERT_TEMPLATE_PATH):
     if not os.path.exists(template_path):
         raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
@@ -403,17 +514,7 @@ def recalculate_dessert_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
     if not os.path.exists(template_path):
         raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
     wb = load_workbook(template_path, data_only=False, keep_vba=True)
-    for edit in edits or []:
-        sheet = edit.get("sheet")
-        address = edit.get("address")
-        value = edit.get("value")
-        if not sheet or not address or sheet not in wb.sheetnames:
-            continue
-        cell = wb[sheet][address]
-        if isinstance(cell.value, str) and cell.value.startswith("="):
-            continue
-        number = _as_number(value)
-        cell.value = number if number is not None and str(value).strip() != "" else value
+    _apply_edits_to_workbook(wb, edits)
     _sync_ordering_counts_to_recipe_sheets(wb)
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
     wb.save(out_path)
