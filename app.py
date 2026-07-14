@@ -783,14 +783,14 @@ def receipt_notifications_list():
         return err
     sb = get_client()
     sauce_res = execute_with_retry(
-        sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(100)
+        sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(1000)
     )
     veg_res = execute_with_retry(
         sb.table('upload_log')
         .select('*')
         .eq('file_type', 'vegetables_receipt')
         .order('created_at', desc=True)
-        .limit(100)
+        .limit(1000)
     )
     return jsonify({'sauce_receipts': sauce_res.data or [], 'vegetable_receipts': veg_res.data or []})
 
