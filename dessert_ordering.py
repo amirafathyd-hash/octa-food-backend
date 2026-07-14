@@ -370,6 +370,32 @@ def _style_report_sheet(ws, freeze="A2"):
             ws.cell(row=row, column=col).fill = PatternFill("solid", fgColor=light)
 
 
+def _style_summary_sheet(ws):
+    purple = "70306F"
+    red = "EC1510"
+    soft = "F6F2EC"
+    ws.sheet_view.showGridLines = False
+    ws.merge_cells("A1:H1")
+    ws["A1"] = "Dessert Cost Report"
+    ws["A1"].fill = PatternFill("solid", fgColor=purple)
+    ws["A1"].font = Font(color="FFFFFF", bold=True, size=18)
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    for row in range(3, 9):
+        ws[f"A{row}"].fill = PatternFill("solid", fgColor=soft)
+        ws[f"A{row}"].font = Font(bold=True, color="3A3028")
+        ws[f"B{row}"].font = Font(bold=True, color=red)
+        ws[f"B{row}"].number_format = '#,##0.000'
+    for cell_ref in ["B3", "B4", "B8"]:
+        ws[cell_ref].number_format = '#,##0'
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 18
+    for col in range(4, 12):
+        ws.column_dimensions[get_column_letter(col)].width = 15
+    ws.freeze_panes = "A3"
+
+
 def _money(value):
     number = _as_number(value)
     return round(number or 0, 3)
@@ -428,12 +454,18 @@ def _build_cost_report(calculated_workbook_path, day_no):
     report = Workbook()
     summary = report.active
     summary.title = "Summary"
-    summary.append(["Metric", "Value"])
-    summary.append(["Day", int(day_no)])
-    summary.append(["Meals Count", len(meals)])
-    summary.append(["Total Meal Cost", round(sum(m["total_cost"] for m in meals), 3)])
-    summary.append(["Total Ingredient Spend", round(sum(i["daily_price"] for i in ingredients), 3)])
-    summary.append(["Total Items Ordered", round(sum(i["daily_order"] for i in ingredients), 3)])
+    summary["A3"] = "Day"
+    summary["B3"] = int(day_no)
+    summary["A4"] = "Meals Count"
+    summary["B4"] = len(meals)
+    summary["A5"] = "Total Meal Cost"
+    summary["B5"] = round(sum(m["total_cost"] for m in meals), 3)
+    summary["A6"] = "Total Ingredient Spend"
+    summary["B6"] = round(sum(i["daily_price"] for i in ingredients), 3)
+    summary["A7"] = "Total Items Ordered"
+    summary["B7"] = round(sum(i["daily_order"] for i in ingredients), 3)
+    summary["A8"] = "Ingredient Lines"
+    summary["B8"] = len(ingredients)
 
     meal_ws = report.create_sheet("Meal Costs")
     meal_ws.append(["Sheet", "Meal English", "Meal Arabic", "Required", "Safety", "Total Qty", "Unit Cost", "Total Cost"])
@@ -456,7 +488,9 @@ def _build_cost_report(calculated_workbook_path, day_no):
     for category, total in sorted(category_totals.items(), key=lambda pair: pair[1], reverse=True):
         category_ws.append([category, round(total, 3)])
 
-    for ws in [summary, meal_ws, ingredient_ws, category_ws]:
+    _style_summary_sheet(summary)
+    for ws in [meal_ws, ingredient_ws, category_ws]:
+        ws.sheet_view.showGridLines = False
         _style_report_sheet(ws)
         for row in ws.iter_rows(min_row=2):
             for cell in row:
@@ -472,9 +506,11 @@ def _build_cost_report(calculated_workbook_path, day_no):
         cats = Reference(meal_ws, min_col=2, min_row=2, max_row=meal_ws.max_row)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
+        chart.legend = None
+        chart.style = 10
         chart.height = 8
-        chart.width = 18
-        summary.add_chart(chart, "D2")
+        chart.width = 20
+        summary.add_chart(chart, "D3")
 
     if category_ws.max_row > 1:
         pie = PieChart()
@@ -483,9 +519,10 @@ def _build_cost_report(calculated_workbook_path, day_no):
         labels = Reference(category_ws, min_col=1, min_row=2, max_row=category_ws.max_row)
         pie.add_data(data)
         pie.set_categories(labels)
+        pie.style = 10
         pie.height = 8
-        pie.width = 12
-        summary.add_chart(pie, "D18")
+        pie.width = 14
+        summary.add_chart(pie, "D20")
 
         cat_bar = BarChart()
         cat_bar.title = "Category Spend"
@@ -494,9 +531,24 @@ def _build_cost_report(calculated_workbook_path, day_no):
         cats = Reference(category_ws, min_col=1, min_row=2, max_row=category_ws.max_row)
         cat_bar.add_data(data, titles_from_data=True)
         cat_bar.set_categories(cats)
+        cat_bar.legend = None
+        cat_bar.style = 10
         cat_bar.height = 8
         cat_bar.width = 16
         category_ws.add_chart(cat_bar, "D2")
+
+    for ws in report.worksheets:
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_margins.left = 0.25
+        ws.page_margins.right = 0.25
+        ws.page_margins.top = 0.45
+        ws.page_margins.bottom = 0.45
+        ws.oddFooter.center.text = "Page &P of &N"
+    summary.print_area = "A1:K35"
 
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False).name
     report.save(out_path)
@@ -688,6 +740,12 @@ def export_dessert_cost_report_with_edits(edits, template_path=DESSERT_TEMPLATE_
 
     recalculated_xlsx = recalc_with_ordering_aggregates(out_xlsm)
     return _build_cost_report(recalculated_xlsx, day_no)
+
+
+def export_dessert_cost_report_pdf_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
+    report_path, report = export_dessert_cost_report_with_edits(edits, template_path)
+    pdf_path = _export_workbook_to_pdf(report_path)
+    return pdf_path, report
 
 
 def get_dessert_template_state(template_path=DESSERT_TEMPLATE_PATH):
