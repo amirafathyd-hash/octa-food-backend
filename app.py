@@ -30,6 +30,7 @@ from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
 from tokyo_ordering import read_day_file_meals, merge_day_into_template
 from dessert_ordering import (
+    export_dessert_cost_report_pdf_with_edits,
     export_dessert_cost_report_with_edits,
     export_dessert_excel_with_edits,
     export_dessert_pdf_with_edits,
@@ -528,6 +529,24 @@ def dessert_ordering_export_cost_report():
         return response
     except Exception as e:
         app.logger.exception('dessert_ordering_export_cost_report failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dessert-ordering/export-cost-report-pdf', methods=['POST'])
+def dessert_ordering_export_cost_report_pdf():
+    payload = request.get_json(silent=True) or {}
+    try:
+        report_path, report = export_dessert_cost_report_pdf_with_edits(payload.get('edits') or [])
+        response = send_file(
+            report_path,
+            as_attachment=True,
+            download_name=f"Day{report['day_no']}_Dessert_Cost_Report.pdf",
+            mimetype='application/pdf',
+        )
+        response.headers['X-Dessert-Cost-Report'] = json.dumps(report, ensure_ascii=True)
+        return response
+    except Exception as e:
+        app.logger.exception('dessert_ordering_export_cost_report_pdf failed')
         return jsonify({'error': str(e)}), 500
 
 
