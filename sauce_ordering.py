@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 from collections import defaultdict
+from copy import copy
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, PieChart, Reference
@@ -305,22 +306,53 @@ def export_sauce_excel_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH):
 def export_sauce_pdf_with_edits(edits, day_no=1, template_path=SAUCE_TEMPLATE_PATH):
     xlsx, day = _updated_workbook(edits, template_path)
     selected = _selected_day_recipe_sheets(xlsx, day_no)
-    wb = load_workbook(xlsx)
+    wb_formula = load_workbook(xlsx, data_only=False)
+    wb_values = load_workbook(xlsx, data_only=True)
+    out_wb = Workbook()
+    out_wb.remove(out_wb.active)
     try:
-        for sheet_name in list(wb.sheetnames):
-            if sheet_name not in selected:
-                del wb[sheet_name]
-        for ws in wb.worksheets:
+        for sheet_name in selected:
+            src = wb_formula[sheet_name]
+            vals = wb_values[sheet_name]
+            ws = out_wb.create_sheet(sheet_name[:31])
+            for row in range(1, 28):
+                ws.row_dimensions[row].height = src.row_dimensions[row].height
+                for col in range(1, 13):
+                    src_cell = src.cell(row=row, column=col)
+                    val_cell = vals.cell(row=row, column=col)
+                    target = ws.cell(row=row, column=col)
+                    target.value = val_cell.value
+                    if src_cell.has_style:
+                        target.font = copy(src_cell.font)
+                        target.fill = copy(src_cell.fill)
+                        target.border = copy(src_cell.border)
+                        target.alignment = copy(src_cell.alignment)
+                        target.number_format = src_cell.number_format
+                        target.protection = copy(src_cell.protection)
+            for col in range(1, 13):
+                letter = get_column_letter(col)
+                ws.column_dimensions[letter].width = src.column_dimensions[letter].width
+            for merged in src.merged_cells.ranges:
+                if merged.min_row <= 27 and merged.max_row <= 27 and merged.min_col <= 12 and merged.max_col <= 12:
+                    ws.merge_cells(str(merged))
             ws.page_setup.orientation = "landscape"
             ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
             ws.sheet_properties.pageSetUpPr.fitToPage = True
             ws.page_setup.fitToWidth = 1
-        if selected and selected[0] in wb.sheetnames:
-            wb.active = wb.sheetnames.index(selected[0])
+            ws.page_setup.fitToHeight = 1
+            ws.print_area = "A1:L27"
+            ws.page_margins.left = 0.2
+            ws.page_margins.right = 0.2
+            ws.page_margins.top = 0.25
+            ws.page_margins.bottom = 0.25
+        if out_wb.sheetnames:
+            out_wb.active = 0
         out_path = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False).name
-        wb.save(out_path)
+        out_wb.save(out_path)
     finally:
-        wb.close()
+        wb_formula.close()
+        wb_values.close()
+        out_wb.close()
     return export_workbook_to_pdf(out_path), {"day_no": int(_as_number(day_no) or day), "sheets": selected}
 
 
