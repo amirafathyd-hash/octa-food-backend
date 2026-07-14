@@ -2346,6 +2346,25 @@ def _build_vegetables_workbook(station_vegetable_data):
 
     summary_rows = sorted(summary.values(), key=lambda r: r['name'].lower())
     _write_sheet('Summary', summary_rows)
+    ws_summary = wb['Summary']
+    extra_headers = [('الاستلام', 16), ('الإمضاء', 22)]
+    start_col = ws_summary.max_column + 1
+    for offset, (header, width) in enumerate(extra_headers):
+        col = start_col + offset
+        cell = ws_summary.cell(row=1, column=col, value=header)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = HEADER_ALIGN
+        cell.border = BOX
+        ws_summary.column_dimensions[get_column_letter(col)].width = width
+    for r in range(2, ws_summary.max_row + 1):
+        fill = EVEN_FILL if (r - 2) % 2 == 0 else ODD_FILL
+        for col in range(start_col, start_col + 2):
+            cell = ws_summary.cell(row=r, column=col, value='')
+            cell.fill = fill
+            cell.font = DATA_FONT
+            cell.alignment = CENTER
+            cell.border = BOX
 
     if not wb.sheetnames:
         wb.create_sheet('فاضي')
@@ -2436,6 +2455,30 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
                          f'حصل خطأ أثناء توليد الصور: {e}')
     zip_buf.seek(0)
     return zip_buf
+
+
+def _vegetable_summary_rows_from_station_data(vegetable_data):
+    summary = {}
+    for rows in vegetable_data.values():
+        for row in rows:
+            name = row['name']
+            if name not in summary:
+                summary[name] = {
+                    'name': name,
+                    'category': row.get('category') or '',
+                    'daily_order': row.get('daily_order') or 0,
+                    'order_unit': row.get('order_unit') or '',
+                }
+            else:
+                summary[name]['daily_order'] = (summary[name].get('daily_order') or 0) + (row.get('daily_order') or 0)
+                if not summary[name].get('order_unit') and row.get('order_unit'):
+                    summary[name]['order_unit'] = row.get('order_unit')
+    return sorted(summary.values(), key=lambda r: str(r['name']).lower())
+
+
+def _detect_uploaded_station_files(uploaded):
+    station_files, undetected = _detect_uploaded_station_files(uploaded)
+    return station_files, undetected
 
 
 def _read_report_day_numbers_per_station(files_by_key):
@@ -2836,6 +2879,68 @@ def auto_detect_stations():
     except Exception as e:
         app.logger.exception('auto_detect_stations failed')
         return jsonify({'error': f'حصل خطأ: {e}'}), 500
+
+
+@app.route('/api/vegetables-receipt-data', methods=['POST'])
+def vegetables_receipt_data():
+    uploaded = request.files.getlist('files')
+    if not uploaded:
+        return jsonify({'error': 'مفيش ملفات مبعوتة'}), 400
+    station_files, undetected = _detect_uploaded_station_files(uploaded)
+    if not station_files:
+        return jsonify({'error': f'مش قادر أحدد محطة أي ملف من اللي رفعتهم: {undetected}'}), 400
+    try:
+        vegetable_data = {}
+        for key, f in station_files.items():
+            f.seek(0)
+            vegetable_data[key] = _read_vegetable_rows(f, STATION_SHEET_MAP[key])
+        rows = _vegetable_summary_rows_from_station_data(vegetable_data)
+        if not rows:
+            return jsonify({'error': 'مفيش خضروات في الملفات المرفوعة'}), 400
+        return jsonify({
+            'ok': True,
+            'title': 'استلام الخضروات',
+            'created_at': datetime.now().isoformat(),
+            'rows': rows,
+        })
+    except Exception as e:
+        app.logger.exception('vegetables_receipt_data failed')
+        return jsonify({'error': f'حصل خطأ في تجهيز رابط الخضار: {e}'}), 500
+
+
+@app.route('/api/vegetables-receipt/email', methods=['POST'])
+def vegetables_receipt_email():
+    if not (SMTP_USER and SMTP_PASSWORD):
+        return jsonify({'error': 'إعدادات الإيميل لسه مش متظبطة على السيرفر (SMTP_USER / SMTP_PASSWORD)'}), 503
+    to_email = (request.form.get('to') or '').strip()
+    if not to_email or '@' not in to_email:
+        return jsonify({'error': 'إيميل المستلم ناقص أو غير صحيح'}), 400
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'error': 'مفيش ملف مرفوع'}), 400
+    file_bytes = file.read()
+    msg = EmailMessage()
+    msg['Subject'] = f'استلام الخضروات — {datetime.now().strftime("%Y-%m-%d")}'
+    msg['From'] = SMTP_USER
+    msg['To'] = to_email
+    if NOTIFY_EMAIL_TO:
+        msg['Bcc'] = NOTIFY_EMAIL_TO
+    msg.set_content('مرفق ملف استلام الخضروات بعد تسجيل الكميات والإمضاء.')
+    msg.add_attachment(
+        file_bytes,
+        maintype='application',
+        subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        filename=file.filename or 'vegetables-receipt.xlsx',
+    )
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+    except Exception as e:
+        app.logger.exception('vegetables_receipt_email failed')
+        return jsonify({'error': f'تعذر إرسال الإيميل: {e}'}), 500
+    return jsonify({'ok': True})
 
 
 @app.route('/api/auto-weekly-purchasing', methods=['POST'])
