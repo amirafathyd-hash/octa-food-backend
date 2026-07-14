@@ -234,8 +234,9 @@ def extract_dashboard_state(workbook_path):
             "fill": _fill_rgb(ordering[f"A{row}"]),
         })
 
+    day = int(_as_number(ordering["R1"].value) or 1)
     wb.close()
-    return {"sauce": sauce, "ingredients": ingredients, "day": 1}
+    return {"sauce": sauce, "ingredients": ingredients, "day": day}
 
 
 def get_sauce_template_state(template_path=SAUCE_TEMPLATE_PATH):
@@ -302,7 +303,7 @@ def _updated_workbook(edits, template_path=SAUCE_TEMPLATE_PATH):
     wb = load_workbook(template_path, data_only=False, keep_vba=True)
     _apply_edits(wb, edits)
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
-    day = 1
+    day = int(_as_number(wb["Ordering"]["R1"].value) or 1) if "Ordering" in wb.sheetnames else 1
     wb.save(out_path)
     wb.close()
     return recalc_workbook_to_xlsx(out_path), int(day)
