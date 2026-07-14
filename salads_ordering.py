@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 from collections import defaultdict
+from copy import deepcopy
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, PieChart, Reference
@@ -11,6 +12,7 @@ from openpyxl.utils import get_column_letter
 
 
 SALADS_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "Salads_Order_Costing.xlsm")
+_TEMPLATE_STATE_CACHE = {}
 
 
 def _as_number(value):
@@ -213,9 +215,14 @@ def extract_dashboard_state(workbook_path):
 def get_salads_template_state(template_path=SALADS_TEMPLATE_PATH):
     if not os.path.exists(template_path):
         raise FileNotFoundError("ملف Salads_Order_Costing.xlsm غير موجود في data")
-    recalculated = recalc_workbook_to_xlsx(template_path)
-    state = extract_dashboard_state(recalculated)
-    state.update(extract_workbook_state(recalculated))
+    stat = os.stat(template_path)
+    cache_key = (template_path, stat.st_mtime_ns, stat.st_size)
+    if cache_key in _TEMPLATE_STATE_CACHE:
+        return deepcopy(_TEMPLATE_STATE_CACHE[cache_key])
+    state = extract_dashboard_state(template_path)
+    state.update(extract_workbook_state(template_path))
+    _TEMPLATE_STATE_CACHE.clear()
+    _TEMPLATE_STATE_CACHE[cache_key] = deepcopy(state)
     return state
 
 
