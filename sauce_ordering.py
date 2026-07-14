@@ -3,15 +3,14 @@ import shutil
 import subprocess
 import tempfile
 from collections import defaultdict
-from copy import copy
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, PieChart, Reference
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 
-SAUCE_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "Tokyo_Sauce.xlsm")
+SALADS_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "Salads_Order_Costing.xlsm")
 
 
 def _as_number(value):
@@ -61,8 +60,8 @@ def _soffice_bin():
 
 
 def recalc_workbook_to_xlsx(xlsm_path):
-    out_dir = tempfile.mkdtemp(prefix="sauce_recalc_")
-    profile_dir = tempfile.mkdtemp(prefix="sauce_lo_profile_")
+    out_dir = tempfile.mkdtemp(prefix="salads_recalc_")
+    profile_dir = tempfile.mkdtemp(prefix="salads_lo_profile_")
     cmd = [
         _soffice_bin(),
         f"-env:UserInstallation=file://{profile_dir}",
@@ -80,8 +79,8 @@ def recalc_workbook_to_xlsx(xlsm_path):
 
 
 def export_workbook_to_pdf(workbook_path):
-    out_dir = tempfile.mkdtemp(prefix="sauce_pdf_")
-    profile_dir = tempfile.mkdtemp(prefix="sauce_lo_pdf_profile_")
+    out_dir = tempfile.mkdtemp(prefix="salads_pdf_")
+    profile_dir = tempfile.mkdtemp(prefix="salads_lo_pdf_profile_")
     cmd = [
         _soffice_bin(),
         f"-env:UserInstallation=file://{profile_dir}",
@@ -109,43 +108,12 @@ def _apply_edits(wb, edits):
         wb[sheet][address] = number if number is not None and str(value).strip() != "" else value
 
 
-def _recipe_sheet_names(wb):
-    return [name for name in wb.sheetnames if name not in ("List of Meals", "Ordering")]
-
-
-def _selected_day_recipe_sheets(workbook_path, day_no, per_day=7):
-    wb = load_workbook(workbook_path, read_only=True, data_only=True)
-    try:
-        recipes = _recipe_sheet_names(wb)
-    finally:
-        wb.close()
-    day = max(1, int(_as_number(day_no) or 1))
-    start = (day - 1) * per_day
-    selected = recipes[start:start + per_day]
-    return selected or recipes[:per_day]
-
-
-def _english_first_title(value):
-    text = str(value or "").strip()
-    if " - " not in text:
-        return text
-    left, right = [part.strip() for part in text.split(" - ", 1)]
-    if any("A" <= ch <= "Z" or "a" <= ch <= "z" for ch in right):
-        return f"{right} - {left}"
-    return text
-
-
 def _norm_text(value):
     return " ".join(str(value or "").replace("\u00a0", " ").split()).strip().lower()
 
 
-def _extract_uploaded_counts(upload_path, known_sauces):
-    known = {}
-    for item in known_sauces:
-        for value in (item.get("name"), item.get("sheet")):
-            key = _norm_text(value)
-            if key:
-                known[key] = item
+def _extract_uploaded_counts(upload_path, known_salads):
+    known = {_norm_text(item["name"]): item for item in known_salads if item.get("name")}
     matched = {}
     if not known:
         return matched
@@ -193,28 +161,19 @@ def extract_workbook_state(workbook_path):
 
 def extract_dashboard_state(workbook_path):
     wb = load_workbook(workbook_path, data_only=True)
+    user = wb["User"]
     ordering = wb["Ordering"]
+    usage = wb["Usage"]
 
-    sauce = []
-    recipe_sheet_names = _recipe_sheet_names(wb)
-    for sheet_name in recipe_sheet_names:
-        ws = wb[sheet_name]
-        name = ws["B2"].value or sheet_name
-        count = _rounded(ws["Q20"].value)
-        extra_count = _rounded(ws["Q19"].value)
-        total_cost = _as_number(ws["Q21"].value) or 0
-        numeric_count = _as_number(count) or 0
-        if not name and numeric_count == 0:
+    salads = []
+    for row in range(4, user.max_row + 1):
+        name = user[f"G{row}"].value
+        if not name:
             continue
-        sauce.append({
-            "sheet": sheet_name,
-            "row": 19,
+        salads.append({
+            "row": row,
             "name": name,
-            "count": count,
-            "extra_count": extra_count,
-            "unit_cost": round(total_cost / numeric_count, 3) if numeric_count else round(total_cost, 3),
-            "total_cost": round(total_cost, 3),
-            "fill": _fill_rgb(ws["B2"]),
+            "count": _rounded(user[f"H{row}"].value),
         })
 
     ingredients = []
@@ -234,23 +193,35 @@ def extract_dashboard_state(workbook_path):
             "fill": _fill_rgb(ordering[f"A{row}"]),
         })
 
-    day = int(_as_number(ordering["R1"].value) or 1)
+    costs = defaultdict(float)
+    for row in range(2, usage.max_row + 1):
+        salad = usage[f"B{row}"].value
+        cost = _as_number(usage[f"L{row}"].value)
+        if salad and cost is not None:
+            costs[salad] += cost
+    for salad in salads:
+        count = _as_number(salad["count"]) or 0
+        total = costs.get(salad["name"], 0)
+        salad["unit_cost"] = round(total / count, 3) if count else round(total, 3)
+        salad["total_cost"] = round(total, 3)
+
+    day = _rounded(user["K4"].value)
     wb.close()
-    return {"sauce": sauce, "ingredients": ingredients, "day": day}
+    return {"salads": salads, "ingredients": ingredients, "day": day}
 
 
-def get_sauce_template_state(template_path=SAUCE_TEMPLATE_PATH):
+def get_salads_template_state(template_path=SALADS_TEMPLATE_PATH):
     if not os.path.exists(template_path):
-        raise FileNotFoundError("ملف Tokyo_Sauce.xlsm غير موجود في data")
+        raise FileNotFoundError("ملف Salads_Order_Costing.xlsm غير موجود في data")
     recalculated = recalc_workbook_to_xlsx(template_path)
     state = extract_dashboard_state(recalculated)
     state.update(extract_workbook_state(recalculated))
     return state
 
 
-def recalculate_sauce_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH):
+def recalculate_salads_with_edits(edits, template_path=SALADS_TEMPLATE_PATH):
     if not os.path.exists(template_path):
-        raise FileNotFoundError("ملف Tokyo_Sauce.xlsm غير موجود في data")
+        raise FileNotFoundError("ملف Salads_Order_Costing.xlsm غير موجود في data")
     wb = load_workbook(template_path, data_only=False, keep_vba=True)
     _apply_edits(wb, edits)
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
@@ -262,9 +233,9 @@ def recalculate_sauce_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH):
     return state
 
 
-def update_sauce_counts_from_upload(file_storage, template_path=SAUCE_TEMPLATE_PATH):
+def update_salads_counts_from_upload(file_storage, template_path=SALADS_TEMPLATE_PATH):
     if not os.path.exists(template_path):
-        raise FileNotFoundError("ملف Tokyo_Sauce.xlsm غير موجود في data")
+        raise FileNotFoundError("ملف Salads_Order_Costing.xlsm غير موجود في data")
     suffix = os.path.splitext(file_storage.filename or "")[1].lower()
     if suffix not in (".xlsx", ".xlsm", ".xls"):
         raise ValueError("ملف الأعداد لازم يكون Excel")
@@ -274,19 +245,19 @@ def update_sauce_counts_from_upload(file_storage, template_path=SAUCE_TEMPLATE_P
 
     current_xlsx = recalc_workbook_to_xlsx(template_path)
     current_state = extract_dashboard_state(current_xlsx)
-    matched = _extract_uploaded_counts(upload_path, current_state["sauce"])
+    matched = _extract_uploaded_counts(upload_path, current_state["salads"])
     if not matched:
-        raise ValueError("ملف الأعداد مفيهوش أسماء صوص مطابقة للشيت الرئيسي")
+        raise ValueError("ملف الأعداد مفيهوش أسماء سلطات مطابقة للشيت الرئيسي")
 
     wb = load_workbook(template_path, data_only=False, keep_vba=True)
     try:
+        ws = wb["User"]
         changed = 0
-        for item in current_state["sauce"]:
-            keys = [_norm_text(item["name"]), _norm_text(item["sheet"])]
-            value = next((matched[key] for key in keys if key in matched), None)
-            if value is None or item["sheet"] not in wb.sheetnames:
+        for salad in current_state["salads"]:
+            key = _norm_text(salad["name"])
+            if key not in matched:
                 continue
-            wb[item["sheet"]]["Q19"] = value
+            ws[f"H{salad['row']}"] = matched[key]
             changed += 1
         out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
         wb.save(out_path)
@@ -299,150 +270,27 @@ def update_sauce_counts_from_upload(file_storage, template_path=SAUCE_TEMPLATE_P
     return state, {"matched_count": changed}
 
 
-def _updated_workbook(edits, template_path=SAUCE_TEMPLATE_PATH):
+def _updated_workbook(edits, template_path=SALADS_TEMPLATE_PATH):
     wb = load_workbook(template_path, data_only=False, keep_vba=True)
     _apply_edits(wb, edits)
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
-    day = int(_as_number(wb["Ordering"]["R1"].value) or 1) if "Ordering" in wb.sheetnames else 1
+    day = _as_number(wb["User"]["K4"].value) or 1
     wb.save(out_path)
     wb.close()
     return recalc_workbook_to_xlsx(out_path), int(day)
 
 
-def export_sauce_excel_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH):
+def export_salads_excel_with_edits(edits, template_path=SALADS_TEMPLATE_PATH):
     xlsx, day = _updated_workbook(edits, template_path)
     return xlsx, {"day_no": day}
 
 
-def export_sauce_pdf_with_edits(edits, day_no=1, template_path=SAUCE_TEMPLATE_PATH):
+def export_salads_pdf_with_edits(edits, template_path=SALADS_TEMPLATE_PATH):
     xlsx, day = _updated_workbook(edits, template_path)
-    selected = _selected_day_recipe_sheets(xlsx, day_no)
-    wb_values = load_workbook(xlsx, data_only=True)
-    out_wb = Workbook()
-    out_wb.remove(out_wb.active)
-    dark_fill = PatternFill("solid", fgColor="303D4D")
-    green_fill = PatternFill("solid", fgColor="C6E0B4")
-    white_font = Font(color="FFFFFF", bold=True, size=11)
-    title_font = Font(color="000000", bold=True, size=16)
-    body_font = Font(color="000000", size=10)
-    body_bold = Font(color="000000", bold=True, size=10)
-    thin = Side(style="thin", color="000000")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    try:
-        total_pages = len(selected)
-        for page_index, sheet_name in enumerate(selected, 1):
-            vals = wb_values[sheet_name]
-            ws = out_wb.create_sheet(sheet_name[:31])
-            ws.sheet_view.showGridLines = False
-
-            ws.merge_cells("A1:H1")
-            ws["A1"] = sheet_name
-            ws["A1"].font = title_font
-            ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-            ws["I1"] = f"Day {int(_as_number(day_no) or day)}"
-            ws["I1"].font = title_font
-            ws["I1"].alignment = Alignment(horizontal="right", vertical="center")
-            ws.row_dimensions[1].height = 28
-
-            sauce_title = _english_first_title(vals["B2"].value or sheet_name)
-            meal_title = vals["B3"].value or ""
-            ws.merge_cells("B4:H4")
-            ws["B4"] = sauce_title
-            ws["B4"].fill = dark_fill
-            ws["B4"].font = white_font
-            ws["B4"].alignment = Alignment(horizontal="center", vertical="center")
-            ws.merge_cells("B5:H5")
-            ws["B5"] = meal_title
-            ws["B5"].fill = dark_fill
-            ws["B5"].font = white_font
-            ws["B5"].alignment = Alignment(horizontal="center", vertical="center")
-            for address in ("A4", "A5"):
-                ws[address].fill = dark_fill
-                ws[address].border = border
-
-            headers = [
-                "Category",
-                "Ingredient",
-                "Unit",
-                "Base Recipe\n(1 Portion)",
-                "Corrected\nConversion Factor",
-                "Scaling Factor\n(1-10KG)",
-                "Linear Scaled\nAmount",
-                "Scaled Amount Post Conversion Factor",
-            ]
-            for col, header in enumerate(headers, 1):
-                cell = ws.cell(row=6, column=col)
-                cell.value = header
-                cell.fill = green_fill if col in (5, 6) else dark_fill
-                cell.font = Font(color="000000" if col in (5, 6) else "FFFFFF", bold=True, size=10)
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                cell.border = border
-
-            out_row = 7
-            for src_row in range(5, vals.max_row + 1):
-                ingredient = vals.cell(src_row, 2).value
-                if not ingredient:
-                    continue
-                values = [vals.cell(src_row, col).value for col in range(1, 9)]
-                for col, value in enumerate(values, 1):
-                    cell = ws.cell(out_row, col)
-                    cell.value = value
-                    cell.font = body_bold if col in (2, 8) else body_font
-                    cell.alignment = Alignment(
-                        horizontal="right" if col in (2, 8) else "center",
-                        vertical="center",
-                        wrap_text=False,
-                    )
-                    cell.border = border
-                    if isinstance(value, (int, float)):
-                        cell.number_format = "#,##0.##"
-                out_row += 1
-
-            ws.column_dimensions["A"].width = 18
-            ws.column_dimensions["B"].width = 37
-            ws.column_dimensions["C"].width = 12
-            ws.column_dimensions["D"].width = 15
-            ws.column_dimensions["E"].width = 17
-            ws.column_dimensions["F"].width = 15
-            ws.column_dimensions["G"].width = 16
-            ws.column_dimensions["H"].width = 34
-            ws.column_dimensions["I"].width = 14
-            ws.row_dimensions[4].height = 20
-            ws.row_dimensions[5].height = 20
-            ws.row_dimensions[6].height = 52
-            for row in range(7, out_row):
-                ws.row_dimensions[row].height = 18
-
-            ws.page_setup.orientation = "landscape"
-            ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
-            ws.sheet_properties.pageSetUpPr.fitToPage = True
-            ws.page_setup.fitToWidth = 1
-            ws.page_setup.fitToHeight = 1
-            ws.print_area = f"A1:I{max(out_row + 18, 42)}"
-            ws.page_margins.left = 0.25
-            ws.page_margins.right = 0.25
-            ws.page_margins.top = 0.45
-            ws.page_margins.bottom = 0.35
-            ws.oddFooter.center.text = "Page &P of &N"
-            ws.oddFooter.center.size = 10
-            ws.oddFooter.center.font = "Arial,Bold"
-            footer_row = max(out_row + 18, 42)
-            ws.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=9)
-            footer = ws.cell(footer_row, 1)
-            footer.value = f"Page {page_index} of {total_pages}"
-            footer.font = Font(color="000000", bold=True, size=10)
-            footer.alignment = Alignment(horizontal="center", vertical="center")
-        if out_wb.sheetnames:
-            out_wb.active = 0
-        out_path = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False).name
-        out_wb.save(out_path)
-    finally:
-        wb_values.close()
-        out_wb.close()
-    return export_workbook_to_pdf(out_path), {"day_no": int(_as_number(day_no) or day), "sheets": selected}
+    return export_workbook_to_pdf(xlsx), {"day_no": day}
 
 
-def replace_sauce_template(file_storage, template_path=SAUCE_TEMPLATE_PATH):
+def replace_salads_template(file_storage, template_path=SALADS_TEMPLATE_PATH):
     suffix = os.path.splitext(file_storage.filename or "")[1].lower()
     if suffix != ".xlsm":
         raise ValueError("الشيت الرئيسي لازم يكون .xlsm")
@@ -451,16 +299,16 @@ def replace_sauce_template(file_storage, template_path=SAUCE_TEMPLATE_PATH):
     file_storage.save(upload_path)
     wb = load_workbook(upload_path, data_only=False, keep_vba=True)
     try:
-        for required in ["List of Meals", "Ordering"]:
+        for required in ["User", "Ordering", "Usage"]:
             if required not in wb.sheetnames:
                 raise ValueError(f"الشيت الجديد لازم يحتوي على {required}")
     finally:
         wb.close()
     shutil.copyfile(upload_path, template_path)
-    return get_sauce_template_state(template_path), {"template_file": os.path.basename(template_path)}
+    return get_salads_template_state(template_path), {"template_file": os.path.basename(template_path)}
 
 
-def export_sauce_cost_report_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH):
+def export_salads_cost_report_with_edits(edits, template_path=SALADS_TEMPLATE_PATH):
     xlsx, day = _updated_workbook(edits, template_path)
     source = load_workbook(xlsx, data_only=True)
     state = extract_dashboard_state(xlsx)
@@ -471,36 +319,25 @@ def export_sauce_cost_report_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH
     summary.sheet_view.showGridLines = False
     summary.append(["Metric", "Value"])
     summary.append(["Day", day])
-    summary.append(["Sauce Count", len(state["sauce"])])
-    summary.append(["Total Cost", round(sum(s["total_cost"] for s in state["sauce"]), 3)])
+    summary.append(["Salads Count", len(state["salads"])])
+    summary.append(["Total Cost", round(sum(s["total_cost"] for s in state["salads"]), 3)])
 
-    salad_ws = report.create_sheet("Sauce Costs")
-    salad_ws.append(["Sauce", "Count", "Extra Count", "Unit Cost", "Total Cost"])
-    for item in state["sauce"]:
-        salad_ws.append([item["name"], item["count"], item.get("extra_count"), item["unit_cost"], item["total_cost"]])
+    salad_ws = report.create_sheet("Salad Costs")
+    salad_ws.append(["Salad", "Count", "Unit Cost", "Total Cost"])
+    for item in state["salads"]:
+        salad_ws.append([item["name"], item["count"], item["unit_cost"], item["total_cost"]])
 
     ing_ws = report.create_sheet("Ordering Map")
     ing_ws.append(["Item", "Category", "Unit", "Daily Weight", "Weekly Weight", "Daily Order"])
     for item in state["ingredients"][1:]:
         ing_ws.append([item["item"], item["category"], item["unit"], item["daily_weight"], item["weekly_weight"], item["daily_order"]])
 
-    usage_ws = report.create_sheet("Recipe Details")
-    usage_ws.append(["Sauce", "Ingredient", "Unit", "Base Recipe", "Scaled Amount", "Ordering Qty", "Cost"])
-    for sauce in state["sauce"]:
-        ws = source[sauce["sheet"]]
-        for row in range(5, ws.max_row + 1):
-            ingredient = ws[f"B{row}"].value
-            if not ingredient:
-                continue
-            usage_ws.append([
-                sauce["name"],
-                ingredient,
-                ws[f"C{row}"].value,
-                ws[f"D{row}"].value,
-                ws[f"H{row}"].value,
-                ws[f"K{row}"].value,
-                ws[f"L{row}"].value,
-            ])
+    usage = source["Usage"]
+    usage_ws = report.create_sheet("Usage Details")
+    usage_ws.append(["Salad", "Ingredient", "Weight", "Daily Qty", "Weekly Qty", "Cost"])
+    for row in range(2, usage.max_row + 1):
+        if usage[f"B{row}"].value:
+            usage_ws.append([usage[f"B{row}"].value, usage[f"C{row}"].value, usage[f"D{row}"].value, usage[f"G{row}"].value, usage[f"H{row}"].value, usage[f"L{row}"].value])
 
     for ws in report.worksheets:
         ws.freeze_panes = "A2"
@@ -524,9 +361,9 @@ def export_sauce_cost_report_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH
 
     if salad_ws.max_row > 1:
         chart = BarChart()
-        chart.title = "Total Cost by Sauce"
+        chart.title = "Total Cost by Salad"
         chart.y_axis.title = "Cost"
-        data = Reference(salad_ws, min_col=5, min_row=1, max_row=salad_ws.max_row)
+        data = Reference(salad_ws, min_col=4, min_row=1, max_row=salad_ws.max_row)
         cats = Reference(salad_ws, min_col=1, min_row=2, max_row=salad_ws.max_row)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
@@ -538,9 +375,9 @@ def export_sauce_cost_report_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False).name
     report.save(out_path)
     source.close()
-    return out_path, {"day_no": day, "sauce_count": len(state["sauce"])}
+    return out_path, {"day_no": day, "salads_count": len(state["salads"])}
 
 
-def export_sauce_cost_report_pdf_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH):
-    report, meta = export_sauce_cost_report_with_edits(edits, template_path)
+def export_salads_cost_report_pdf_with_edits(edits, template_path=SALADS_TEMPLATE_PATH):
+    report, meta = export_salads_cost_report_with_edits(edits, template_path)
     return export_workbook_to_pdf(report), meta
