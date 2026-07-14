@@ -2302,12 +2302,17 @@ def _read_report_day_numbers_per_station(files_by_key):
 def _day_numbers_by_tab(day_numbers_by_station):
     """بتحوّل {station_key: day_num} لـ {tab_name: day_num} عشان xlsx_to_images
     تقدر تطابق كل تاب في الإكسيل الناتج (Daily_Ordering أو Vegetables) برقم
-    اليوم بتاع ملف المحطة اللي طلع منها التاب ده بالظبط."""
-    return {
+    اليوم بتاع ملف المحطة اللي طلع منها التاب ده بالظبط. تاب 'Summary'
+    (الملخّص) مش مرتبط بمحطة بعينها، فبناخد له نفس رقم يوم محطة hot
+    (All_Ingredients) بدل ما يرجع لتاريخ السيرفر الافتراضي."""
+    result = {
         STATION_TAB_NAMES[key]: day_num
         for key, day_num in day_numbers_by_station.items()
         if key in STATION_TAB_NAMES
     }
+    if 'hot' in day_numbers_by_station:
+        result['Summary'] = day_numbers_by_station['hot']
+    return result
 
 
 @app.route('/api/daily-ordering', methods=['POST'])
