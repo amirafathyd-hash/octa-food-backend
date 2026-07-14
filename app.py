@@ -733,7 +733,7 @@ def sauce_ordering_export_excel():
 def sauce_ordering_export_pdf():
     payload = request.get_json(silent=True) or {}
     try:
-        pdf_path, report = export_sauce_pdf_with_edits(payload.get('edits') or [])
+        pdf_path, report = export_sauce_pdf_with_edits(payload.get('edits') or [], payload.get('day_no') or 1)
         return send_file(pdf_path, as_attachment=True, download_name=f"Day{report['day_no']}_Sauce.pdf", mimetype='application/pdf')
     except Exception as e:
         app.logger.exception('sauce_ordering_export_pdf failed')
