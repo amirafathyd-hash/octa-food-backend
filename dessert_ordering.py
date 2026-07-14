@@ -4,7 +4,9 @@ import subprocess
 import tempfile
 from collections import defaultdict, deque
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.chart import BarChart, PieChart, Reference
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 
@@ -346,6 +348,162 @@ def _prepare_pdf_workbook(calculated_workbook_path, day_no):
     return out_path, recipe_sheets
 
 
+def _style_report_sheet(ws, freeze="A2"):
+    purple = "70306F"
+    light = "F6F2EC"
+    ws.freeze_panes = freeze
+    for cell in ws[1]:
+        cell.fill = PatternFill("solid", fgColor=purple)
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+    for col in range(1, ws.max_column + 1):
+        max_len = 10
+        for row in range(1, min(ws.max_row, 80) + 1):
+            value = ws.cell(row=row, column=col).value
+            max_len = max(max_len, len(str(value or "")))
+        ws.column_dimensions[get_column_letter(col)].width = min(max_len + 2, 42)
+    for row in range(2, ws.max_row + 1, 2):
+        for col in range(1, ws.max_column + 1):
+            ws.cell(row=row, column=col).fill = PatternFill("solid", fgColor=light)
+
+
+def _money(value):
+    number = _as_number(value)
+    return round(number or 0, 3)
+
+
+def _build_cost_report(calculated_workbook_path, day_no):
+    source = load_workbook(calculated_workbook_path, data_only=True)
+    ordering = source["Ordering"]
+    recipe_sheets = _selected_recipe_sheets(source, day_no)
+
+    meals = []
+    for sheet_name in recipe_sheets:
+        ws = source[sheet_name]
+        english_name = ws["A2"].value or sheet_name
+        arabic_name = ws["A3"].value or ""
+        required = _money(ws["S13"].value or ws["V1"].value)
+        safety = _money(ws["S14"].value)
+        total_qty = _money(ws["S15"].value)
+        total_cost = _money(ws["S16"].value)
+        unit_cost = _money(ws["Y8"].value or ws["X8"].value)
+        meals.append({
+            "sheet": sheet_name,
+            "english_name": english_name,
+            "arabic_name": arabic_name,
+            "required": required,
+            "safety": safety,
+            "total_qty": total_qty,
+            "unit_cost": unit_cost,
+            "total_cost": total_cost,
+        })
+
+    ingredients = []
+    category_totals = defaultdict(float)
+    for row in range(3, ordering.max_row + 1):
+        item = ordering[f"A{row}"].value
+        category = ordering[f"B{row}"].value
+        if not item:
+            continue
+        daily_weight = _money(ordering[f"D{row}"].value)
+        daily_order = _money(ordering[f"L{row}"].value)
+        daily_price = _money(ordering[f"O{row}"].value)
+        if daily_weight == 0 and daily_order == 0 and daily_price == 0:
+            continue
+        category_totals[category or "Uncategorized"] += daily_price
+        ingredients.append({
+            "item": item,
+            "category": category,
+            "unit": ordering[f"C{row}"].value,
+            "daily_weight": daily_weight,
+            "daily_order": daily_order,
+            "final_unit": ordering[f"M{row}"].value,
+            "unit_price": _money(ordering[f"J{row}"].value),
+            "daily_price": daily_price,
+        })
+
+    report = Workbook()
+    summary = report.active
+    summary.title = "Summary"
+    summary.append(["Metric", "Value"])
+    summary.append(["Day", int(day_no)])
+    summary.append(["Meals Count", len(meals)])
+    summary.append(["Total Meal Cost", round(sum(m["total_cost"] for m in meals), 3)])
+    summary.append(["Total Ingredient Spend", round(sum(i["daily_price"] for i in ingredients), 3)])
+    summary.append(["Total Items Ordered", round(sum(i["daily_order"] for i in ingredients), 3)])
+
+    meal_ws = report.create_sheet("Meal Costs")
+    meal_ws.append(["Sheet", "Meal English", "Meal Arabic", "Required", "Safety", "Total Qty", "Unit Cost", "Total Cost"])
+    for meal in meals:
+        meal_ws.append([
+            meal["sheet"], meal["english_name"], meal["arabic_name"], meal["required"],
+            meal["safety"], meal["total_qty"], meal["unit_cost"], meal["total_cost"],
+        ])
+
+    ingredient_ws = report.create_sheet("Ingredient Map")
+    ingredient_ws.append(["Ingredient", "Category", "Unit", "Daily Weight", "Daily Order", "Final Unit", "Unit Price", "Daily Spend"])
+    for item in ingredients:
+        ingredient_ws.append([
+            item["item"], item["category"], item["unit"], item["daily_weight"],
+            item["daily_order"], item["final_unit"], item["unit_price"], item["daily_price"],
+        ])
+
+    category_ws = report.create_sheet("Category Spend")
+    category_ws.append(["Category", "Daily Spend"])
+    for category, total in sorted(category_totals.items(), key=lambda pair: pair[1], reverse=True):
+        category_ws.append([category, round(total, 3)])
+
+    for ws in [summary, meal_ws, ingredient_ws, category_ws]:
+        _style_report_sheet(ws)
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '#,##0.000'
+
+    if len(meals) >= 1:
+        chart = BarChart()
+        chart.title = "Total Cost by Meal"
+        chart.y_axis.title = "Cost"
+        chart.x_axis.title = "Meal"
+        data = Reference(meal_ws, min_col=8, min_row=1, max_row=meal_ws.max_row)
+        cats = Reference(meal_ws, min_col=2, min_row=2, max_row=meal_ws.max_row)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(cats)
+        chart.height = 8
+        chart.width = 18
+        summary.add_chart(chart, "D2")
+
+    if category_ws.max_row > 1:
+        pie = PieChart()
+        pie.title = "Spend by Category"
+        data = Reference(category_ws, min_col=2, min_row=2, max_row=category_ws.max_row)
+        labels = Reference(category_ws, min_col=1, min_row=2, max_row=category_ws.max_row)
+        pie.add_data(data)
+        pie.set_categories(labels)
+        pie.height = 8
+        pie.width = 12
+        summary.add_chart(pie, "D18")
+
+        cat_bar = BarChart()
+        cat_bar.title = "Category Spend"
+        cat_bar.y_axis.title = "Cost"
+        data = Reference(category_ws, min_col=2, min_row=1, max_row=category_ws.max_row)
+        cats = Reference(category_ws, min_col=1, min_row=2, max_row=category_ws.max_row)
+        cat_bar.add_data(data, titles_from_data=True)
+        cat_bar.set_categories(cats)
+        cat_bar.height = 8
+        cat_bar.width = 16
+        category_ws.add_chart(cat_bar, "D2")
+
+    out_path = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False).name
+    report.save(out_path)
+    source.close()
+    return out_path, {"day_no": int(day_no), "meals_count": len(meals), "ingredients_count": len(ingredients)}
+
+
 def _fill_rgb(cell):
     color = cell.fill.fgColor
     if color and color.type == "rgb" and color.rgb:
@@ -515,6 +673,21 @@ def export_dessert_excel_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
 
     recalculated_xlsx = recalc_with_ordering_aggregates(out_xlsm)
     return recalculated_xlsx, {"day_no": int(day_no)}
+
+
+def export_dessert_cost_report_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
+    if not os.path.exists(template_path):
+        raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
+    wb = load_workbook(template_path, data_only=False, keep_vba=True)
+    _apply_edits_to_workbook(wb, edits)
+    day_no = _as_number(wb["Ordering"]["R1"].value) or 1
+    _sync_ordering_counts_to_recipe_sheets(wb)
+    out_xlsm = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
+    wb.save(out_xlsm)
+    wb.close()
+
+    recalculated_xlsx = recalc_with_ordering_aggregates(out_xlsm)
+    return _build_cost_report(recalculated_xlsx, day_no)
 
 
 def get_dessert_template_state(template_path=DESSERT_TEMPLATE_PATH):
