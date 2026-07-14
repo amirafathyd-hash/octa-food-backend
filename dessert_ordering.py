@@ -748,6 +748,34 @@ def export_dessert_cost_report_pdf_with_edits(edits, template_path=DESSERT_TEMPL
     return pdf_path, report
 
 
+def replace_dessert_template(file_storage, template_path=DESSERT_TEMPLATE_PATH):
+    if not file_storage:
+        raise ValueError("ارفع ملف الشيت الرئيسي الجديد")
+    suffix = os.path.splitext(file_storage.filename or "")[1].lower() or ".xlsm"
+    if suffix != ".xlsm":
+        raise ValueError("الشيت الرئيسي لازم يكون ملف .xlsm عشان الماكرو والمعادلات يفضلوا محفوظين")
+
+    upload_path = tempfile.NamedTemporaryFile(suffix=suffix, delete=False).name
+    file_storage.seek(0)
+    file_storage.save(upload_path)
+
+    wb = load_workbook(upload_path, data_only=False, keep_vba=suffix == ".xlsm")
+    try:
+        if "Ordering" not in wb.sheetnames:
+            raise ValueError("الشيت الجديد لازم يحتوي على Sheet باسم Ordering")
+        if not any(wb["Ordering"][f"AF{row}"].value for row in range(2, wb["Ordering"].max_row + 1)):
+            raise ValueError("مش لاقي قائمة الوجبات في Ordering!AF")
+    finally:
+        wb.close()
+
+    os.makedirs(os.path.dirname(template_path), exist_ok=True)
+    shutil.copyfile(upload_path, template_path)
+    recalculated_xlsx = recalc_with_ordering_aggregates(template_path)
+    state = extract_dashboard_state(recalculated_xlsx)
+    state.update(extract_workbook_state(recalculated_xlsx))
+    return state, {"template_file": os.path.basename(template_path)}
+
+
 def get_dessert_template_state(template_path=DESSERT_TEMPLATE_PATH):
     if not os.path.exists(template_path):
         raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
