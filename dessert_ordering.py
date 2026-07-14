@@ -502,6 +502,21 @@ def export_dessert_pdf_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
     return pdf_path, {"day_no": int(day_no), "sheets": recipe_sheets}
 
 
+def export_dessert_excel_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
+    if not os.path.exists(template_path):
+        raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
+    wb = load_workbook(template_path, data_only=False, keep_vba=True)
+    _apply_edits_to_workbook(wb, edits)
+    day_no = _as_number(wb["Ordering"]["R1"].value) or 1
+    _sync_ordering_counts_to_recipe_sheets(wb)
+    out_xlsm = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
+    wb.save(out_xlsm)
+    wb.close()
+
+    recalculated_xlsx = recalc_with_ordering_aggregates(out_xlsm)
+    return recalculated_xlsx, {"day_no": int(day_no)}
+
+
 def get_dessert_template_state(template_path=DESSERT_TEMPLATE_PATH):
     if not os.path.exists(template_path):
         raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
