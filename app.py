@@ -30,6 +30,7 @@ from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
 from tokyo_ordering import read_day_file_meals, merge_day_into_template
 from dessert_ordering import (
+    export_dessert_pdf_with_edits,
     get_dessert_template_state,
     recalculate_dessert_with_edits,
     update_dessert_ordering_from_upload,
@@ -471,6 +472,24 @@ def dessert_ordering_recalculate():
         return jsonify({'ok': True, 'state': recalculate_dessert_with_edits(payload.get('edits') or [])})
     except Exception as e:
         app.logger.exception('dessert_ordering_recalculate failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dessert-ordering/export-pdf', methods=['POST'])
+def dessert_ordering_export_pdf():
+    payload = request.get_json(silent=True) or {}
+    try:
+        pdf_path, report = export_dessert_pdf_with_edits(payload.get('edits') or [])
+        response = send_file(
+            pdf_path,
+            as_attachment=True,
+            download_name=f"Day{report['day_no']}_Dessert.pdf",
+            mimetype='application/pdf',
+        )
+        response.headers['X-Dessert-Pdf-Report'] = json.dumps(report, ensure_ascii=True)
+        return response
+    except Exception as e:
+        app.logger.exception('dessert_ordering_export_pdf failed')
         return jsonify({'error': str(e)}), 500
 
 
