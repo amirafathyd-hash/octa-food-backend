@@ -805,6 +805,84 @@ def receipt_notifications_vegetables_delete(log_id):
     return jsonify({'ok': True})
 
 
+CUSTOMER_REVIEWS_SEED_PATH = os.path.join(os.path.dirname(__file__), 'data', 'customer_reviews_seed.json')
+
+
+def _load_customer_reviews_seed():
+    try:
+        with open(CUSTOMER_REVIEWS_SEED_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {'summary': [], 'records': []}
+
+
+def _customer_review_from_log(row):
+    try:
+        data = json.loads(row.get('message') or '{}')
+    except Exception:
+        data = {}
+    data.setdefault('id', f"log-{row.get('id')}")
+    data.setdefault('source', 'مدخلات جديدة')
+    data.setdefault('created_at', row.get('created_at'))
+    return data
+
+
+@app.route('/api/customer-reviews', methods=['GET'])
+def customer_reviews_list():
+    _, err = _require_auth()
+    if err:
+        return err
+    seed = _load_customer_reviews_seed()
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('upload_log')
+        .select('*')
+        .eq('file_type', 'customer_review')
+        .order('created_at', desc=True)
+        .limit(1000)
+    )
+    new_records = [_customer_review_from_log(row) for row in (res.data or [])]
+    return jsonify({
+        'summary': seed.get('summary') or [],
+        'seed_count': len(seed.get('records') or []),
+        'new_count': len(new_records),
+        'records': new_records + (seed.get('records') or []),
+    })
+
+
+@app.route('/api/customer-reviews', methods=['POST'])
+def customer_reviews_create():
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get('customer_name') or '').strip()
+    phone = re.sub(r'\D+', '', str(payload.get('customer_phone') or ''))
+    if not name and not phone:
+        return jsonify({'error': 'محتاج اسم العميل أو رقم العميل'}), 400
+    now_iso = datetime.now(timezone.utc).isoformat()
+    record = {
+        'id': f"new-{secrets.token_hex(8)}",
+        'source': 'مدخلات جديدة',
+        'call_date': payload.get('call_date') or datetime.now().strftime('%Y-%m-%d'),
+        'customer_name': name,
+        'customer_phone': phone,
+        'package': payload.get('package') or '',
+        'city': payload.get('city') or '',
+        'subscription_count': payload.get('subscription_count') or '',
+        'time_suitable': payload.get('time_suitable') or '',
+        'call_duration': payload.get('call_duration') or '',
+        'star_rating': int(payload.get('star_rating') or 0),
+        'notes': payload.get('notes') or '',
+        'ratings': payload.get('ratings') or [],
+        'suggestions': payload.get('suggestions') or [],
+        'raw': payload,
+        'created_at': now_iso,
+    }
+    _log('customer_review', name or phone, record['call_date'], json.dumps(record, ensure_ascii=False), level='info')
+    return jsonify({'ok': True, 'record': record})
+
+
 @app.route('/api/sauce-receipt/<receipt_id>', methods=['DELETE'])
 def sauce_receipt_delete(receipt_id):
     """حذف رابط استلام بالكامل - محتاج تسجيل دخول."""
