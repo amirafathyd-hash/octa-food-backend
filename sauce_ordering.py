@@ -7,7 +7,7 @@ from copy import copy
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, PieChart, Reference
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
@@ -123,6 +123,16 @@ def _selected_day_recipe_sheets(workbook_path, day_no, per_day=7):
     start = (day - 1) * per_day
     selected = recipes[start:start + per_day]
     return selected or recipes[:per_day]
+
+
+def _english_first_title(value):
+    text = str(value or "").strip()
+    if " - " not in text:
+        return text
+    left, right = [part.strip() for part in text.split(" - ", 1)]
+    if any("A" <= ch <= "Z" or "a" <= ch <= "z" for ch in right):
+        return f"{right} - {left}"
+    return text
 
 
 def _norm_text(value):
@@ -306,51 +316,126 @@ def export_sauce_excel_with_edits(edits, template_path=SAUCE_TEMPLATE_PATH):
 def export_sauce_pdf_with_edits(edits, day_no=1, template_path=SAUCE_TEMPLATE_PATH):
     xlsx, day = _updated_workbook(edits, template_path)
     selected = _selected_day_recipe_sheets(xlsx, day_no)
-    wb_formula = load_workbook(xlsx, data_only=False)
     wb_values = load_workbook(xlsx, data_only=True)
     out_wb = Workbook()
     out_wb.remove(out_wb.active)
+    dark_fill = PatternFill("solid", fgColor="303D4D")
+    green_fill = PatternFill("solid", fgColor="C6E0B4")
+    white_font = Font(color="FFFFFF", bold=True, size=11)
+    title_font = Font(color="000000", bold=True, size=16)
+    body_font = Font(color="000000", size=10)
+    body_bold = Font(color="000000", bold=True, size=10)
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
     try:
-        for sheet_name in selected:
-            src = wb_formula[sheet_name]
+        total_pages = len(selected)
+        for page_index, sheet_name in enumerate(selected, 1):
             vals = wb_values[sheet_name]
             ws = out_wb.create_sheet(sheet_name[:31])
-            for row in range(1, 28):
-                ws.row_dimensions[row].height = src.row_dimensions[row].height
-                for col in range(1, 13):
-                    src_cell = src.cell(row=row, column=col)
-                    val_cell = vals.cell(row=row, column=col)
-                    target = ws.cell(row=row, column=col)
-                    target.value = val_cell.value
-                    if src_cell.has_style:
-                        target.font = copy(src_cell.font)
-                        target.fill = copy(src_cell.fill)
-                        target.border = copy(src_cell.border)
-                        target.alignment = copy(src_cell.alignment)
-                        target.number_format = src_cell.number_format
-                        target.protection = copy(src_cell.protection)
-            for col in range(1, 13):
-                letter = get_column_letter(col)
-                ws.column_dimensions[letter].width = src.column_dimensions[letter].width
-            for merged in src.merged_cells.ranges:
-                if merged.min_row <= 27 and merged.max_row <= 27 and merged.min_col <= 12 and merged.max_col <= 12:
-                    ws.merge_cells(str(merged))
+            ws.sheet_view.showGridLines = False
+
+            ws.merge_cells("A1:H1")
+            ws["A1"] = sheet_name
+            ws["A1"].font = title_font
+            ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+            ws["I1"] = f"Day {int(_as_number(day_no) or day)}"
+            ws["I1"].font = title_font
+            ws["I1"].alignment = Alignment(horizontal="right", vertical="center")
+            ws.row_dimensions[1].height = 28
+
+            sauce_title = _english_first_title(vals["B2"].value or sheet_name)
+            meal_title = vals["B3"].value or ""
+            ws.merge_cells("B4:H4")
+            ws["B4"] = sauce_title
+            ws["B4"].fill = dark_fill
+            ws["B4"].font = white_font
+            ws["B4"].alignment = Alignment(horizontal="center", vertical="center")
+            ws.merge_cells("B5:H5")
+            ws["B5"] = meal_title
+            ws["B5"].fill = dark_fill
+            ws["B5"].font = white_font
+            ws["B5"].alignment = Alignment(horizontal="center", vertical="center")
+            for address in ("A4", "A5"):
+                ws[address].fill = dark_fill
+                ws[address].border = border
+
+            headers = [
+                "Category",
+                "Ingredient",
+                "Unit",
+                "Base Recipe\n(1 Portion)",
+                "Corrected\nConversion Factor",
+                "Scaling Factor\n(1-10KG)",
+                "Linear Scaled\nAmount",
+                "Scaled Amount Post Conversion Factor",
+            ]
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=6, column=col)
+                cell.value = header
+                cell.fill = green_fill if col in (5, 6) else dark_fill
+                cell.font = Font(color="000000" if col in (5, 6) else "FFFFFF", bold=True, size=10)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = border
+
+            out_row = 7
+            for src_row in range(5, vals.max_row + 1):
+                ingredient = vals.cell(src_row, 2).value
+                if not ingredient:
+                    continue
+                values = [vals.cell(src_row, col).value for col in range(1, 9)]
+                for col, value in enumerate(values, 1):
+                    cell = ws.cell(out_row, col)
+                    cell.value = value
+                    cell.font = body_bold if col in (2, 8) else body_font
+                    cell.alignment = Alignment(
+                        horizontal="right" if col in (2, 8) else "center",
+                        vertical="center",
+                        wrap_text=False,
+                    )
+                    cell.border = border
+                    if isinstance(value, (int, float)):
+                        cell.number_format = "#,##0.##"
+                out_row += 1
+
+            ws.column_dimensions["A"].width = 18
+            ws.column_dimensions["B"].width = 37
+            ws.column_dimensions["C"].width = 12
+            ws.column_dimensions["D"].width = 15
+            ws.column_dimensions["E"].width = 17
+            ws.column_dimensions["F"].width = 15
+            ws.column_dimensions["G"].width = 16
+            ws.column_dimensions["H"].width = 34
+            ws.column_dimensions["I"].width = 14
+            ws.row_dimensions[4].height = 20
+            ws.row_dimensions[5].height = 20
+            ws.row_dimensions[6].height = 52
+            for row in range(7, out_row):
+                ws.row_dimensions[row].height = 18
+
             ws.page_setup.orientation = "landscape"
             ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
             ws.sheet_properties.pageSetUpPr.fitToPage = True
             ws.page_setup.fitToWidth = 1
             ws.page_setup.fitToHeight = 1
-            ws.print_area = "A1:L27"
-            ws.page_margins.left = 0.2
-            ws.page_margins.right = 0.2
-            ws.page_margins.top = 0.25
-            ws.page_margins.bottom = 0.25
+            ws.print_area = f"A1:I{max(out_row + 18, 42)}"
+            ws.page_margins.left = 0.25
+            ws.page_margins.right = 0.25
+            ws.page_margins.top = 0.45
+            ws.page_margins.bottom = 0.35
+            ws.oddFooter.center.text = "Page &P of &N"
+            ws.oddFooter.center.size = 10
+            ws.oddFooter.center.font = "Arial,Bold"
+            footer_row = max(out_row + 18, 42)
+            ws.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=9)
+            footer = ws.cell(footer_row, 1)
+            footer.value = f"Page {page_index} of {total_pages}"
+            footer.font = Font(color="000000", bold=True, size=10)
+            footer.alignment = Alignment(horizontal="center", vertical="center")
         if out_wb.sheetnames:
             out_wb.active = 0
         out_path = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False).name
         out_wb.save(out_path)
     finally:
-        wb_formula.close()
         wb_values.close()
         out_wb.close()
     return export_workbook_to_pdf(out_path), {"day_no": int(_as_number(day_no) or day), "sheets": selected}
