@@ -1204,6 +1204,11 @@ ADMIN_ROLE = 'admin'
 REVIEW_ROLE = 'review'
 DEFAULT_REVIEW_USERNAME = os.environ.get('CUSTOMER_REVIEWS_DEFAULT_USER', 'customer-reviews@octafood.com')
 DEFAULT_REVIEW_PASSWORD = os.environ.get('CUSTOMER_REVIEWS_DEFAULT_PASSWORD', '@123456')
+DEFAULT_REVIEW_USERNAMES = {
+    u.strip()
+    for u in os.environ.get('CUSTOMER_REVIEWS_USERS', '').split(',')
+    if u.strip()
+}
 
 
 def _new_session(username):
@@ -1278,7 +1283,7 @@ def _role_events():
 
 
 def _role_for_username(username):
-    if username == DEFAULT_REVIEW_USERNAME:
+    if username == DEFAULT_REVIEW_USERNAME or username in DEFAULT_REVIEW_USERNAMES:
         return REVIEW_ROLE
     return _role_events().get(username, ADMIN_ROLE)
 
@@ -1404,7 +1409,7 @@ def create_user():
     payload = request.get_json(silent=True) or {}
     username = (payload.get('username') or '').strip()
     password = payload.get('password') or ''
-    role = payload.get('role') or ADMIN_ROLE
+    role = payload.get('role') or REVIEW_ROLE
     if not username or not password:
         return jsonify({'error': 'اليوزر نيم والباسورد مطلوبين'}), 400
     if len(password) < 4:
