@@ -15,7 +15,7 @@ import base64
 import requests
 
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-ANTHROPIC_MODEL = os.environ.get('ANTHROPIC_VISION_MODEL', 'claude-sonnet-5')
+ANTHROPIC_MODEL = os.environ.get('ANTHROPIC_VISION_MODEL', 'claude-3-5-sonnet-20241022')
 ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
 
 VALID_UNITS = {'KG', 'GM', 'PACK', 'BOX', 'PC', 'TRAY', 'BTL', 'LTR'}
@@ -94,7 +94,11 @@ def _call_claude_vision(image_path):
     }
     resp = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=90)
     if resp.status_code != 200:
-        raise RuntimeError(f'Anthropic HTTP {resp.status_code}: {resp.text[:500]}')
+        try:
+            err = resp.json().get('error', {}).get('message') or resp.text
+        except Exception:
+            err = resp.text
+        raise RuntimeError(f'Anthropic HTTP {resp.status_code}: {err[:500]}')
 
     data = resp.json()
     text = ''.join(block.get('text', '') for block in data.get('content', []) if block.get('type') == 'text')
