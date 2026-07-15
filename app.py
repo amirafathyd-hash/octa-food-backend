@@ -3299,11 +3299,22 @@ def auto_detect_stations():
         return jsonify({'error': f'حصل خطأ: {e}'}), 500
 
 
+def _vegetables_department_info(value):
+    key = (value or 'general').strip().lower()
+    mapping = {
+        'hot': ('hot', 'خضار القسم الساخن'),
+        'salad': ('salad', 'خضار قسم السلطة'),
+        'general': ('general', 'استلام الخضروات'),
+    }
+    return mapping.get(key, mapping['general'])
+
+
 @app.route('/api/vegetables-receipt-data', methods=['POST'])
 def vegetables_receipt_data():
     uploaded = request.files.getlist('files')
     if not uploaded:
         return jsonify({'error': 'مفيش ملفات مبعوتة'}), 400
+    department, title = _vegetables_department_info(request.form.get('department') or request.args.get('department'))
     station_files, undetected = _detect_uploaded_station_files(uploaded)
     if not station_files:
         return jsonify({'error': f'مش قادر أحدد محطة أي ملف من اللي رفعتهم: {undetected}'}), 400
@@ -3317,17 +3328,27 @@ def vegetables_receipt_data():
             return jsonify({'error': 'مفيش خضروات في الملفات المرفوعة'}), 400
         receipt_id = secrets.token_urlsafe(8)
         created_at = datetime.now(timezone.utc).isoformat()
+        payload = {
+            'id': receipt_id,
+            'title': title,
+            'department': department,
+            'department_label': title,
+            'created_at': created_at,
+            'rows': rows,
+        }
         _log(
             'vegetables_receipt_link',
             receipt_id,
             None,
-            json.dumps({'id': receipt_id, 'title': 'استلام الخضروات', 'created_at': created_at, 'rows': rows}, ensure_ascii=False),
+            json.dumps(payload, ensure_ascii=False),
             level='info',
         )
         return jsonify({
             'ok': True,
             'id': receipt_id,
-            'title': 'استلام الخضروات',
+            'title': title,
+            'department': department,
+            'department_label': title,
             'created_at': created_at,
             'rows': rows,
         })
@@ -3356,6 +3377,8 @@ def vegetables_receipt_get(receipt_id):
         payload = {}
     if not payload.get('rows'):
         return jsonify({'error': 'بيانات رابط الخضروات غير مكتملة'}), 500
+    payload.setdefault('department', 'general')
+    payload.setdefault('department_label', payload.get('title') or 'استلام الخضروات')
     return jsonify(payload)
 
 
@@ -3409,6 +3432,27 @@ def vegetables_receipt_submit():
     rows = payload.get('rows') or []
     if not rows:
         return jsonify({'error': 'مفيش بيانات استلام خضروات مبعوتة'}), 400
+    receipt_id = (payload.get('receipt_id') or '').strip()
+    department, department_label = _vegetables_department_info(payload.get('department'))
+    link_created_at = payload.get('created_at') or None
+    if receipt_id:
+        try:
+            sb = get_client()
+            res = execute_with_retry(
+                sb.table('upload_log')
+                .select('*')
+                .eq('file_type', 'vegetables_receipt_link')
+                .eq('file_name', receipt_id)
+                .order('created_at', desc=True)
+                .limit(1)
+            )
+            found = res.data or []
+            if found:
+                link_payload = json.loads(found[0].get('message') or '{}')
+                department, department_label = _vegetables_department_info(link_payload.get('department'))
+                link_created_at = link_payload.get('created_at') or found[0].get('created_at')
+        except Exception:
+            pass
     received_count = sum(1 for r in rows if str(r.get('received') or '').strip())
     signed_count = sum(1 for r in rows if str(r.get('signature') or '').strip())
     total_required = sum((_as_float_for_receipt(r.get('daily_order')) or 0) for r in rows)
@@ -3417,6 +3461,10 @@ def vegetables_receipt_submit():
     missing_count = max(0, len(rows) - received_count)
     payload_log = {
         'kind': 'vegetables_receipt',
+        'receipt_id': receipt_id,
+        'department': department,
+        'department_label': department_label,
+        'link_created_at': link_created_at,
         'submitted_at': now_iso,
         'rows_count': len(rows),
         'received_count': received_count,
@@ -3429,8 +3477,8 @@ def vegetables_receipt_submit():
     }
     _log(
         'vegetables_receipt',
-        'استلام الخضروات',
-        None,
+        department_label,
+        datetime.now().strftime('%Y-%m-%d'),
         json.dumps(payload_log, ensure_ascii=False),
         level='info',
     )
