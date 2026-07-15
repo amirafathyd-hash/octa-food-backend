@@ -3384,6 +3384,8 @@ def vegetables_receipt_data():
     if not uploaded:
         return jsonify({'error': 'مفيش ملفات مبعوتة'}), 400
     department, title = _vegetables_department_info(request.form.get('department') or request.args.get('department'))
+    selected_day_name = (request.form.get('selected_day_name') or request.args.get('selected_day_name') or '').strip()
+    selected_date = (request.form.get('selected_date') or request.args.get('selected_date') or '').strip()
     station_files, undetected = _detect_uploaded_station_files(uploaded)
     if not station_files:
         return jsonify({'error': f'مش قادر أحدد محطة أي ملف من اللي رفعتهم: {undetected}'}), 400
@@ -3402,6 +3404,8 @@ def vegetables_receipt_data():
             'title': title,
             'department': department,
             'department_label': title,
+            'selected_day_name': selected_day_name,
+            'selected_date': selected_date,
             'created_at': created_at,
             'rows': rows,
         }
@@ -3418,6 +3422,8 @@ def vegetables_receipt_data():
             'title': title,
             'department': department,
             'department_label': title,
+            'selected_day_name': selected_day_name,
+            'selected_date': selected_date,
             'created_at': created_at,
             'rows': rows,
         })
@@ -3448,6 +3454,8 @@ def vegetables_receipt_get(receipt_id):
         return jsonify({'error': 'بيانات رابط الخضروات غير مكتملة'}), 500
     payload.setdefault('department', 'general')
     payload.setdefault('department_label', payload.get('title') or 'استلام الخضروات')
+    payload.setdefault('selected_day_name', '')
+    payload.setdefault('selected_date', '')
     return jsonify(payload)
 
 
@@ -3504,6 +3512,8 @@ def vegetables_receipt_submit():
     receipt_id = (payload.get('receipt_id') or '').strip()
     department, department_label = _vegetables_department_info(payload.get('department'))
     link_created_at = payload.get('created_at') or None
+    selected_day_name = (payload.get('selected_day_name') or '').strip()
+    selected_date = (payload.get('selected_date') or '').strip()
     if receipt_id:
         try:
             sb = get_client()
@@ -3520,6 +3530,8 @@ def vegetables_receipt_submit():
                 link_payload = json.loads(found[0].get('message') or '{}')
                 department, department_label = _vegetables_department_info(link_payload.get('department'))
                 link_created_at = link_payload.get('created_at') or found[0].get('created_at')
+                selected_day_name = selected_day_name or (link_payload.get('selected_day_name') or '')
+                selected_date = selected_date or (link_payload.get('selected_date') or '')
         except Exception:
             pass
     received_count = sum(1 for r in rows if str(r.get('received') or '').strip())
@@ -3534,6 +3546,8 @@ def vegetables_receipt_submit():
         'department': department,
         'department_label': department_label,
         'link_created_at': link_created_at,
+        'selected_day_name': selected_day_name,
+        'selected_date': selected_date,
         'submitted_at': now_iso,
         'rows_count': len(rows),
         'received_count': received_count,
