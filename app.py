@@ -1060,12 +1060,22 @@ def sauce_receipt_create():
     days = payload.get('days') or []
     if not days:
         return jsonify({'error': 'مفيش بيانات صوص مبعوتة'}), 400
+    selected_day_name = (payload.get('selected_day_name') or '').strip()
+    selected_date = (payload.get('selected_date') or '').strip()
+    normalized_days = []
+    for day in days:
+        day_payload = dict(day or {})
+        if selected_day_name:
+            day_payload['selected_day_name'] = selected_day_name
+        if selected_date:
+            day_payload['selected_date'] = selected_date
+        normalized_days.append(day_payload)
     sb = get_client()
     res = execute_with_retry(sb.table('sauce_receipts').insert({
-        'days': days, 'status': 'pending',
+        'days': normalized_days, 'status': 'pending',
     }))
     row_id = res.data[0]['id']
-    return jsonify({'id': row_id})
+    return jsonify({'id': row_id, 'selected_day_name': selected_day_name, 'selected_date': selected_date})
 
 
 @app.route('/api/sauce-receipt/<receipt_id>', methods=['GET'])
@@ -1084,9 +1094,12 @@ def sauce_receipt_get(receipt_id):
     if isinstance(submitted_days, list):
         # صيغة قديمة (List) من قبل التحديث - نتجاهلها ونبدأ فاضية بالصيغة الجديدة (dict لكل يوم)
         submitted_days = {}
+    first_day = (receipt.get('days') or [{}])[0] or {}
     return jsonify({
         'id': receipt['id'], 'days': receipt['days'], 'status': receipt['status'],
         'submitted_days': submitted_days,
+        'selected_day_name': first_day.get('selected_day_name') or '',
+        'selected_date': first_day.get('selected_date') or '',
         'created_at': receipt['created_at'],
     })
 
@@ -1113,8 +1126,10 @@ def sauce_receipt_submit_day(receipt_id):
 
     # اربط الصفوف المُستلَمة بالبيانات الأصلية المتوقعة لنفس اليوم واحسب الزيادة/النقص
     expected_by_key = {}
+    source_day = {}
     for day in receipt['days']:
         if day.get('day') == day_name:
+            source_day = day
             for r in day.get('rows', []):
                 expected_by_key[r['key']] = r
             break
@@ -1153,6 +1168,8 @@ def sauce_receipt_submit_day(receipt_id):
         'rows': result_rows,
         'submitted_at': now_iso,
         'edit_count': prev_edit_count + 1,
+        'selected_day_name': source_day.get('selected_day_name') or '',
+        'selected_date': source_day.get('selected_date') or '',
     }
 
     execute_with_retry(sb.table('sauce_receipts').update({
