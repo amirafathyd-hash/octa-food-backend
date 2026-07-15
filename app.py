@@ -1352,9 +1352,6 @@ def login():
     if not username or not password:
         return jsonify({'error': 'اليوزر نيم والباسورد مطلوبين'}), 400
 
-    if username == DEFAULT_REVIEW_USERNAME:
-        _ensure_default_review_user()
-
     sb = get_client()
     res = execute_with_retry(sb.table('app_users').select('*').eq('username', username))
     rows = res.data or []
@@ -1389,7 +1386,6 @@ def list_users():
     _, err = _require_auth()
     if err:
         return err
-    _ensure_default_review_user()
     sb = get_client()
     res = execute_with_retry(sb.table('app_users').select('id, username, created_at').order('created_at'))
     roles = _role_events()
@@ -1416,6 +1412,15 @@ def create_user():
         return jsonify({'error': 'الباسورد لازم يكون 4 حروف/أرقام على الأقل'}), 400
 
     sb = get_client()
+    existing = execute_with_retry(sb.table('app_users').select('id').eq('username', username).limit(1))
+    existing_rows = existing.data or []
+    if existing_rows:
+        execute_with_retry(sb.table('app_users').update({
+            'password_hash': generate_password_hash(password),
+        }).eq('id', existing_rows[0]['id']))
+        _set_user_role(username, role)
+        return jsonify({'ok': True, 'updated': True})
+
     try:
         execute_with_retry(sb.table('app_users').insert({
             'username': username, 'password_hash': generate_password_hash(password),
