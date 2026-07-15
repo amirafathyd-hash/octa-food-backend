@@ -1682,11 +1682,8 @@ def _weight_log_day_bounds_utc(offset_days=0):
 
 
 def _safe_weight_log_select(base_query, include_batch=True):
-    cols = 'id, item_name, weight, photo_base64, logged_at, deleted'
-    if include_batch:
-        cols += ', day_names, batch_no'
     try:
-        return execute_with_retry(base_query.select(cols))
+        return execute_with_retry(base_query.select('*'))
     except Exception:
         return execute_with_retry(base_query.select('id, item_name, weight, photo_base64, logged_at, deleted'))
 
