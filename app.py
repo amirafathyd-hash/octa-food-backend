@@ -59,6 +59,16 @@ from sauce_ordering import (
     replace_sauce_template,
     update_sauce_counts_from_upload,
 )
+from breakfast_ordering import (
+    export_breakfast_cost_report_pdf_with_edits,
+    export_breakfast_cost_report_with_edits,
+    export_breakfast_excel_with_edits,
+    export_breakfast_pdf_with_edits,
+    get_breakfast_template_state,
+    recalculate_breakfast_with_edits,
+    replace_breakfast_template,
+    update_breakfast_counts_from_upload,
+)
 from xlsx_to_images import add_workbook_images_to_zip
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
@@ -759,6 +769,95 @@ def sauce_ordering_export_cost_report_pdf():
         return send_file(report_path, as_attachment=True, download_name=f"Day{report['day_no']}_Sauce_Cost_Report.pdf", mimetype='application/pdf')
     except Exception as e:
         app.logger.exception('sauce_ordering_export_cost_report_pdf failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/breakfast-ordering/template', methods=['GET'])
+def breakfast_ordering_template():
+    try:
+        return jsonify({'ok': True, 'state': get_breakfast_template_state()})
+    except Exception as e:
+        app.logger.exception('breakfast_ordering_template failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/breakfast-ordering/recalculate', methods=['POST'])
+def breakfast_ordering_recalculate():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify({'ok': True, 'state': recalculate_breakfast_with_edits(payload.get('edits') or [])})
+    except Exception as e:
+        app.logger.exception('breakfast_ordering_recalculate failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/breakfast-ordering/update-counts', methods=['POST'])
+def breakfast_ordering_update_counts():
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'ارفع ملف الأعداد باسم file'}), 400
+    try:
+        state, report = update_breakfast_counts_from_upload(f)
+        return jsonify({'ok': True, 'report': report, 'state': state})
+    except Exception as e:
+        app.logger.exception('breakfast_ordering_update_counts failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/breakfast-ordering/replace-template', methods=['POST'])
+def breakfast_ordering_replace_template():
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'ارفع ملف الشيت الرئيسي الجديد باسم file'}), 400
+    try:
+        state, report = replace_breakfast_template(f)
+        return jsonify({'ok': True, 'report': report, 'state': state})
+    except Exception as e:
+        app.logger.exception('breakfast_ordering_replace_template failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/breakfast-ordering/export-excel', methods=['POST'])
+def breakfast_ordering_export_excel():
+    payload = request.get_json(silent=True) or {}
+    try:
+        excel_path, report = export_breakfast_excel_with_edits(payload.get('edits') or [])
+        return send_file(excel_path, as_attachment=True, download_name=f"Day{report['day_no']}_Breakfast_Updated.xlsx")
+    except Exception as e:
+        app.logger.exception('breakfast_ordering_export_excel failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/breakfast-ordering/export-pdf', methods=['POST'])
+def breakfast_ordering_export_pdf():
+    payload = request.get_json(silent=True) or {}
+    try:
+        pdf_path, report = export_breakfast_pdf_with_edits(payload.get('edits') or [], payload.get('day_no') or 1)
+        return send_file(pdf_path, as_attachment=True, download_name=f"Day{report['day_no']}_Breakfast.pdf", mimetype='application/pdf')
+    except Exception as e:
+        app.logger.exception('breakfast_ordering_export_pdf failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/breakfast-ordering/export-cost-report', methods=['POST'])
+def breakfast_ordering_export_cost_report():
+    payload = request.get_json(silent=True) or {}
+    try:
+        report_path, report = export_breakfast_cost_report_with_edits(payload.get('edits') or [])
+        return send_file(report_path, as_attachment=True, download_name=f"Day{report['day_no']}_Breakfast_Cost_Report.xlsx")
+    except Exception as e:
+        app.logger.exception('breakfast_ordering_export_cost_report failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/breakfast-ordering/export-cost-report-pdf', methods=['POST'])
+def breakfast_ordering_export_cost_report_pdf():
+    payload = request.get_json(silent=True) or {}
+    try:
+        report_path, report = export_breakfast_cost_report_pdf_with_edits(payload.get('edits') or [])
+        return send_file(report_path, as_attachment=True, download_name=f"Day{report['day_no']}_Breakfast_Cost_Report.pdf", mimetype='application/pdf')
+    except Exception as e:
+        app.logger.exception('breakfast_ordering_export_cost_report_pdf failed')
         return jsonify({'error': str(e)}), 500
 
 
