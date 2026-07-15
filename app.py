@@ -1681,6 +1681,16 @@ def _weight_log_day_bounds_utc(offset_days=0):
     return start_utc.isoformat(), end_utc.isoformat()
 
 
+def _safe_weight_log_select(base_query, include_batch=True):
+    cols = 'id, item_name, weight, photo_base64, logged_at, deleted'
+    if include_batch:
+        cols += ', day_names, batch_no'
+    try:
+        return execute_with_retry(base_query.select(cols))
+    except Exception:
+        return execute_with_retry(base_query.select('id, item_name, weight, photo_base64, logged_at, deleted'))
+
+
 @app.route('/api/weight-log', methods=['POST'])
 def weight_log_add():
     """بيستقبل صنف واحد (اسم + وزن + صورة اختيارية) من صفحة العامل. من غير
@@ -1688,8 +1698,10 @@ def weight_log_add():
     if not _weight_log_worker_ok():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
 
-    item_name = (request.form.get('item_name') or '').strip()
+    item_name = _clean_weight_log_item_name(request.form.get('item_name'))
     weight_raw = (request.form.get('weight') or '').strip()
+    day_names_raw = (request.form.get('day_names') or request.form.get('day_name') or '').strip()
+    batch_no = (request.form.get('batch_no') or '').strip()
     if not item_name:
         return jsonify({'error': 'اكتب اسم الصنف'}), 400
     try:
@@ -1714,8 +1726,17 @@ def weight_log_add():
         'logged_at': datetime.now(timezone.utc).isoformat(),
         'deleted': False,
     }
+    if day_names_raw:
+        row['day_names'] = day_names_raw
+    if batch_no:
+        row['batch_no'] = batch_no
     try:
-        res = execute_with_retry(sb.table('weight_log_entries').insert(row))
+        try:
+            res = execute_with_retry(sb.table('weight_log_entries').insert(row))
+        except Exception:
+            row.pop('day_names', None)
+            row.pop('batch_no', None)
+            res = execute_with_retry(sb.table('weight_log_entries').insert(row))
         new_row = (res.data or [{}])[0]
     except Exception as e:
         return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
@@ -1731,12 +1752,13 @@ def weight_log_mine():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
     start_iso, end_iso = _weight_log_day_bounds_utc()
     sb = get_client()
-    res = execute_with_retry(
-        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at')
+    query = (
+        sb.table('weight_log_entries')
         .gte('logged_at', start_iso).lt('logged_at', end_iso)
         .eq('deleted', False)
         .order('logged_at', desc=True)
     )
+    res = _safe_weight_log_select(query)
     return jsonify({'entries': res.data or []})
 
 
@@ -1748,11 +1770,8 @@ def weight_log_list():
     if err:
         return err
     sb = get_client()
-    res = execute_with_retry(
-        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at')
-        .eq('deleted', False)
-        .order('logged_at', desc=True)
-    )
+    query = sb.table('weight_log_entries').eq('deleted', False).order('logged_at', desc=True)
+    res = _safe_weight_log_select(query)
     return jsonify({'entries': res.data or []})
 
 
@@ -1765,10 +1784,8 @@ def weight_log_archive():
     if not token or token != WEIGHT_LOG_VIEW_TOKEN:
         return jsonify({'error': 'الرابط ده مش صحيح'}), 403
     sb = get_client()
-    res = execute_with_retry(
-        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at, deleted')
-        .order('logged_at', desc=True)
-    )
+    query = sb.table('weight_log_entries').order('logged_at', desc=True)
+    res = _safe_weight_log_select(query)
     return jsonify({'entries': res.data or []})
 
 
@@ -1781,7 +1798,7 @@ def weight_log_update(entry_id):
     payload = request.get_json(silent=True) or {}
     updates = {}
     if 'item_name' in payload:
-        name = (payload.get('item_name') or '').strip()
+        name = _clean_weight_log_item_name(payload.get('item_name'))
         if not name:
             return jsonify({'error': 'اسم الصنف مينفعش يبقى فاضي'}), 400
         updates['item_name'] = name
@@ -1790,12 +1807,24 @@ def weight_log_update(entry_id):
             updates['weight'] = float(payload.get('weight'))
         except (TypeError, ValueError):
             return jsonify({'error': 'الوزن لازم يكون رقم'}), 400
+    if 'batch_no' in payload:
+        updates['batch_no'] = (payload.get('batch_no') or '').strip()
+    if 'day_names' in payload:
+        updates['day_names'] = (payload.get('day_names') or '').strip()
     if not updates:
         return jsonify({'error': 'مفيش حاجة للتعديل'}), 400
 
     sb = get_client()
     try:
-        execute_with_retry(sb.table('weight_log_entries').update(updates).eq('id', entry_id))
+        try:
+            execute_with_retry(sb.table('weight_log_entries').update(updates).eq('id', entry_id))
+        except Exception:
+            legacy_updates = dict(updates)
+            legacy_updates.pop('batch_no', None)
+            legacy_updates.pop('day_names', None)
+            if legacy_updates == updates or not legacy_updates:
+                raise
+            execute_with_retry(sb.table('weight_log_entries').update(legacy_updates).eq('id', entry_id))
     except Exception as e:
         return jsonify({'error': f'تعذر التعديل: {e}'}), 400
     return jsonify({'ok': True})
@@ -1858,6 +1887,14 @@ def weight_log_photo(entry_id):
 # ما يكتب اسم الصنف حر، مأخوذة من ملف "مشروع صدى" بالترتيب بالظبط
 # ============================================================
 WEIGHT_LOG_DAYS = ['السبت', 'الأحد', 'الاثنين', 'الثلاثاء', 'الاربعاء', 'خميس', 'الجمعة']
+WEIGHT_LOG_BATCH_RE = re.compile(r'(?<!\S)[0-9٠-٩]+[\s/\\-]*[0-9٠-٩]+(?!\S)')
+
+
+def _clean_weight_log_item_name(name):
+    text = (name or '').strip()
+    text = WEIGHT_LOG_BATCH_RE.sub(' ', text)
+    text = re.sub(r'\s+', ' ', text).strip(' -–—')
+    return text
 
 
 @app.route('/api/weight-log/items', methods=['GET'])
@@ -1877,6 +1914,28 @@ def weight_log_items_list():
     return jsonify({'items': res.data or []})
 
 
+@app.route('/api/weight-log/items/unique', methods=['GET'])
+def weight_log_items_unique():
+    """قائمة موحدة لكل الأصناف في كل الأيام بعد إزالة التكرار - للعامل
+    بتوكينه، عشان صفحة الميزان تعرض صنف واحد بدل تكراره حسب الأيام."""
+    if not _weight_log_worker_ok():
+        return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('weight_log_items').select('item_name, sort_order').order('sort_order')
+    )
+    seen = set()
+    items = []
+    for row in res.data or []:
+        name = _clean_weight_log_item_name(row.get('item_name'))
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        items.append({'item_name': name})
+    return jsonify({'items': items})
+
+
 @app.route('/api/weight-log/items', methods=['POST'])
 def weight_log_items_add():
     """العامل بيضيف صنف جديد لليوم ده - بيتسجل في القائمة عشان يفضل موجود
@@ -1886,7 +1945,7 @@ def weight_log_items_add():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
     payload = request.get_json(silent=True) or {}
     day = (payload.get('day') or '').strip()
-    item_name = (payload.get('item_name') or '').strip()
+    item_name = _clean_weight_log_item_name(payload.get('item_name'))
     if not day or not item_name:
         return jsonify({'error': 'محتاج اليوم واسم الصنف'}), 400
 
@@ -1935,7 +1994,7 @@ def weight_log_items_update(item_id):
     if err:
         return err
     payload = request.get_json(silent=True) or {}
-    new_name = (payload.get('item_name') or '').strip()
+    new_name = _clean_weight_log_item_name(payload.get('item_name'))
     if not new_name:
         return jsonify({'error': 'اسم الصنف مينفعش يبقى فاضي'}), 400
     sb = get_client()
