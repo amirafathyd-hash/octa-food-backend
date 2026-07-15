@@ -1681,11 +1681,32 @@ def _weight_log_day_bounds_utc(offset_days=0):
     return start_utc.isoformat(), end_utc.isoformat()
 
 
-def _safe_weight_log_select(base_query, include_batch=True):
+def _weight_log_entries_query(sb, cols='*', include_deleted=False, start_iso=None, end_iso=None):
+    query = sb.table('weight_log_entries').select(cols)
+    if start_iso:
+        query = query.gte('logged_at', start_iso)
+    if end_iso:
+        query = query.lt('logged_at', end_iso)
+    if not include_deleted:
+        query = query.eq('deleted', False)
+    return query.order('logged_at', desc=True)
+
+
+def _safe_weight_log_entries(sb, include_deleted=False, start_iso=None, end_iso=None):
     try:
-        return execute_with_retry(base_query.select('*'))
+        return execute_with_retry(
+            _weight_log_entries_query(sb, '*', include_deleted, start_iso, end_iso)
+        )
     except Exception:
-        return execute_with_retry(base_query.select('id, item_name, weight, photo_base64, logged_at, deleted'))
+        return execute_with_retry(
+            _weight_log_entries_query(
+                sb,
+                'id, item_name, weight, photo_base64, logged_at, deleted',
+                include_deleted,
+                start_iso,
+                end_iso,
+            )
+        )
 
 
 @app.route('/api/weight-log', methods=['POST'])
@@ -1749,13 +1770,7 @@ def weight_log_mine():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
     start_iso, end_iso = _weight_log_day_bounds_utc()
     sb = get_client()
-    query = (
-        sb.table('weight_log_entries')
-        .gte('logged_at', start_iso).lt('logged_at', end_iso)
-        .eq('deleted', False)
-        .order('logged_at', desc=True)
-    )
-    res = _safe_weight_log_select(query)
+    res = _safe_weight_log_entries(sb, include_deleted=False, start_iso=start_iso, end_iso=end_iso)
     return jsonify({'entries': res.data or []})
 
 
@@ -1767,8 +1782,7 @@ def weight_log_list():
     if err:
         return err
     sb = get_client()
-    query = sb.table('weight_log_entries').eq('deleted', False).order('logged_at', desc=True)
-    res = _safe_weight_log_select(query)
+    res = _safe_weight_log_entries(sb, include_deleted=False)
     return jsonify({'entries': res.data or []})
 
 
@@ -1781,8 +1795,7 @@ def weight_log_archive():
     if not token or token != WEIGHT_LOG_VIEW_TOKEN:
         return jsonify({'error': 'الرابط ده مش صحيح'}), 403
     sb = get_client()
-    query = sb.table('weight_log_entries').order('logged_at', desc=True)
-    res = _safe_weight_log_select(query)
+    res = _safe_weight_log_entries(sb, include_deleted=True)
     return jsonify({'entries': res.data or []})
 
 
