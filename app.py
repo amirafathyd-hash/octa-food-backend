@@ -1922,6 +1922,55 @@ def veg_inventory_items_list():
     return jsonify({'items': res.data or []})
 
 
+@app.route('/api/veg-inventory/items', methods=['POST'])
+def veg_inventory_items_add():
+    if not _veg_inventory_edit_authorized():
+        return jsonify({'error': 'هذا الرابط غير صحيح أو غير مصرح له بالإضافة'}), 403
+
+    payload = request.get_json(silent=True) or {}
+    item_name = (payload.get('item_name') or '').strip()
+    category = (payload.get('category') or 'Added by worker').strip()
+    unit = (payload.get('unit') or 'gm').strip()
+    if not item_name:
+        return jsonify({'error': 'اسم الصنف مطلوب'}), 400
+
+    sb = get_client()
+    try:
+        existing = execute_with_retry(
+            sb.table('veg_inventory_items')
+            .select('id, item_name, category, unit')
+            .eq('item_name', item_name)
+            .limit(1)
+        )
+        if existing.data:
+            return jsonify({'ok': True, 'item': existing.data[0], 'exists': True})
+
+        last = execute_with_retry(
+            sb.table('veg_inventory_items')
+            .select('sort_order')
+            .order('sort_order', desc=True)
+            .limit(1)
+        )
+        next_sort = 9999
+        if last.data and last.data[0].get('sort_order') is not None:
+            try:
+                next_sort = int(last.data[0].get('sort_order')) + 1
+            except Exception:
+                next_sort = 9999
+
+        row = {
+            'item_name': item_name,
+            'category': category,
+            'unit': unit,
+            'sort_order': next_sort,
+        }
+        inserted = execute_with_retry(sb.table('veg_inventory_items').insert(row))
+    except Exception as e:
+        return jsonify({'error': f'تعذر إضافة الصنف: {e}'}), 400
+
+    return jsonify({'ok': True, 'item': (inserted.data or [row])[0]})
+
+
 @app.route('/api/veg-inventory/today', methods=['GET'])
 def veg_inventory_today_get():
     """بترجّع قيم إنهاردة المحفوظة لحد دلوقتي (لو العامل رجع يعدّل) - للعامل
