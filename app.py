@@ -1237,6 +1237,18 @@ def _require_auth():
     username = _check_session(token)
     if not username:
         return None, (jsonify({'error': 'جلسة غير صالحة، سجّل دخول تاني'}), 401)
+    if _role_for_username(username) == REVIEW_ROLE:
+        path = request.path or ''
+        allowed_paths = (
+            '/api/customer-reviews',
+            '/api/verify-session',
+            '/api/logout',
+            '/api/texts',
+            '/api/theme',
+            '/api/health',
+        )
+        if not any(path == allowed or path.startswith(allowed + '/') for allowed in allowed_paths):
+            return None, (jsonify({'error': 'هذا المستخدم مخصص لإدارة تقييمات العملاء فقط'}), 403)
     return username, None
 
 
