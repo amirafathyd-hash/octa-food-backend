@@ -70,6 +70,7 @@ from breakfast_ordering import (
     update_breakfast_counts_from_upload,
 )
 from xlsx_to_images import add_workbook_images_to_zip
+from veg_screenshot_ocr import extract_vegetable_rows
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 
@@ -4248,6 +4249,209 @@ def smart_order_export_stations():
     except Exception as e:
         app.logger.exception('smart_order_export_stations failed')
         return jsonify({'error': f'حصل خطأ في التصدير: {e}'}), 500
+
+
+# ============================================================
+# سجل الخضار اليومي المجمّع (Veg Daily Log) — رفع صور سكرين شوت يومية،
+# استخراج الأصناف بالـ Claude Vision، مراجعة/تعديل قبل الحفظ، وتجميع كل
+# الأيام مع دمج الأصناف المتشابهة بدل ما تتكرر كصفوف منفصلة
+# ============================================================
+def _veg_log_match_key(name_en, name_ar):
+    """بيحوّل اسم الصنف لمفتاح موحّد للمقارنة/الدمج - بيشيل المسافات
+    الزيادة وعلامات الترقيم وفروق حالة الأحرف، عشان 'Garlic' و'garlic '
+    و'GARLIC' يتحسبوا نفس الصنف بالظبط."""
+    base = (name_en or name_ar or '').strip().lower()
+    base = re.sub(r'[^\w\u0600-\u06FF]+', ' ', base)
+    return re.sub(r'\s+', ' ', base).strip()
+
+
+@app.route('/api/veg-daily-log/extract', methods=['POST'])
+def veg_daily_log_extract():
+    """بتاخد صورة أو أكتر (multipart 'files')، وتستخرج منها صفوف الأصناف
+    بالـ Claude Vision - من غير ما تحفظ حاجة في قاعدة البيانات لسه، عشان
+    المستخدم يراجع/يعدّل الأسماء والكميات الأول قبل التأكيد النهائي."""
+    _, err = _require_auth()
+    if err:
+        return err
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'error': 'مفيش صور مبعوتة'}), 400
+
+    all_rows = []
+    errors = []
+    for f in files:
+        suffix = os.path.splitext(f.filename or '')[1].lower() or '.jpg'
+        if suffix not in ('.jpg', '.jpeg', '.png'):
+            suffix = '.jpg'
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            f.save(tmp.name)
+            path = tmp.name
+        try:
+            rows = extract_vegetable_rows(path)
+            for r in rows:
+                r['source_file'] = f.filename
+                r['match_key'] = _veg_log_match_key(r['name_en'], r['name_ar'])
+            all_rows.extend(rows)
+        except Exception as e:
+            errors.append({'file': f.filename, 'error': str(e)})
+        finally:
+            os.unlink(path)
+
+    return jsonify({'rows': all_rows, 'errors': errors})
+
+
+@app.route('/api/veg-daily-log/save', methods=['POST'])
+def veg_daily_log_save():
+    """بتحفظ صفوف يوم معيّن (بعد المراجعة/التعديل من المستخدم) - بتمسح أي
+    صفوف قديمة لنفس اليوم الأول وتستبدلها بالجديدة، عشان لو المستخدم رجع
+    عدّل نفس اليوم تاني ميتكررش. Body: { "date": "2026-07-15", "rows": [...] }"""
+    username, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    log_date = (payload.get('date') or '').strip()
+    rows = payload.get('rows') or []
+    if not log_date:
+        return jsonify({'error': 'حدد التاريخ'}), 400
+    if not rows:
+        return jsonify({'error': 'مفيش صفوف للحفظ'}), 400
+
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('veg_daily_log').delete().eq('log_date', log_date))
+    except Exception as e:
+        return jsonify({'error': f'تعذر تنظيف بيانات اليوم القديمة: {e}'}), 400
+
+    db_rows = []
+    for r in rows:
+        name_en = (r.get('name_en') or '').strip()
+        name_ar = (r.get('name_ar') or '').strip()
+        if not name_en and not name_ar:
+            continue
+        try:
+            qty = float(r.get('qty') or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        unit = (r.get('unit') or 'UNKNOWN').strip().upper()
+        db_rows.append({
+            'log_date': log_date, 'name_en': name_en, 'name_ar': name_ar,
+            'match_key': _veg_log_match_key(name_en, name_ar),
+            'qty': qty, 'unit': unit,
+            'source_note': r.get('source_file') or None,
+        })
+
+    if not db_rows:
+        return jsonify({'error': 'مفيش صفوف صحيحة للحفظ'}), 400
+
+    try:
+        execute_with_retry(sb.table('veg_daily_log').insert(db_rows))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
+    return jsonify({'ok': True, 'date': log_date, 'count': len(db_rows)})
+
+
+@app.route('/api/veg-daily-log/days', methods=['GET'])
+def veg_daily_log_days():
+    """قايمة كل الأيام المسجّلة مع عدد الأصناف في كل يوم - للداش بورد."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('veg_daily_log').select('log_date').order('log_date', desc=True)
+    )
+    counts = {}
+    for row in (res.data or []):
+        d = row['log_date']
+        counts[d] = counts.get(d, 0) + 1
+    days = [{'date': d, 'count': c} for d, c in sorted(counts.items(), reverse=True)]
+    return jsonify({'days': days})
+
+
+@app.route('/api/veg-daily-log/day/<log_date>', methods=['GET'])
+def veg_daily_log_day_get(log_date):
+    """بترجّع كل صفوف يوم معيّن بالتفصيل - لمراجعتها أو تعديلها تاني."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('veg_daily_log').select('*').eq('log_date', log_date).order('name_en')
+    )
+    return jsonify({'rows': res.data or []})
+
+
+@app.route('/api/veg-daily-log/day/<log_date>', methods=['DELETE'])
+def veg_daily_log_day_delete(log_date):
+    """حذف يوم كامل - محمي بتسجيل الدخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('veg_daily_log').delete().eq('log_date', log_date))
+    except Exception as e:
+        return jsonify({'error': f'تعذر حذف اليوم: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/veg-daily-log/aggregate', methods=['GET'])
+def veg_daily_log_aggregate():
+    """التجميع الكلي - كل الأصناف المتشابهة (بنفس match_key) بتتجمّع في صف
+    واحد، والكميات بتتجمع حسب الوحدة (الجرام بيتحوّل لكيلو تلقائي عشان
+    يتجمع مع الكيلو، والوحدات التانية زي Pack/Box بتفضل منفصلة لأنها مش
+    قابلة للمقارنة بالوزن). فلترة اختيارية بالتاريخ: ?from=YYYY-MM-DD&to=YYYY-MM-DD"""
+    _, err = _require_auth()
+    if err:
+        return err
+    date_from = request.args.get('from')
+    date_to = request.args.get('to')
+
+    sb = get_client()
+    q = sb.table('veg_daily_log').select('*')
+    if date_from:
+        q = q.gte('log_date', date_from)
+    if date_to:
+        q = q.lte('log_date', date_to)
+    res = execute_with_retry(q)
+    rows = res.data or []
+
+    # match_key -> { name_en, name_ar, units: {unit: total_qty}, days: set() }
+    grouped = {}
+    for r in rows:
+        key = r['match_key']
+        if key not in grouped:
+            grouped[key] = {
+                'name_en': r['name_en'], 'name_ar': r['name_ar'],
+                'units': {}, 'days': set(),
+            }
+        entry = grouped[key]
+        unit = r['unit']
+        qty = float(r['qty'] or 0)
+        # الجرام بيتحوّل لكيلو تلقائي عشان يتجمع صح مع باقي أوزان الكيلو
+        if unit == 'GM':
+            unit = 'KG'
+            qty = qty / 1000.0
+        entry['units'][unit] = entry['units'].get(unit, 0) + qty
+        entry['days'].add(r['log_date'])
+        # لو الاسم الإنجليزي فاضي في أول ظهور واتلقى بعدين، حدّثه
+        if not entry['name_en'] and r['name_en']:
+            entry['name_en'] = r['name_en']
+        if not entry['name_ar'] and r['name_ar']:
+            entry['name_ar'] = r['name_ar']
+
+    items = []
+    for key, entry in grouped.items():
+        items.append({
+            'match_key': key,
+            'name_en': entry['name_en'],
+            'name_ar': entry['name_ar'],
+            'units': {u: round(q, 3) for u, q in entry['units'].items()},
+            'days_count': len(entry['days']),
+        })
+    items.sort(key=lambda x: (x['name_en'] or x['name_ar'] or '').lower())
+
+    return jsonify({'items': items, 'days_total': len({r['log_date'] for r in rows})})
 
 
 if __name__ == '__main__':
