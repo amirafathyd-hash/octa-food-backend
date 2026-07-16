@@ -963,6 +963,93 @@ def receipt_notifications_list():
     return jsonify({'sauce_receipts': _attach_sauce_short_codes(sauce_res.data or []), 'vegetable_receipts': veg_res.data or []})
 
 
+@app.route('/api/home-notifications', methods=['GET'])
+def home_notifications():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    notifications = []
+
+    try:
+        veg_res = execute_with_retry(
+            sb.table('upload_log')
+            .select('*')
+            .eq('file_type', 'vegetables_receipt')
+            .order('created_at', desc=True)
+            .limit(30),
+            max_attempts=2
+        )
+        for row in veg_res.data or []:
+            data = _read_upload_log_message(row)
+            rows = data.get('rows') if isinstance(data.get('rows'), list) else []
+            received_count = data.get('received_count') or len([r for r in rows if str(r.get('received_qty') or '').strip()])
+            item_count = data.get('item_count') or len(rows)
+            department = data.get('department_label') or data.get('department') or row.get('file_name') or 'استلام خضروات'
+            notifications.append({
+                'id': f"veg-{row.get('id')}",
+                'type': 'receipt',
+                'title': 'استلام خضروات جديد',
+                'body': f"{department} - {received_count}/{item_count} صنف",
+                'created_at': row.get('created_at'),
+                'url': 'receiving-archive',
+            })
+    except Exception:
+        app.logger.exception('home_notifications vegetables failed')
+
+    try:
+        sauce_res = execute_with_retry(
+            sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(30),
+            max_attempts=2
+        )
+        for row in _attach_sauce_short_codes(sauce_res.data or []):
+            status = row.get('status') or 'pending'
+            status_label = {
+                'pending': 'قيد الانتظار',
+                'submitted': 'تم الاستلام',
+                'archived': 'مؤرشف',
+            }.get(status, status)
+            code = row.get('short_code') or str(row.get('id') or '')[:8]
+            notifications.append({
+                'id': f"sauce-{row.get('id')}",
+                'type': 'receipt',
+                'title': 'استلام صوص',
+                'body': f"كود {code} - {status_label}",
+                'created_at': row.get('updated_at') or row.get('created_at'),
+                'url': 'sauce-notifications',
+            })
+    except Exception:
+        app.logger.exception('home_notifications sauce failed')
+
+    try:
+        login_res = execute_with_retry(
+            sb.table('upload_log')
+            .select('*')
+            .eq('file_type', 'system_login')
+            .order('created_at', desc=True)
+            .limit(30),
+            max_attempts=2
+        )
+        for row in login_res.data or []:
+            data = _read_upload_log_message(row)
+            username = data.get('username') or row.get('file_name') or 'مستخدم'
+            role = data.get('role') or ''
+            role_label = 'مدير النظام' if role == ADMIN_ROLE else 'مستخدم محدود' if role else 'مستخدم'
+            notifications.append({
+                'id': f"login-{row.get('id')}",
+                'type': 'login',
+                'title': 'تسجيل دخول على النظام',
+                'body': f"{username} - {role_label}",
+                'created_at': row.get('created_at'),
+                'url': 'admin',
+            })
+    except Exception:
+        app.logger.exception('home_notifications login failed')
+
+    notifications.sort(key=lambda item: item.get('created_at') or '', reverse=True)
+    return jsonify({'notifications': notifications[:40], 'count': len(notifications[:40])})
+
+
 @app.route('/api/receipt-notifications/vegetables/<log_id>', methods=['DELETE'])
 def receipt_notifications_vegetables_delete(log_id):
     _, err = _require_auth()
@@ -1601,6 +1688,7 @@ PUBLIC_AUTH_PATHS = (
     '/api/health',
 )
 PAGE_API_PREFIXES = {
+    'index': ('/api/home-notifications',),
     'admin': ('/api/users',),
     'customer-reviews': ('/api/customer-reviews',),
     'texts-dashboard': ('/api/texts',),
@@ -1844,6 +1932,13 @@ def login():
         return jsonify({'error': 'تم إيقاف صلاحية هذا المستخدم'}), 403
 
     token = _new_session(username)
+    _log('system_login', username, None, json.dumps({
+        'username': username,
+        'role': permissions.get('role', ADMIN_ROLE),
+        'ip': request.headers.get('X-Forwarded-For', request.remote_addr),
+        'user_agent': request.headers.get('User-Agent', ''),
+        'created_at': datetime.now(timezone.utc).isoformat(),
+    }, ensure_ascii=False))
     return jsonify({'token': token, 'username': username, 'role': permissions.get('role', ADMIN_ROLE), 'permissions': permissions})
 
 
