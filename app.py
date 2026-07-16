@@ -973,6 +973,194 @@ def receipt_notifications_vegetables_delete(log_id):
     return jsonify({'ok': True})
 
 
+def _employee_request_from_log(row):
+    data = _read_upload_log_message(row)
+    data.setdefault('id', row.get('id'))
+    data.setdefault('log_id', row.get('id'))
+    data.setdefault('created_at', row.get('created_at'))
+    data.setdefault('status', 'open')
+    return data
+
+
+def _file_to_data_url(file, max_mb=6):
+    if not file:
+        return ''
+    raw = file.read()
+    if len(raw) > max_mb * 1024 * 1024:
+        raise ValueError(f'الصورة أكبر من {max_mb} ميجا')
+    mime = file.mimetype or 'application/octet-stream'
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+@app.route('/api/employee-requests/names', methods=['GET'])
+def employee_requests_names():
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('upload_log')
+        .select('*')
+        .eq('file_type', 'employee_request')
+        .order('created_at', desc=True)
+        .limit(1000)
+    )
+    profiles = {}
+    for row in (res.data or []):
+        data = _employee_request_from_log(row)
+        key = (data.get('employee_phone') or data.get('employee_name') or '').strip()
+        if key and key not in profiles:
+            profiles[key] = {
+                'employee_name': data.get('employee_name') or '',
+                'employee_phone': data.get('employee_phone') or '',
+                'department': data.get('department') or '',
+            }
+    return jsonify({'profiles': list(profiles.values())})
+
+
+@app.route('/api/employee-requests', methods=['POST'])
+def employee_requests_create():
+    name = (request.form.get('employee_name') or '').strip()
+    phone = (request.form.get('employee_phone') or '').strip()
+    department = (request.form.get('department') or '').strip()
+    request_type = (request.form.get('request_type') or 'ملاحظة').strip()
+    priority = (request.form.get('priority') or 'عادي').strip()
+    title = (request.form.get('title') or '').strip()
+    message = (request.form.get('message') or '').strip()
+    if not name:
+        return jsonify({'error': 'اكتب اسمك'}), 400
+    if not title and not message:
+        return jsonify({'error': 'اكتب الطلب أو الملاحظة'}), 400
+    try:
+        photo_base64 = _file_to_data_url(request.files.get('photo')) if request.files.get('photo') else ''
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    record = {
+        'status': 'open',
+        'employee_name': name,
+        'employee_phone': phone,
+        'department': department,
+        'request_type': request_type,
+        'priority': priority,
+        'title': title or request_type,
+        'message': message,
+        'photo_base64': photo_base64,
+        'created_at': now_iso,
+        'created_date': datetime.now().strftime('%Y-%m-%d'),
+    }
+    sb = get_client()
+    res = execute_with_retry(sb.table('upload_log').insert({
+        'file_type': 'employee_request',
+        'file_name': name,
+        'item_date': record['created_date'],
+        'message': json.dumps(record, ensure_ascii=False),
+        'level': 'warning' if priority in ('عاجل', 'مهم') else 'info',
+    }))
+    row = (res.data or [{}])[0]
+    record['id'] = row.get('id')
+    record['log_id'] = row.get('id')
+    return jsonify({'ok': True, 'request': record})
+
+
+@app.route('/api/employee-requests/list', methods=['GET'])
+def employee_requests_list():
+    _, err = _require_auth()
+    if err:
+        return err
+    status = request.args.get('status', 'open')
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('upload_log')
+        .select('*')
+        .eq('file_type', 'employee_request')
+        .order('created_at', desc=True)
+        .limit(1000)
+    )
+    rows = [_employee_request_from_log(row) for row in (res.data or [])]
+    if status != 'all':
+        rows = [r for r in rows if (r.get('status') or 'open') == status]
+    return jsonify({'requests': rows})
+
+
+@app.route('/api/employee-requests/<int:request_id>/done', methods=['POST'])
+def employee_requests_done(request_id):
+    username, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('upload_log').select('*').eq('id', request_id).eq('file_type', 'employee_request').limit(1)
+    )
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'الطلب غير موجود'}), 404
+    record = _employee_request_from_log(rows[0])
+    record['status'] = 'done'
+    record['done_at'] = datetime.now(timezone.utc).isoformat()
+    record['done_by'] = username
+    record['action_note'] = payload.get('action_note') or ''
+    execute_with_retry(sb.table('upload_log').update({
+        'message': json.dumps(record, ensure_ascii=False),
+        'level': 'info',
+    }).eq('id', request_id))
+    return jsonify({'ok': True, 'request': record})
+
+
+@app.route('/api/live-feed', methods=['GET'])
+def live_feed():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    sauce = []
+    vegetables = []
+    weights = []
+    employee_requests = []
+    try:
+        sauce = execute_with_retry(
+            sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(50),
+            max_attempts=2
+        ).data or []
+        sauce = _attach_sauce_short_codes(sauce)
+    except Exception:
+        sauce = []
+    try:
+        vegetables = execute_with_retry(
+            sb.table('upload_log').select('*').eq('file_type', 'vegetables_receipt').order('created_at', desc=True).limit(50),
+            max_attempts=2
+        ).data or []
+    except Exception:
+        vegetables = []
+    try:
+        try:
+            weights = execute_with_retry(
+                sb.table('weight_log_entries').select('*').order('logged_at', desc=True).limit(50),
+                max_attempts=2
+            ).data or []
+        except Exception:
+            weights = execute_with_retry(
+                sb.table('weight_log_entries').select('*').order('created_at', desc=True).limit(50),
+                max_attempts=2
+            ).data or []
+    except Exception:
+        weights = []
+    try:
+        emp_rows = execute_with_retry(
+            sb.table('upload_log').select('*').eq('file_type', 'employee_request').order('created_at', desc=True).limit(80),
+            max_attempts=2
+        ).data or []
+        employee_requests = [_employee_request_from_log(row) for row in emp_rows]
+    except Exception:
+        employee_requests = []
+    return jsonify({
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'sauce_receipts': sauce,
+        'vegetable_receipts': vegetables,
+        'weight_logs': weights,
+        'employee_requests': employee_requests,
+    })
+
+
 CUSTOMER_REVIEWS_SEED_PATHS = [
     os.path.join(os.path.dirname(__file__), 'data', 'customer_reviews_seed.json'),
     os.path.join(os.path.dirname(__file__), 'customer_reviews_seed.json'),
