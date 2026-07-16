@@ -1593,6 +1593,37 @@ DEFAULT_REVIEW_USERNAMES = {
     for u in os.environ.get('CUSTOMER_REVIEWS_USERS', '').split(',')
     if u.strip()
 }
+PUBLIC_AUTH_PATHS = (
+    '/api/verify-session',
+    '/api/logout',
+    '/api/texts',
+    '/api/theme',
+    '/api/health',
+)
+PAGE_API_PREFIXES = {
+    'admin': ('/api/users',),
+    'customer-reviews': ('/api/customer-reviews',),
+    'texts-dashboard': ('/api/texts',),
+    'design-dashboard': ('/api/theme',),
+}
+
+
+def _normalize_permission_payload(payload):
+    role = REVIEW_ROLE if payload.get('role') == REVIEW_ROLE else ADMIN_ROLE
+    pages = payload.get('pages')
+    actions = payload.get('actions')
+    if not isinstance(pages, list):
+        pages = ['customer-reviews'] if role == REVIEW_ROLE else ['*']
+    if not isinstance(actions, list):
+        actions = ['view', 'create', 'edit'] if role == REVIEW_ROLE else ['*']
+    clean_pages = [str(p).strip() for p in pages if str(p).strip()]
+    clean_actions = [str(a).strip() for a in actions if str(a).strip()]
+    return {
+        'role': role,
+        'enabled': bool(payload.get('enabled', True)),
+        'pages': clean_pages or (['customer-reviews'] if role == REVIEW_ROLE else ['*']),
+        'actions': clean_actions or (['view'] if role == REVIEW_ROLE else ['*']),
+    }
 
 
 def _new_session(username):
@@ -1626,16 +1657,14 @@ def _require_auth():
     username = _check_session(token)
     if not username:
         return None, (jsonify({'error': 'جلسة غير صالحة، سجّل دخول تاني'}), 401)
-    if _role_for_username(username) == REVIEW_ROLE:
+    permissions = _permissions_for_username(username)
+    if not permissions.get('enabled', True):
+        return None, (jsonify({'error': 'تم إيقاف صلاحية هذا المستخدم'}), 403)
+    if not _api_allowed_for_user(username, request.path or ''):
+        return None, (jsonify({'error': 'هذا المستخدم لا يملك صلاحية تنفيذ هذا الإجراء'}), 403)
+    if permissions.get('role') == REVIEW_ROLE:
         path = request.path or ''
-        allowed_paths = (
-            '/api/customer-reviews',
-            '/api/verify-session',
-            '/api/logout',
-            '/api/texts',
-            '/api/theme',
-            '/api/health',
-        )
+        allowed_paths = ('/api/customer-reviews', *PUBLIC_AUTH_PATHS)
         if not any(path == allowed or path.startswith(allowed + '/') for allowed in allowed_paths):
             return None, (jsonify({'error': 'هذا المستخدم مخصص لإدارة تقييمات العملاء فقط'}), 403)
     return username, None
@@ -1666,10 +1695,50 @@ def _role_events():
     return roles
 
 
+def _permission_events():
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('upload_log')
+            .select('*')
+            .eq('file_type', 'user_permissions')
+            .order('created_at', desc=True)
+            .limit(1000)
+        )
+    except Exception:
+        return {}
+    permissions = {}
+    for row in (res.data or []):
+        try:
+            data = json.loads(row.get('message') or '{}')
+        except Exception:
+            data = {}
+        username = data.get('username') or row.get('file_name')
+        if username and username not in permissions:
+            permissions[username] = _normalize_permission_payload(data)
+    return permissions
+
+
 def _role_for_username(username):
     if username == DEFAULT_REVIEW_USERNAME or username in DEFAULT_REVIEW_USERNAMES:
         return REVIEW_ROLE
+    permissions = _permission_events().get(username)
+    if permissions:
+        return permissions.get('role', ADMIN_ROLE)
     return _role_events().get(username, ADMIN_ROLE)
+
+
+def _permissions_for_username(username):
+    forced_review = username == DEFAULT_REVIEW_USERNAME or username in DEFAULT_REVIEW_USERNAMES
+    stored = _permission_events().get(username)
+    if stored:
+        if forced_review:
+            stored = dict(stored)
+            stored['role'] = REVIEW_ROLE
+            stored['pages'] = ['customer-reviews']
+        return stored
+    role = REVIEW_ROLE if forced_review else _role_events().get(username, ADMIN_ROLE)
+    return _normalize_permission_payload({'username': username, 'role': role, 'enabled': True})
 
 
 def _set_user_role(username, role):
@@ -1678,6 +1747,28 @@ def _set_user_role(username, role):
         'username': username,
         'role': role,
     }, ensure_ascii=False), level='info')
+
+
+def _set_user_permissions(username, permissions):
+    payload = _normalize_permission_payload({'username': username, **(permissions or {})})
+    _log('user_permissions', username, None, json.dumps({
+        'username': username,
+        **payload,
+    }, ensure_ascii=False), level='info')
+    _set_user_role(username, payload['role'])
+
+
+def _api_allowed_for_user(username, path):
+    permissions = _permissions_for_username(username)
+    pages = permissions.get('pages') or []
+    if '*' in pages:
+        return True
+    if any(path == allowed or path.startswith(allowed + '/') for allowed in PUBLIC_AUTH_PATHS):
+        return True
+    for page, prefixes in PAGE_API_PREFIXES.items():
+        if any(path == prefix or path.startswith(prefix + '/') for prefix in prefixes):
+            return page in pages
+    return True
 
 
 def _ensure_default_review_user():
@@ -1693,6 +1784,13 @@ def _ensure_default_review_user():
             }))
         if _role_events().get(DEFAULT_REVIEW_USERNAME) != REVIEW_ROLE:
             _set_user_role(DEFAULT_REVIEW_USERNAME, REVIEW_ROLE)
+        if not _permission_events().get(DEFAULT_REVIEW_USERNAME):
+            _set_user_permissions(DEFAULT_REVIEW_USERNAME, {
+                'role': REVIEW_ROLE,
+                'enabled': True,
+                'pages': ['customer-reviews'],
+                'actions': ['view', 'create', 'edit'],
+            })
     except Exception:
         pass
 
@@ -1741,9 +1839,12 @@ def login():
     rows = res.data or []
     if not rows or not check_password_hash(rows[0]['password_hash'], password):
         return jsonify({'error': 'اليوزر نيم أو الباسورد غلط'}), 401
+    permissions = _permissions_for_username(username)
+    if not permissions.get('enabled', True):
+        return jsonify({'error': 'تم إيقاف صلاحية هذا المستخدم'}), 403
 
     token = _new_session(username)
-    return jsonify({'token': token, 'username': username, 'role': _role_for_username(username)})
+    return jsonify({'token': token, 'username': username, 'role': permissions.get('role', ADMIN_ROLE), 'permissions': permissions})
 
 
 @app.route('/api/verify-session', methods=['GET'])
@@ -1752,7 +1853,10 @@ def verify_session():
     username = _check_session(token)
     if not username:
         return jsonify({'valid': False}), 401
-    return jsonify({'valid': True, 'username': username, 'role': _role_for_username(username)})
+    permissions = _permissions_for_username(username)
+    if not permissions.get('enabled', True):
+        return jsonify({'valid': False, 'error': 'تم إيقاف صلاحية هذا المستخدم'}), 403
+    return jsonify({'valid': True, 'username': username, 'role': permissions.get('role', ADMIN_ROLE), 'permissions': permissions})
 
 
 @app.route('/api/logout', methods=['POST'])
@@ -1773,10 +1877,15 @@ def list_users():
     sb = get_client()
     res = execute_with_retry(sb.table('app_users').select('id, username, created_at').order('created_at'))
     roles = _role_events()
+    permissions_map = _permission_events()
     users = []
     for user in (res.data or []):
         row = dict(user)
-        row['role'] = REVIEW_ROLE if row.get('username') == DEFAULT_REVIEW_USERNAME else roles.get(row.get('username'), ADMIN_ROLE)
+        username = row.get('username')
+        permissions = _permissions_for_username(username)
+        row['role'] = REVIEW_ROLE if username == DEFAULT_REVIEW_USERNAME else permissions.get('role', roles.get(username, ADMIN_ROLE))
+        row['permissions'] = permissions_map.get(username, permissions)
+        row['enabled'] = row['permissions'].get('enabled', True)
         users.append(row)
     return jsonify({'users': users})
 
@@ -1790,6 +1899,8 @@ def create_user():
     username = (payload.get('username') or '').strip()
     password = payload.get('password') or ''
     role = payload.get('role') or REVIEW_ROLE
+    permissions = payload.get('permissions') or {}
+    permissions['role'] = role
     if not username or not password:
         return jsonify({'error': 'اليوزر نيم والباسورد مطلوبين'}), 400
     if len(password) < 4:
@@ -1802,7 +1913,7 @@ def create_user():
         execute_with_retry(sb.table('app_users').update({
             'password_hash': generate_password_hash(password),
         }).eq('id', existing_rows[0]['id']))
-        _set_user_role(username, role)
+        _set_user_permissions(username, permissions)
         return jsonify({'ok': True, 'updated': True})
 
     try:
@@ -1811,8 +1922,27 @@ def create_user():
         }))
     except Exception as e:
         return jsonify({'error': f'تعذر إضافة اليوزر (ممكن يكون موجود قبل كده): {e}'}), 400
-    _set_user_role(username, role)
+    _set_user_permissions(username, permissions)
     return jsonify({'ok': True})
+
+
+@app.route('/api/users/<int:user_id>/permissions', methods=['PUT'])
+def change_user_permissions(user_id):
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    sb = get_client()
+    found = execute_with_retry(sb.table('app_users').select('username').eq('id', user_id).limit(1))
+    rows = found.data or []
+    if not rows:
+        return jsonify({'error': 'المستخدم غير موجود'}), 404
+    username = rows[0].get('username')
+    if username == DEFAULT_REVIEW_USERNAME or username in DEFAULT_REVIEW_USERNAMES:
+        payload['role'] = REVIEW_ROLE
+        payload['pages'] = ['customer-reviews']
+    _set_user_permissions(username, payload)
+    return jsonify({'ok': True, 'permissions': _permissions_for_username(username)})
 
 
 @app.route('/api/users/<int:user_id>', methods=['DELETE'])
