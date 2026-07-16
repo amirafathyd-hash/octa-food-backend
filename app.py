@@ -3592,6 +3592,12 @@ def _detect_station_from_workbook(wb):
             return 'rice'  # شيت الأرز فيه أسماء شيتات عربية كتير
         if 'List of Meals' in sheets:
             return 'sauce'
+        sauce_markers = (
+            'tahina', 'sauce', 'pickle', 'sumak onion', 'coctail', 'cocktail',
+            'shabat', 'biryani yoghrt'
+        )
+        if any(any(marker in s.lower() for marker in sauce_markers) for s in sheets):
+            return 'sauce'
         # فطار أو حلويات — نفرق بينهم من اسم أول شيت بعد Ordering
         others = [s for s in wb.sheetnames if s != 'Ordering']
         if others:
