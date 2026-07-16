@@ -4613,5 +4613,116 @@ def veg_daily_log_aggregate():
     return jsonify({'items': items, 'days_total': len({r['log_date'] for r in rows})})
 
 
+@app.route('/api/veg-daily-log/aggregate/excel', methods=['GET'])
+def veg_daily_log_aggregate_excel():
+    _, err = _require_auth()
+    if err:
+        return err
+    date_from = request.args.get('from')
+    date_to = request.args.get('to')
+
+    sb = get_client()
+    q = sb.table('veg_daily_log').select('*')
+    if date_from:
+        q = q.gte('log_date', date_from)
+    if date_to:
+        q = q.lte('log_date', date_to)
+    res = execute_with_retry(q)
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'لا توجد بيانات للتجميع في هذا النطاق'}), 404
+
+    grouped = {}
+    for r in rows:
+        key = r['match_key']
+        if key not in grouped:
+            grouped[key] = {
+                'name_en': r.get('name_en') or '',
+                'name_ar': r.get('name_ar') or '',
+                'units': {},
+                'days': set(),
+            }
+        entry = grouped[key]
+        unit = r.get('unit') or ''
+        qty = float(r.get('qty') or 0)
+        if unit == 'GM':
+            unit = 'KG'
+            qty = qty / 1000.0
+        entry['units'][unit] = entry['units'].get(unit, 0) + qty
+        entry['days'].add(r.get('log_date'))
+        if not entry['name_en'] and r.get('name_en'):
+            entry['name_en'] = r.get('name_en')
+        if not entry['name_ar'] and r.get('name_ar'):
+            entry['name_ar'] = r.get('name_ar')
+
+    items = []
+    for key, entry in grouped.items():
+        items.append({
+            'name_en': entry['name_en'],
+            'name_ar': entry['name_ar'],
+            'units': {u: round(qty, 3) for u, qty in entry['units'].items()},
+            'days_count': len(entry['days']),
+        })
+    items.sort(key=lambda x: (x['name_en'] or x['name_ar'] or '').lower())
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Aggregate'
+    ws.sheet_view.rightToLeft = True
+
+    red_fill = PatternFill('solid', fgColor='EC1510')
+    brown_fill = PatternFill('solid', fgColor='3B221B')
+    light_fill = PatternFill('solid', fgColor='FFF6F5')
+    white_fill = PatternFill('solid', fgColor='FFFFFF')
+    thin = Side(style='thin', color='F1D8D6')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.merge_cells('A1:E1')
+    title_cell = ws['A1']
+    range_label = 'كل الأيام'
+    if date_from or date_to:
+        range_label = f'{date_from or "البداية"} إلى {date_to or "النهاية"}'
+    title_cell.value = f'التجميع الكلي للخضار اليومي — {range_label}'
+    title_cell.fill = brown_fill
+    title_cell.font = Font(color='FFFFFF', bold=True, size=16)
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 30
+
+    headers = ['#', 'الاسم بالإنجليزية', 'الاسم بالعربية', 'الإجمالي', 'عدد الأيام']
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=2, column=col, value=header)
+        cell.fill = red_fill
+        cell.font = Font(color='FFFFFF', bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = border
+
+    for idx, item in enumerate(items, 1):
+        excel_row = idx + 2
+        totals = ' | '.join(f'{qty:g} {unit}' for unit, qty in item['units'].items())
+        values = [idx, item['name_en'], item['name_ar'], totals, item['days_count']]
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row=excel_row, column=col, value=value)
+            cell.fill = light_fill if idx % 2 == 0 else white_fill
+            cell.border = border
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            if col in (2, 3):
+                cell.font = Font(bold=True)
+
+    widths = [8, 34, 34, 30, 14]
+    for col, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.freeze_panes = 'A3'
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name='Veg_Daily_Aggregate.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
 if __name__ == '__main__':
     app.run(debug=True, port=8000)
