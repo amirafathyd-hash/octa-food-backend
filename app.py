@@ -973,6 +973,88 @@ def receipt_notifications_vegetables_delete(log_id):
     return jsonify({'ok': True})
 
 
+@app.route('/api/home-notifications', methods=['GET'])
+def home_notifications():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    notifications = []
+
+    try:
+        sauce_res = execute_with_retry(
+            sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(20),
+            max_attempts=2
+        )
+        for row in _attach_sauce_short_codes(sauce_res.data or []):
+            rid = row.get('short_code') or row.get('id') or ''
+            days = row.get('days') or []
+            sent_days = 0
+            if isinstance(days, list):
+                sent_days = sum(1 for day in days if day.get('submitted_at') or day.get('submitted'))
+            notifications.append({
+                'id': f"sauce-{row.get('id')}",
+                'type': 'receipt',
+                'title': 'استلام صوص',
+                'body': f"{sent_days} أيام تم تسجيلها" if sent_days else 'رابط صوص جديد في انتظار الاستلام',
+                'url': f"receiving-archive?type=sauce",
+                'created_at': row.get('updated_at') or row.get('created_at'),
+            })
+    except Exception:
+        pass
+
+    try:
+        veg_res = execute_with_retry(
+            sb.table('upload_log')
+            .select('*')
+            .eq('file_type', 'vegetables_receipt')
+            .order('created_at', desc=True)
+            .limit(20),
+            max_attempts=2
+        )
+        for row in (veg_res.data or []):
+            data = _read_upload_log_message(row)
+            title = data.get('title') or data.get('department_label') or 'استلام خضروات'
+            status = data.get('status') or data.get('receipt_status') or ''
+            notifications.append({
+                'id': f"veg-{row.get('id')}",
+                'type': 'receipt',
+                'title': title,
+                'body': status or f"{data.get('received_count', 0)} صنف تم تسجيله",
+                'url': f"receiving-archive?type={data.get('department') or 'vegetables'}",
+                'created_at': row.get('created_at'),
+            })
+    except Exception:
+        pass
+
+    try:
+        emp_res = execute_with_retry(
+            sb.table('upload_log')
+            .select('*')
+            .eq('file_type', 'employee_request')
+            .order('created_at', desc=True)
+            .limit(20),
+            max_attempts=2
+        )
+        for row in (emp_res.data or []):
+            data = _employee_request_from_log(row)
+            if (data.get('status') or 'open') != 'open':
+                continue
+            notifications.append({
+                'id': f"employee-{row.get('id')}",
+                'type': 'request',
+                'title': data.get('title') or 'طلب عامل جديد',
+                'body': f"{data.get('employee_name') or data.get('name') or ''} - {data.get('department') or ''}".strip(' -'),
+                'url': 'employee-requests-dashboard',
+                'created_at': row.get('created_at'),
+            })
+    except Exception:
+        pass
+
+    notifications.sort(key=lambda item: item.get('created_at') or '', reverse=True)
+    return jsonify({'notifications': notifications[:30]})
+
+
 def _employee_request_from_log(row):
     data = _read_upload_log_message(row)
     data.setdefault('id', row.get('id'))
