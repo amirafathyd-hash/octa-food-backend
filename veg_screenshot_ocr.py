@@ -15,7 +15,11 @@ import base64
 import requests
 
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-ANTHROPIC_MODEL = os.environ.get('ANTHROPIC_VISION_MODEL', 'claude-3-5-sonnet-20241022')
+ANTHROPIC_MODEL = (
+    os.environ.get('ANTHROPIC_VISION_MODEL')
+    or os.environ.get('ANTHROPIC_MODEL')
+    or 'claude-sonnet-4-20250514'
+)
 ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
 
 VALID_UNITS = {'KG', 'GM', 'PACK', 'BOX', 'PC', 'TRAY', 'BTL', 'LTR'}
