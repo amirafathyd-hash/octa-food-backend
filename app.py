@@ -2493,9 +2493,93 @@ def veg_inventory_list_all():
         .order('entry_date', desc=True)
     )
     items_res = execute_with_retry(
-        sb.table('veg_inventory_items').select('item_name, category, unit').order('sort_order')
+        sb.table('veg_inventory_items').select('id, item_name, category, unit, sort_order').order('sort_order')
     )
     return jsonify({'entries': entries_res.data or [], 'items': items_res.data or []})
+
+
+@app.route('/api/veg-inventory/items/<int:item_id>', methods=['PUT'])
+def veg_inventory_item_update(item_id):
+    _, err = _require_auth()
+    if err:
+        return err
+
+    payload = request.get_json(silent=True) or {}
+    item_name = (payload.get('item_name') or '').strip()
+    category = (payload.get('category') or '').strip()
+    unit = (payload.get('unit') or '').strip()
+    if not item_name:
+        return jsonify({'error': 'اسم الصنف مطلوب'}), 400
+
+    sb = get_client()
+    current = execute_with_retry(
+        sb.table('veg_inventory_items').select('item_name').eq('id', item_id).limit(1)
+    )
+    if not current.data:
+        return jsonify({'error': 'الصنف غير موجود'}), 404
+
+    old_name = current.data[0].get('item_name')
+    try:
+        updated = execute_with_retry(
+            sb.table('veg_inventory_items')
+            .update({'item_name': item_name, 'category': category, 'unit': unit})
+            .eq('id', item_id)
+        )
+        if old_name and old_name != item_name:
+            execute_with_retry(
+                sb.table('veg_inventory_entries').update({'item_name': item_name}).eq('item_name', old_name)
+            )
+    except Exception as e:
+        return jsonify({'error': f'تعذر تعديل الصنف: {e}'}), 400
+
+    return jsonify({'ok': True, 'item': (updated.data or [{}])[0]})
+
+
+@app.route('/api/veg-inventory/items/<int:item_id>', methods=['DELETE'])
+def veg_inventory_item_delete(item_id):
+    _, err = _require_auth()
+    if err:
+        return err
+
+    sb = get_client()
+    current = execute_with_retry(
+        sb.table('veg_inventory_items').select('item_name').eq('id', item_id).limit(1)
+    )
+    if not current.data:
+        return jsonify({'error': 'الصنف غير موجود'}), 404
+    item_name = current.data[0].get('item_name')
+
+    try:
+        execute_with_retry(sb.table('veg_inventory_items').delete().eq('id', item_id))
+        if item_name:
+            execute_with_retry(sb.table('veg_inventory_entries').delete().eq('item_name', item_name))
+    except Exception as e:
+        return jsonify({'error': f'تعذر حذف الصنف: {e}'}), 400
+
+    return jsonify({'ok': True})
+
+
+@app.route('/api/veg-inventory/items/reorder', methods=['POST'])
+def veg_inventory_items_reorder():
+    _, err = _require_auth()
+    if err:
+        return err
+
+    payload = request.get_json(silent=True) or {}
+    item_ids = payload.get('item_ids') or []
+    if not isinstance(item_ids, list) or not item_ids:
+        return jsonify({'error': 'ترتيب الأصناف غير صالح'}), 400
+
+    sb = get_client()
+    try:
+        for idx, item_id in enumerate(item_ids):
+            execute_with_retry(
+                sb.table('veg_inventory_items').update({'sort_order': idx}).eq('id', item_id)
+            )
+    except Exception as e:
+        return jsonify({'error': f'تعذر حفظ الترتيب: {e}'}), 400
+
+    return jsonify({'ok': True})
 
 
 @app.route('/api/veg-inventory/entry/<int:entry_id>', methods=['PUT'])
