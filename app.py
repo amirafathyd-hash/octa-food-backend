@@ -963,6 +963,85 @@ def receipt_notifications_list():
     return jsonify({'sauce_receipts': sauce_res.data or [], 'vegetable_receipts': veg_res.data or []})
 
 
+@app.route('/api/home-notifications', methods=['GET'])
+def home_notifications():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    notifications = []
+
+    def push(item_id, kind, title, body, url, created_at=None, status='info'):
+        notifications.append({
+            'id': str(item_id),
+            'kind': kind,
+            'title': title,
+            'body': body,
+            'url': url,
+            'created_at': created_at or '',
+            'status': status,
+        })
+
+    try:
+        sauce_res = execute_with_retry(
+            sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(20),
+            max_attempts=2
+        )
+        for row in (sauce_res.data or []):
+            day = row.get('receipt_day') or row.get('day_name') or row.get('day') or ''
+            date = row.get('receipt_date') or row.get('date') or row.get('created_at') or ''
+            title = 'استلام الصوص'
+            body = 'تم تسجيل استلام صوص'
+            if day or date:
+                body = f"{day} {date}".strip()
+            push(f"sauce-{row.get('id')}", 'sauce_receipt', title, body, 'receiving-archive?type=sauce', row.get('created_at'), 'success')
+    except Exception as exc:
+        app.logger.warning('home_notifications sauce failed: %s', exc)
+
+    try:
+        veg_res = execute_with_retry(
+            sb.table('upload_log')
+            .select('*')
+            .eq('file_type', 'vegetables_receipt')
+            .order('created_at', desc=True)
+            .limit(20),
+            max_attempts=2
+        )
+        for row in (veg_res.data or []):
+            data = _read_upload_log_message(row)
+            receipt_type = data.get('receipt_type') or data.get('type') or data.get('kind') or ''
+            is_hot = 'hot' in str(receipt_type).lower() or 'ساخن' in str(receipt_type)
+            title = 'استلام خضار القسم الساخن' if is_hot else 'استلام خضار السلطة'
+            url_type = 'veg-hot' if is_hot else 'veg-salad'
+            count = data.get('rows_count') or data.get('items_count') or data.get('received_count') or ''
+            body = f"تم تسجيل {count} صنف" if count else 'تم تسجيل استلام خضروات'
+            push(f"veg-{row.get('id')}", 'vegetables_receipt', title, body, f'receiving-archive?type={url_type}', row.get('created_at'), 'success')
+    except Exception as exc:
+        app.logger.warning('home_notifications vegetables failed: %s', exc)
+
+    try:
+        emp_res = execute_with_retry(
+            sb.table('upload_log')
+            .select('*')
+            .eq('file_type', 'employee_request')
+            .order('created_at', desc=True)
+            .limit(20),
+            max_attempts=2
+        )
+        for row in (emp_res.data or []):
+            data = _read_upload_log_message(row)
+            if (data.get('status') or 'open') != 'open':
+                continue
+            title = data.get('title') or data.get('request_type') or 'طلب عامل'
+            body = data.get('employee_name') or data.get('department') or 'طلب جديد'
+            push(f"employee-{row.get('id')}", 'employee_request', title, body, 'employee-requests-dashboard', row.get('created_at'), 'warning')
+    except Exception as exc:
+        app.logger.warning('home_notifications employees failed: %s', exc)
+
+    notifications.sort(key=lambda item: item.get('created_at') or '', reverse=True)
+    return jsonify({'notifications': notifications[:40]})
+
+
 @app.route('/api/receipt-notifications/vegetables/<log_id>', methods=['DELETE'])
 def receipt_notifications_vegetables_delete(log_id):
     _, err = _require_auth()
