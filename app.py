@@ -12,7 +12,7 @@ import smtplib
 from email.message import EmailMessage
 import openpyxl
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from copy import copy
 from datetime import datetime, timedelta, timezone
@@ -4379,6 +4379,81 @@ def veg_daily_log_day_get(log_date):
         sb.table('veg_daily_log').select('*').eq('log_date', log_date).order('name_en')
     )
     return jsonify({'rows': res.data or []})
+
+
+@app.route('/api/veg-daily-log/day/<log_date>/excel', methods=['GET'])
+def veg_daily_log_day_excel(log_date):
+    """تحميل يوم محدد من سجل الخضار اليومي كملف Excel منسق."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('veg_daily_log').select('*').eq('log_date', log_date).order('name_en')
+    )
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'لا توجد بيانات لهذا اليوم'}), 404
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = str(log_date)[:31]
+    ws.sheet_view.rightToLeft = True
+
+    red_fill = PatternFill('solid', fgColor='EC1510')
+    light_fill = PatternFill('solid', fgColor='FFF1F0')
+    white_fill = PatternFill('solid', fgColor='FFFFFF')
+    thin = Side(style='thin', color='F1D8D6')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.merge_cells('A1:F1')
+    title_cell = ws['A1']
+    title_cell.value = f'سجل الخضار اليومي — {log_date}'
+    title_cell.fill = red_fill
+    title_cell.font = Font(color='FFFFFF', bold=True, size=16)
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 30
+
+    headers = ['#', 'التاريخ', 'الاسم الإنجليزي', 'الاسم العربي', 'الكمية', 'الوحدة']
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=2, column=col, value=header)
+        cell.fill = red_fill
+        cell.font = Font(color='FFFFFF', bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = border
+
+    for idx, row in enumerate(rows, 1):
+        excel_row = idx + 2
+        values = [
+            idx,
+            row.get('log_date') or log_date,
+            row.get('name_en') or '',
+            row.get('name_ar') or '',
+            float(row.get('qty') or 0),
+            row.get('unit') or '',
+        ]
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row=excel_row, column=col, value=value)
+            cell.fill = light_fill if idx % 2 == 0 else white_fill
+            cell.border = border
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            if col in (3, 4):
+                cell.font = Font(bold=True)
+
+    widths = [8, 16, 30, 30, 14, 12]
+    for col, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.freeze_panes = 'A3'
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=f'Veg_Daily_Log_{log_date}.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
 
 
 @app.route('/api/veg-daily-log/day/<log_date>', methods=['DELETE'])
