@@ -963,93 +963,6 @@ def receipt_notifications_list():
     return jsonify({'sauce_receipts': _attach_sauce_short_codes(sauce_res.data or []), 'vegetable_receipts': veg_res.data or []})
 
 
-@app.route('/api/home-notifications', methods=['GET'])
-def home_notifications():
-    _, err = _require_auth()
-    if err:
-        return err
-    sb = get_client()
-    notifications = []
-
-    try:
-        veg_res = execute_with_retry(
-            sb.table('upload_log')
-            .select('*')
-            .eq('file_type', 'vegetables_receipt')
-            .order('created_at', desc=True)
-            .limit(30),
-            max_attempts=2
-        )
-        for row in veg_res.data or []:
-            data = _read_upload_log_message(row)
-            rows = data.get('rows') if isinstance(data.get('rows'), list) else []
-            received_count = data.get('received_count') or len([r for r in rows if str(r.get('received_qty') or '').strip()])
-            item_count = data.get('item_count') or len(rows)
-            department = data.get('department_label') or data.get('department') or row.get('file_name') or 'استلام خضروات'
-            notifications.append({
-                'id': f"veg-{row.get('id')}",
-                'type': 'receipt',
-                'title': 'استلام خضروات جديد',
-                'body': f"{department} - {received_count}/{item_count} صنف",
-                'created_at': row.get('created_at'),
-                'url': 'receiving-archive',
-            })
-    except Exception:
-        app.logger.exception('home_notifications vegetables failed')
-
-    try:
-        sauce_res = execute_with_retry(
-            sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(30),
-            max_attempts=2
-        )
-        for row in _attach_sauce_short_codes(sauce_res.data or []):
-            status = row.get('status') or 'pending'
-            status_label = {
-                'pending': 'قيد الانتظار',
-                'submitted': 'تم الاستلام',
-                'archived': 'مؤرشف',
-            }.get(status, status)
-            code = row.get('short_code') or str(row.get('id') or '')[:8]
-            notifications.append({
-                'id': f"sauce-{row.get('id')}",
-                'type': 'receipt',
-                'title': 'استلام صوص',
-                'body': f"كود {code} - {status_label}",
-                'created_at': row.get('updated_at') or row.get('created_at'),
-                'url': 'sauce-notifications',
-            })
-    except Exception:
-        app.logger.exception('home_notifications sauce failed')
-
-    try:
-        login_res = execute_with_retry(
-            sb.table('upload_log')
-            .select('*')
-            .eq('file_type', 'system_login')
-            .order('created_at', desc=True)
-            .limit(30),
-            max_attempts=2
-        )
-        for row in login_res.data or []:
-            data = _read_upload_log_message(row)
-            username = data.get('username') or row.get('file_name') or 'مستخدم'
-            role = data.get('role') or ''
-            role_label = 'مدير النظام' if role == ADMIN_ROLE else 'مستخدم محدود' if role else 'مستخدم'
-            notifications.append({
-                'id': f"login-{row.get('id')}",
-                'type': 'login',
-                'title': 'تسجيل دخول على النظام',
-                'body': f"{username} - {role_label}",
-                'created_at': row.get('created_at'),
-                'url': 'admin',
-            })
-    except Exception:
-        app.logger.exception('home_notifications login failed')
-
-    notifications.sort(key=lambda item: item.get('created_at') or '', reverse=True)
-    return jsonify({'notifications': notifications[:40], 'count': len(notifications[:40])})
-
-
 @app.route('/api/receipt-notifications/vegetables/<log_id>', methods=['DELETE'])
 def receipt_notifications_vegetables_delete(log_id):
     _, err = _require_auth()
@@ -1680,38 +1593,6 @@ DEFAULT_REVIEW_USERNAMES = {
     for u in os.environ.get('CUSTOMER_REVIEWS_USERS', '').split(',')
     if u.strip()
 }
-PUBLIC_AUTH_PATHS = (
-    '/api/verify-session',
-    '/api/logout',
-    '/api/texts',
-    '/api/theme',
-    '/api/health',
-)
-PAGE_API_PREFIXES = {
-    'index': ('/api/home-notifications',),
-    'admin': ('/api/users',),
-    'customer-reviews': ('/api/customer-reviews',),
-    'texts-dashboard': ('/api/texts',),
-    'design-dashboard': ('/api/theme',),
-}
-
-
-def _normalize_permission_payload(payload):
-    role = REVIEW_ROLE if payload.get('role') == REVIEW_ROLE else ADMIN_ROLE
-    pages = payload.get('pages')
-    actions = payload.get('actions')
-    if not isinstance(pages, list):
-        pages = ['customer-reviews'] if role == REVIEW_ROLE else ['*']
-    if not isinstance(actions, list):
-        actions = ['view', 'create', 'edit'] if role == REVIEW_ROLE else ['*']
-    clean_pages = [str(p).strip() for p in pages if str(p).strip()]
-    clean_actions = [str(a).strip() for a in actions if str(a).strip()]
-    return {
-        'role': role,
-        'enabled': bool(payload.get('enabled', True)),
-        'pages': clean_pages or (['customer-reviews'] if role == REVIEW_ROLE else ['*']),
-        'actions': clean_actions or (['view'] if role == REVIEW_ROLE else ['*']),
-    }
 
 
 def _new_session(username):
@@ -1745,14 +1626,16 @@ def _require_auth():
     username = _check_session(token)
     if not username:
         return None, (jsonify({'error': 'جلسة غير صالحة، سجّل دخول تاني'}), 401)
-    permissions = _permissions_for_username(username)
-    if not permissions.get('enabled', True):
-        return None, (jsonify({'error': 'تم إيقاف صلاحية هذا المستخدم'}), 403)
-    if not _api_allowed_for_user(username, request.path or ''):
-        return None, (jsonify({'error': 'هذا المستخدم لا يملك صلاحية تنفيذ هذا الإجراء'}), 403)
-    if permissions.get('role') == REVIEW_ROLE:
+    if _role_for_username(username) == REVIEW_ROLE:
         path = request.path or ''
-        allowed_paths = ('/api/customer-reviews', *PUBLIC_AUTH_PATHS)
+        allowed_paths = (
+            '/api/customer-reviews',
+            '/api/verify-session',
+            '/api/logout',
+            '/api/texts',
+            '/api/theme',
+            '/api/health',
+        )
         if not any(path == allowed or path.startswith(allowed + '/') for allowed in allowed_paths):
             return None, (jsonify({'error': 'هذا المستخدم مخصص لإدارة تقييمات العملاء فقط'}), 403)
     return username, None
@@ -1783,50 +1666,10 @@ def _role_events():
     return roles
 
 
-def _permission_events():
-    sb = get_client()
-    try:
-        res = execute_with_retry(
-            sb.table('upload_log')
-            .select('*')
-            .eq('file_type', 'user_permissions')
-            .order('created_at', desc=True)
-            .limit(1000)
-        )
-    except Exception:
-        return {}
-    permissions = {}
-    for row in (res.data or []):
-        try:
-            data = json.loads(row.get('message') or '{}')
-        except Exception:
-            data = {}
-        username = data.get('username') or row.get('file_name')
-        if username and username not in permissions:
-            permissions[username] = _normalize_permission_payload(data)
-    return permissions
-
-
 def _role_for_username(username):
     if username == DEFAULT_REVIEW_USERNAME or username in DEFAULT_REVIEW_USERNAMES:
         return REVIEW_ROLE
-    permissions = _permission_events().get(username)
-    if permissions:
-        return permissions.get('role', ADMIN_ROLE)
     return _role_events().get(username, ADMIN_ROLE)
-
-
-def _permissions_for_username(username):
-    forced_review = username == DEFAULT_REVIEW_USERNAME or username in DEFAULT_REVIEW_USERNAMES
-    stored = _permission_events().get(username)
-    if stored:
-        if forced_review:
-            stored = dict(stored)
-            stored['role'] = REVIEW_ROLE
-            stored['pages'] = ['customer-reviews']
-        return stored
-    role = REVIEW_ROLE if forced_review else _role_events().get(username, ADMIN_ROLE)
-    return _normalize_permission_payload({'username': username, 'role': role, 'enabled': True})
 
 
 def _set_user_role(username, role):
@@ -1835,28 +1678,6 @@ def _set_user_role(username, role):
         'username': username,
         'role': role,
     }, ensure_ascii=False), level='info')
-
-
-def _set_user_permissions(username, permissions):
-    payload = _normalize_permission_payload({'username': username, **(permissions or {})})
-    _log('user_permissions', username, None, json.dumps({
-        'username': username,
-        **payload,
-    }, ensure_ascii=False), level='info')
-    _set_user_role(username, payload['role'])
-
-
-def _api_allowed_for_user(username, path):
-    permissions = _permissions_for_username(username)
-    pages = permissions.get('pages') or []
-    if '*' in pages:
-        return True
-    if any(path == allowed or path.startswith(allowed + '/') for allowed in PUBLIC_AUTH_PATHS):
-        return True
-    for page, prefixes in PAGE_API_PREFIXES.items():
-        if any(path == prefix or path.startswith(prefix + '/') for prefix in prefixes):
-            return page in pages
-    return True
 
 
 def _ensure_default_review_user():
@@ -1872,13 +1693,6 @@ def _ensure_default_review_user():
             }))
         if _role_events().get(DEFAULT_REVIEW_USERNAME) != REVIEW_ROLE:
             _set_user_role(DEFAULT_REVIEW_USERNAME, REVIEW_ROLE)
-        if not _permission_events().get(DEFAULT_REVIEW_USERNAME):
-            _set_user_permissions(DEFAULT_REVIEW_USERNAME, {
-                'role': REVIEW_ROLE,
-                'enabled': True,
-                'pages': ['customer-reviews'],
-                'actions': ['view', 'create', 'edit'],
-            })
     except Exception:
         pass
 
@@ -1927,19 +1741,9 @@ def login():
     rows = res.data or []
     if not rows or not check_password_hash(rows[0]['password_hash'], password):
         return jsonify({'error': 'اليوزر نيم أو الباسورد غلط'}), 401
-    permissions = _permissions_for_username(username)
-    if not permissions.get('enabled', True):
-        return jsonify({'error': 'تم إيقاف صلاحية هذا المستخدم'}), 403
 
     token = _new_session(username)
-    _log('system_login', username, None, json.dumps({
-        'username': username,
-        'role': permissions.get('role', ADMIN_ROLE),
-        'ip': request.headers.get('X-Forwarded-For', request.remote_addr),
-        'user_agent': request.headers.get('User-Agent', ''),
-        'created_at': datetime.now(timezone.utc).isoformat(),
-    }, ensure_ascii=False))
-    return jsonify({'token': token, 'username': username, 'role': permissions.get('role', ADMIN_ROLE), 'permissions': permissions})
+    return jsonify({'token': token, 'username': username, 'role': _role_for_username(username)})
 
 
 @app.route('/api/verify-session', methods=['GET'])
@@ -1948,10 +1752,7 @@ def verify_session():
     username = _check_session(token)
     if not username:
         return jsonify({'valid': False}), 401
-    permissions = _permissions_for_username(username)
-    if not permissions.get('enabled', True):
-        return jsonify({'valid': False, 'error': 'تم إيقاف صلاحية هذا المستخدم'}), 403
-    return jsonify({'valid': True, 'username': username, 'role': permissions.get('role', ADMIN_ROLE), 'permissions': permissions})
+    return jsonify({'valid': True, 'username': username, 'role': _role_for_username(username)})
 
 
 @app.route('/api/logout', methods=['POST'])
@@ -1972,15 +1773,10 @@ def list_users():
     sb = get_client()
     res = execute_with_retry(sb.table('app_users').select('id, username, created_at').order('created_at'))
     roles = _role_events()
-    permissions_map = _permission_events()
     users = []
     for user in (res.data or []):
         row = dict(user)
-        username = row.get('username')
-        permissions = _permissions_for_username(username)
-        row['role'] = REVIEW_ROLE if username == DEFAULT_REVIEW_USERNAME else permissions.get('role', roles.get(username, ADMIN_ROLE))
-        row['permissions'] = permissions_map.get(username, permissions)
-        row['enabled'] = row['permissions'].get('enabled', True)
+        row['role'] = REVIEW_ROLE if row.get('username') == DEFAULT_REVIEW_USERNAME else roles.get(row.get('username'), ADMIN_ROLE)
         users.append(row)
     return jsonify({'users': users})
 
@@ -1994,8 +1790,6 @@ def create_user():
     username = (payload.get('username') or '').strip()
     password = payload.get('password') or ''
     role = payload.get('role') or REVIEW_ROLE
-    permissions = payload.get('permissions') or {}
-    permissions['role'] = role
     if not username or not password:
         return jsonify({'error': 'اليوزر نيم والباسورد مطلوبين'}), 400
     if len(password) < 4:
@@ -2008,7 +1802,7 @@ def create_user():
         execute_with_retry(sb.table('app_users').update({
             'password_hash': generate_password_hash(password),
         }).eq('id', existing_rows[0]['id']))
-        _set_user_permissions(username, permissions)
+        _set_user_role(username, role)
         return jsonify({'ok': True, 'updated': True})
 
     try:
@@ -2017,27 +1811,8 @@ def create_user():
         }))
     except Exception as e:
         return jsonify({'error': f'تعذر إضافة اليوزر (ممكن يكون موجود قبل كده): {e}'}), 400
-    _set_user_permissions(username, permissions)
+    _set_user_role(username, role)
     return jsonify({'ok': True})
-
-
-@app.route('/api/users/<int:user_id>/permissions', methods=['PUT'])
-def change_user_permissions(user_id):
-    _, err = _require_auth()
-    if err:
-        return err
-    payload = request.get_json(silent=True) or {}
-    sb = get_client()
-    found = execute_with_retry(sb.table('app_users').select('username').eq('id', user_id).limit(1))
-    rows = found.data or []
-    if not rows:
-        return jsonify({'error': 'المستخدم غير موجود'}), 404
-    username = rows[0].get('username')
-    if username == DEFAULT_REVIEW_USERNAME or username in DEFAULT_REVIEW_USERNAMES:
-        payload['role'] = REVIEW_ROLE
-        payload['pages'] = ['customer-reviews']
-    _set_user_permissions(username, payload)
-    return jsonify({'ok': True, 'permissions': _permissions_for_username(username)})
 
 
 @app.route('/api/users/<int:user_id>', methods=['DELETE'])
@@ -2649,6 +2424,69 @@ def veg_inventory_items_add():
     return jsonify({'ok': True, 'item': (inserted.data or [row])[0]})
 
 
+def _read_veg_inventory_items_from_workbook(file_storage):
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        file_storage.save(tmp.name)
+        path = tmp.name
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        rows = []
+        seen = set()
+        for raw in ws.iter_rows(values_only=True):
+            name = str(raw[0] or '').strip() if raw and len(raw) > 0 else ''
+            unit = str(raw[1] or '').strip() if raw and len(raw) > 1 else ''
+            if not name:
+                continue
+            if name.lower() in {'item', 'items', 'الصنف', 'اسم الصنف', 'name'}:
+                continue
+            name = re.sub(r'\s+', ' ', name)
+            name = re.sub(r'\s*-\s*', ' - ', name).strip()
+            unit = re.sub(r'\s+', ' ', unit).strip() or 'gm'
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                'item_name': name,
+                'category': 'مخزون الخضار',
+                'unit': unit,
+                'sort_order': len(rows) + 1,
+            })
+        return rows
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+
+@app.route('/api/veg-inventory/items/import', methods=['POST'])
+def veg_inventory_items_import():
+    """استبدال قائمة أصناف مخزون الخضار بالكامل من ملف Excel.
+    الملف المتوقع: أول عمود اسم الصنف، ثاني عمود الوحدة. محفوظ للمدير فقط."""
+    _, err = _require_auth()
+    if err:
+        return err
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'error': 'ارفع ملف Excel أولاً'}), 400
+    try:
+        rows = _read_veg_inventory_items_from_workbook(file)
+    except Exception as e:
+        return jsonify({'error': f'تعذر قراءة ملف الأصناف: {e}'}), 400
+    if not rows:
+        return jsonify({'error': 'ملف الأصناف فارغ أو غير مفهوم'}), 400
+
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('veg_inventory_items').delete().neq('item_name', '__never_match__'))
+        execute_with_retry(sb.table('veg_inventory_items').insert(rows))
+    except Exception as e:
+        return jsonify({'error': f'تعذر تحديث قائمة الأصناف: {e}'}), 400
+    return jsonify({'ok': True, 'count': len(rows), 'items': rows})
+
+
 @app.route('/api/veg-inventory/today', methods=['GET'])
 def veg_inventory_today_get():
     """بترجّع قيم إنهاردة المحفوظة لحد دلوقتي (لو العامل رجع يعدّل) - للعامل
@@ -2718,93 +2556,9 @@ def veg_inventory_list_all():
         .order('entry_date', desc=True)
     )
     items_res = execute_with_retry(
-        sb.table('veg_inventory_items').select('id, item_name, category, unit, sort_order').order('sort_order')
+        sb.table('veg_inventory_items').select('item_name, category, unit').order('sort_order')
     )
     return jsonify({'entries': entries_res.data or [], 'items': items_res.data or []})
-
-
-@app.route('/api/veg-inventory/items/<int:item_id>', methods=['PUT'])
-def veg_inventory_item_update(item_id):
-    _, err = _require_auth()
-    if err:
-        return err
-
-    payload = request.get_json(silent=True) or {}
-    item_name = (payload.get('item_name') or '').strip()
-    category = (payload.get('category') or '').strip()
-    unit = (payload.get('unit') or '').strip()
-    if not item_name:
-        return jsonify({'error': 'اسم الصنف مطلوب'}), 400
-
-    sb = get_client()
-    current = execute_with_retry(
-        sb.table('veg_inventory_items').select('item_name').eq('id', item_id).limit(1)
-    )
-    if not current.data:
-        return jsonify({'error': 'الصنف غير موجود'}), 404
-
-    old_name = current.data[0].get('item_name')
-    try:
-        updated = execute_with_retry(
-            sb.table('veg_inventory_items')
-            .update({'item_name': item_name, 'category': category, 'unit': unit})
-            .eq('id', item_id)
-        )
-        if old_name and old_name != item_name:
-            execute_with_retry(
-                sb.table('veg_inventory_entries').update({'item_name': item_name}).eq('item_name', old_name)
-            )
-    except Exception as e:
-        return jsonify({'error': f'تعذر تعديل الصنف: {e}'}), 400
-
-    return jsonify({'ok': True, 'item': (updated.data or [{}])[0]})
-
-
-@app.route('/api/veg-inventory/items/<int:item_id>', methods=['DELETE'])
-def veg_inventory_item_delete(item_id):
-    _, err = _require_auth()
-    if err:
-        return err
-
-    sb = get_client()
-    current = execute_with_retry(
-        sb.table('veg_inventory_items').select('item_name').eq('id', item_id).limit(1)
-    )
-    if not current.data:
-        return jsonify({'error': 'الصنف غير موجود'}), 404
-    item_name = current.data[0].get('item_name')
-
-    try:
-        execute_with_retry(sb.table('veg_inventory_items').delete().eq('id', item_id))
-        if item_name:
-            execute_with_retry(sb.table('veg_inventory_entries').delete().eq('item_name', item_name))
-    except Exception as e:
-        return jsonify({'error': f'تعذر حذف الصنف: {e}'}), 400
-
-    return jsonify({'ok': True})
-
-
-@app.route('/api/veg-inventory/items/reorder', methods=['POST'])
-def veg_inventory_items_reorder():
-    _, err = _require_auth()
-    if err:
-        return err
-
-    payload = request.get_json(silent=True) or {}
-    item_ids = payload.get('item_ids') or []
-    if not isinstance(item_ids, list) or not item_ids:
-        return jsonify({'error': 'ترتيب الأصناف غير صالح'}), 400
-
-    sb = get_client()
-    try:
-        for idx, item_id in enumerate(item_ids):
-            execute_with_retry(
-                sb.table('veg_inventory_items').update({'sort_order': idx}).eq('id', item_id)
-            )
-    except Exception as e:
-        return jsonify({'error': f'تعذر حفظ الترتيب: {e}'}), 400
-
-    return jsonify({'ok': True})
 
 
 @app.route('/api/veg-inventory/entry/<int:entry_id>', methods=['PUT'])
@@ -4704,6 +4458,34 @@ def veg_daily_log_day_excel(log_date):
     if not rows:
         return jsonify({'error': 'لا توجد بيانات لهذا اليوم'}), 404
 
+    grouped = {}
+    for row in rows:
+        key = row.get('match_key') or _veg_log_match_key(row.get('name_en'), row.get('name_ar'))
+        unit = (row.get('unit') or 'UNKNOWN').strip().upper()
+        try:
+            qty = float(row.get('qty') or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if unit == 'GM':
+            unit = 'KG'
+            qty = qty / 1000.0
+        group_key = (key, unit)
+        if group_key not in grouped:
+            grouped[group_key] = {
+                'log_date': row.get('log_date') or log_date,
+                'name_en': row.get('name_en') or '',
+                'name_ar': row.get('name_ar') or '',
+                'qty': 0.0,
+                'unit': unit,
+            }
+        entry = grouped[group_key]
+        entry['qty'] += qty
+        if not entry['name_en'] and row.get('name_en'):
+            entry['name_en'] = row.get('name_en')
+        if not entry['name_ar'] and row.get('name_ar'):
+            entry['name_ar'] = row.get('name_ar')
+    rows = sorted(grouped.values(), key=lambda r: (r.get('name_en') or r.get('name_ar') or '').lower())
+
     wb = Workbook()
     ws = wb.active
     ws.title = str(log_date)[:31]
@@ -4738,7 +4520,7 @@ def veg_daily_log_day_excel(log_date):
             row.get('log_date') or log_date,
             row.get('name_en') or '',
             row.get('name_ar') or '',
-            float(row.get('qty') or 0),
+            round(float(row.get('qty') or 0), 3),
             row.get('unit') or '',
         ]
         for col, value in enumerate(values, 1):
@@ -4836,157 +4618,6 @@ def veg_daily_log_aggregate():
     items.sort(key=lambda x: (x['name_en'] or x['name_ar'] or '').lower())
 
     return jsonify({'items': items, 'days_total': len({r['log_date'] for r in rows})})
-
-
-@app.route('/api/veg-daily-log/aggregate/excel', methods=['GET'])
-def veg_daily_log_aggregate_excel():
-    _, err = _require_auth()
-    if err:
-        return err
-    date_from = request.args.get('from')
-    date_to = request.args.get('to')
-
-    sb = get_client()
-    q = sb.table('veg_daily_log').select('*')
-    if date_from:
-        q = q.gte('log_date', date_from)
-    if date_to:
-        q = q.lte('log_date', date_to)
-    res = execute_with_retry(q)
-    rows = res.data or []
-    if not rows:
-        return jsonify({'error': 'لا توجد بيانات للتجميع في هذا النطاق'}), 404
-
-    wb = Workbook()
-    red_fill = PatternFill('solid', fgColor='EC1510')
-    brown_fill = PatternFill('solid', fgColor='3B221B')
-    light_fill = PatternFill('solid', fgColor='FFF6F5')
-    white_fill = PatternFill('solid', fgColor='FFFFFF')
-    thin = Side(style='thin', color='F1D8D6')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    def build_aggregate_items(source_rows):
-        grouped = {}
-        for r in source_rows:
-            key = r.get('match_key') or r.get('name_en') or r.get('name_ar') or ''
-            if key not in grouped:
-                grouped[key] = {
-                    'name_en': r.get('name_en') or '',
-                    'name_ar': r.get('name_ar') or '',
-                    'units': {},
-                    'days': set(),
-                }
-            entry = grouped[key]
-            unit = r.get('unit') or ''
-            qty = float(r.get('qty') or 0)
-            if unit == 'GM':
-                unit = 'KG'
-                qty = qty / 1000.0
-            entry['units'][unit] = entry['units'].get(unit, 0) + qty
-            if r.get('log_date'):
-                entry['days'].add(r.get('log_date'))
-            if not entry['name_en'] and r.get('name_en'):
-                entry['name_en'] = r.get('name_en')
-            if not entry['name_ar'] and r.get('name_ar'):
-                entry['name_ar'] = r.get('name_ar')
-
-        items = []
-        for entry in grouped.values():
-            items.append({
-                'name_en': entry['name_en'],
-                'name_ar': entry['name_ar'],
-                'units': {u: round(qty, 3) for u, qty in entry['units'].items()},
-                'days_count': len(entry['days']),
-            })
-        items.sort(key=lambda x: (x['name_en'] or x['name_ar'] or '').lower())
-        return items
-
-    def safe_sheet_title(title, used_titles):
-        clean = re.sub(r'[\[\]\:\*\?\/\\]', '-', str(title or 'Day')).strip() or 'Day'
-        clean = clean[:31]
-        candidate = clean
-        counter = 2
-        while candidate in used_titles:
-            suffix = f' {counter}'
-            candidate = clean[:31 - len(suffix)] + suffix
-            counter += 1
-        used_titles.add(candidate)
-        return candidate
-
-    def write_aggregate_sheet(ws, title, items, day_label=None, include_days_count=True):
-        ws.sheet_view.rightToLeft = True
-        ws.merge_cells('A1:E1')
-        title_cell = ws['A1']
-        title_cell.value = title
-        title_cell.fill = brown_fill
-        title_cell.font = Font(color='FFFFFF', bold=True, size=16)
-        title_cell.alignment = Alignment(horizontal='center', vertical='center')
-        ws.row_dimensions[1].height = 30
-
-        last_header = 'عدد الأيام' if include_days_count else 'تاريخ اليوم'
-        headers = ['#', 'الاسم بالإنجليزية', 'الاسم بالعربية', 'الإجمالي', last_header]
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=2, column=col, value=header)
-            cell.fill = red_fill
-            cell.font = Font(color='FFFFFF', bold=True)
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-            cell.border = border
-
-        for idx, item in enumerate(items, 1):
-            excel_row = idx + 2
-            totals = ' | '.join(f'{qty:g} {unit}' for unit, qty in item['units'].items())
-            last_value = item['days_count'] if include_days_count else day_label
-            values = [idx, item['name_en'], item['name_ar'], totals, last_value]
-            for col, value in enumerate(values, 1):
-                cell = ws.cell(row=excel_row, column=col, value=value)
-                cell.fill = light_fill if idx % 2 == 0 else white_fill
-                cell.border = border
-                cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                if col in (2, 3):
-                    cell.font = Font(bold=True)
-
-        widths = [8, 34, 34, 30, 14]
-        for col, width in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(col)].width = width
-        ws.freeze_panes = 'A3'
-
-    used_sheet_titles = set()
-    days = sorted({r.get('log_date') for r in rows if r.get('log_date')})
-    if not days:
-        days = ['No Date']
-    for idx, day in enumerate(days):
-        day_rows = [r for r in rows if (r.get('log_date') or 'No Date') == day]
-        ws = wb.active if idx == 0 else wb.create_sheet()
-        ws.title = safe_sheet_title(day, used_sheet_titles)
-        write_aggregate_sheet(
-            ws,
-            f'التجميع الكلي للخضار اليومي — يوم {day}',
-            build_aggregate_items(day_rows),
-            day_label=day,
-            include_days_count=False,
-        )
-
-    range_label = 'كل الأيام'
-    if date_from or date_to:
-        range_label = f'{date_from or "البداية"} إلى {date_to or "النهاية"}'
-    summary_ws = wb.create_sheet(safe_sheet_title('All Days', used_sheet_titles))
-    write_aggregate_sheet(
-        summary_ws,
-        f'التجميع الكلي للخضار اليومي — {range_label}',
-        build_aggregate_items(rows),
-        include_days_count=True,
-    )
-    wb.active = 0
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return send_file(
-        buf,
-        as_attachment=True,
-        download_name='Veg_Daily_Aggregate.xlsx',
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    )
 
 
 if __name__ == '__main__':
