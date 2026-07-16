@@ -12,7 +12,7 @@ import smtplib
 from email.message import EmailMessage
 import openpyxl
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 from copy import copy
 from datetime import datetime, timedelta, timezone
@@ -70,7 +70,6 @@ from breakfast_ordering import (
     update_breakfast_counts_from_upload,
 )
 from xlsx_to_images import add_workbook_images_to_zip
-from veg_screenshot_ocr import extract_vegetable_rows
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 
@@ -199,8 +198,9 @@ def _attach_sauce_short_codes(receipts):
         if rid in ids and rid not in by_receipt:
             by_receipt[rid] = row.get('file_name')
     for receipt in receipts:
-        if by_receipt.get(receipt.get('id')):
-            receipt['short_code'] = by_receipt[receipt.get('id')]
+        code = by_receipt.get(receipt.get('id'))
+        if code:
+            receipt['short_code'] = code
     return receipts
 
 
@@ -960,7 +960,7 @@ def receipt_notifications_list():
         .order('created_at', desc=True)
         .limit(1000)
     )
-    return jsonify({'sauce_receipts': _attach_sauce_short_codes(sauce_res.data or []), 'vegetable_receipts': veg_res.data or []})
+    return jsonify({'sauce_receipts': sauce_res.data or [], 'vegetable_receipts': veg_res.data or []})
 
 
 @app.route('/api/receipt-notifications/vegetables/<log_id>', methods=['DELETE'])
@@ -971,270 +971,6 @@ def receipt_notifications_vegetables_delete(log_id):
     sb = get_client()
     execute_with_retry(sb.table('upload_log').delete().eq('id', log_id))
     return jsonify({'ok': True})
-
-
-@app.route('/api/home-notifications', methods=['GET'])
-def home_notifications():
-    _, err = _require_auth()
-    if err:
-        return err
-    sb = get_client()
-    notifications = []
-
-    try:
-        sauce_res = execute_with_retry(
-            sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(20),
-            max_attempts=2
-        )
-        for row in _attach_sauce_short_codes(sauce_res.data or []):
-            rid = row.get('short_code') or row.get('id') or ''
-            days = row.get('days') or []
-            sent_days = 0
-            if isinstance(days, list):
-                sent_days = sum(1 for day in days if day.get('submitted_at') or day.get('submitted'))
-            notifications.append({
-                'id': f"sauce-{row.get('id')}",
-                'type': 'receipt',
-                'title': 'استلام صوص',
-                'body': f"{sent_days} أيام تم تسجيلها" if sent_days else 'رابط صوص جديد في انتظار الاستلام',
-                'url': f"receiving-archive?type=sauce",
-                'created_at': row.get('updated_at') or row.get('created_at'),
-            })
-    except Exception:
-        pass
-
-    try:
-        veg_res = execute_with_retry(
-            sb.table('upload_log')
-            .select('*')
-            .eq('file_type', 'vegetables_receipt')
-            .order('created_at', desc=True)
-            .limit(20),
-            max_attempts=2
-        )
-        for row in (veg_res.data or []):
-            data = _read_upload_log_message(row)
-            title = data.get('title') or data.get('department_label') or 'استلام خضروات'
-            status = data.get('status') or data.get('receipt_status') or ''
-            notifications.append({
-                'id': f"veg-{row.get('id')}",
-                'type': 'receipt',
-                'title': title,
-                'body': status or f"{data.get('received_count', 0)} صنف تم تسجيله",
-                'url': f"receiving-archive?type={data.get('department') or 'vegetables'}",
-                'created_at': row.get('created_at'),
-            })
-    except Exception:
-        pass
-
-    try:
-        emp_res = execute_with_retry(
-            sb.table('upload_log')
-            .select('*')
-            .eq('file_type', 'employee_request')
-            .order('created_at', desc=True)
-            .limit(20),
-            max_attempts=2
-        )
-        for row in (emp_res.data or []):
-            data = _employee_request_from_log(row)
-            if (data.get('status') or 'open') != 'open':
-                continue
-            notifications.append({
-                'id': f"employee-{row.get('id')}",
-                'type': 'request',
-                'title': data.get('title') or 'طلب عامل جديد',
-                'body': f"{data.get('employee_name') or data.get('name') or ''} - {data.get('department') or ''}".strip(' -'),
-                'url': 'employee-requests-dashboard',
-                'created_at': row.get('created_at'),
-            })
-    except Exception:
-        pass
-
-    notifications.sort(key=lambda item: item.get('created_at') or '', reverse=True)
-    return jsonify({'notifications': notifications[:30]})
-
-
-def _employee_request_from_log(row):
-    data = _read_upload_log_message(row)
-    data.setdefault('id', row.get('id'))
-    data.setdefault('log_id', row.get('id'))
-    data.setdefault('created_at', row.get('created_at'))
-    data.setdefault('status', 'open')
-    return data
-
-
-def _file_to_data_url(file, max_mb=6):
-    if not file:
-        return ''
-    raw = file.read()
-    if len(raw) > max_mb * 1024 * 1024:
-        raise ValueError(f'الصورة أكبر من {max_mb} ميجا')
-    mime = file.mimetype or 'application/octet-stream'
-    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
-
-
-@app.route('/api/employee-requests/names', methods=['GET'])
-def employee_requests_names():
-    sb = get_client()
-    res = execute_with_retry(
-        sb.table('upload_log')
-        .select('*')
-        .eq('file_type', 'employee_request')
-        .order('created_at', desc=True)
-        .limit(1000)
-    )
-    profiles = {}
-    for row in (res.data or []):
-        data = _employee_request_from_log(row)
-        key = (data.get('employee_phone') or data.get('employee_name') or '').strip()
-        if key and key not in profiles:
-            profiles[key] = {
-                'employee_name': data.get('employee_name') or '',
-                'employee_phone': data.get('employee_phone') or '',
-                'department': data.get('department') or '',
-            }
-    return jsonify({'profiles': list(profiles.values())})
-
-
-@app.route('/api/employee-requests', methods=['POST'])
-def employee_requests_create():
-    name = (request.form.get('employee_name') or '').strip()
-    phone = (request.form.get('employee_phone') or '').strip()
-    department = (request.form.get('department') or '').strip()
-    request_type = (request.form.get('request_type') or 'ملاحظة').strip()
-    priority = (request.form.get('priority') or 'عادي').strip()
-    title = (request.form.get('title') or '').strip()
-    message = (request.form.get('message') or '').strip()
-    if not name:
-        return jsonify({'error': 'اكتب اسمك'}), 400
-    if not title and not message:
-        return jsonify({'error': 'اكتب الطلب أو الملاحظة'}), 400
-    try:
-        photo_base64 = _file_to_data_url(request.files.get('photo')) if request.files.get('photo') else ''
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-    record = {
-        'status': 'open',
-        'employee_name': name,
-        'employee_phone': phone,
-        'department': department,
-        'request_type': request_type,
-        'priority': priority,
-        'title': title or request_type,
-        'message': message,
-        'photo_base64': photo_base64,
-        'created_at': now_iso,
-        'created_date': datetime.now().strftime('%Y-%m-%d'),
-    }
-    sb = get_client()
-    res = execute_with_retry(sb.table('upload_log').insert({
-        'file_type': 'employee_request',
-        'file_name': name,
-        'item_date': record['created_date'],
-        'message': json.dumps(record, ensure_ascii=False),
-        'level': 'warning' if priority in ('عاجل', 'مهم') else 'info',
-    }))
-    row = (res.data or [{}])[0]
-    record['id'] = row.get('id')
-    record['log_id'] = row.get('id')
-    return jsonify({'ok': True, 'request': record})
-
-
-@app.route('/api/employee-requests/list', methods=['GET'])
-def employee_requests_list():
-    _, err = _require_auth()
-    if err:
-        return err
-    status = request.args.get('status', 'open')
-    sb = get_client()
-    res = execute_with_retry(
-        sb.table('upload_log')
-        .select('*')
-        .eq('file_type', 'employee_request')
-        .order('created_at', desc=True)
-        .limit(1000)
-    )
-    rows = [_employee_request_from_log(row) for row in (res.data or [])]
-    if status != 'all':
-        rows = [r for r in rows if (r.get('status') or 'open') == status]
-    return jsonify({'requests': rows})
-
-
-@app.route('/api/employee-requests/<int:request_id>/done', methods=['POST'])
-def employee_requests_done(request_id):
-    username, err = _require_auth()
-    if err:
-        return err
-    payload = request.get_json(silent=True) or {}
-    sb = get_client()
-    res = execute_with_retry(
-        sb.table('upload_log').select('*').eq('id', request_id).eq('file_type', 'employee_request').limit(1)
-    )
-    rows = res.data or []
-    if not rows:
-        return jsonify({'error': 'الطلب غير موجود'}), 404
-    record = _employee_request_from_log(rows[0])
-    record['status'] = 'done'
-    record['done_at'] = datetime.now(timezone.utc).isoformat()
-    record['done_by'] = username
-    record['action_note'] = payload.get('action_note') or ''
-    execute_with_retry(sb.table('upload_log').update({
-        'message': json.dumps(record, ensure_ascii=False),
-        'level': 'info',
-    }).eq('id', request_id))
-    return jsonify({'ok': True, 'request': record})
-
-
-@app.route('/api/live-feed', methods=['GET'])
-def live_feed():
-    _, err = _require_auth()
-    if err:
-        return err
-    sb = get_client()
-    sauce = []
-    vegetables = []
-    weights = []
-    employee_requests = []
-    try:
-        sauce = execute_with_retry(
-            sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(50),
-            max_attempts=2
-        ).data or []
-        sauce = _attach_sauce_short_codes(sauce)
-    except Exception:
-        sauce = []
-    try:
-        vegetables = execute_with_retry(
-            sb.table('upload_log').select('*').eq('file_type', 'vegetables_receipt').order('created_at', desc=True).limit(50),
-            max_attempts=2
-        ).data or []
-    except Exception:
-        vegetables = []
-    try:
-        weights = execute_with_retry(
-            sb.table('weight_log_entries').select('*').order('created_at', desc=True).limit(50),
-            max_attempts=2
-        ).data or []
-    except Exception:
-        weights = []
-    try:
-        emp_rows = execute_with_retry(
-            sb.table('upload_log').select('*').eq('file_type', 'employee_request').order('created_at', desc=True).limit(80),
-            max_attempts=2
-        ).data or []
-        employee_requests = [_employee_request_from_log(row) for row in emp_rows]
-    except Exception:
-        employee_requests = []
-    return jsonify({
-        'generated_at': datetime.now(timezone.utc).isoformat(),
-        'sauce_receipts': sauce,
-        'vegetable_receipts': vegetables,
-        'weight_logs': weights,
-        'employee_requests': employee_requests,
-    })
 
 
 CUSTOMER_REVIEWS_SEED_PATHS = [
@@ -1364,8 +1100,8 @@ def sauce_receipt_delete(receipt_id):
     _, err = _require_auth()
     if err:
         return err
-    receipt_id = _resolve_sauce_receipt_id(receipt_id)
     sb = get_client()
+    receipt_id = _resolve_sauce_receipt_id(receipt_id)
     execute_with_retry(sb.table('sauce_receipts').delete().eq('id', receipt_id))
     return jsonify({'ok': True})
 
@@ -1474,10 +1210,8 @@ def sauce_receipt_submit_day(receipt_id):
 
     # اربط الصفوف المُستلَمة بالبيانات الأصلية المتوقعة لنفس اليوم واحسب الزيادة/النقص
     expected_by_key = {}
-    source_day = {}
     for day in receipt['days']:
         if day.get('day') == day_name:
-            source_day = day
             for r in day.get('rows', []):
                 expected_by_key[r['key']] = r
             break
@@ -1516,8 +1250,6 @@ def sauce_receipt_submit_day(receipt_id):
         'rows': result_rows,
         'submitted_at': now_iso,
         'edit_count': prev_edit_count + 1,
-        'selected_day_name': source_day.get('selected_day_name') or '',
-        'selected_date': source_day.get('selected_date') or '',
     }
 
     execute_with_retry(sb.table('sauce_receipts').update({
@@ -1548,8 +1280,8 @@ def sauce_receipt_email_day(receipt_id):
     نسخة BCC كمان (سجلّ عندك) بدون ما تظهر للمستلم الأساسي."""
     if not (SMTP_USER and SMTP_PASSWORD):
         return jsonify({'error': 'إعدادات الإيميل لسه مش متظبطة على السيرفر (SMTP_USER / SMTP_PASSWORD)'}), 503
-    receipt_id = _resolve_sauce_receipt_id(receipt_id)
 
+    receipt_id = _resolve_sauce_receipt_id(receipt_id)
     day_name = request.form.get('day', '')
     to_email = (request.form.get('to') or '').strip()
     if not to_email or '@' not in to_email:
@@ -2504,69 +2236,6 @@ def veg_inventory_items_add():
         return jsonify({'error': f'تعذر إضافة الصنف: {e}'}), 400
 
     return jsonify({'ok': True, 'item': (inserted.data or [row])[0]})
-
-
-def _read_veg_inventory_items_from_workbook(file_storage):
-    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
-        file_storage.save(tmp.name)
-        path = tmp.name
-    try:
-        wb = openpyxl.load_workbook(path, data_only=True)
-        ws = wb.active
-        rows = []
-        seen = set()
-        for raw in ws.iter_rows(values_only=True):
-            name = str(raw[0] or '').strip() if raw and len(raw) > 0 else ''
-            unit = str(raw[1] or '').strip() if raw and len(raw) > 1 else ''
-            if not name:
-                continue
-            if name.lower() in {'item', 'items', 'الصنف', 'اسم الصنف', 'name'}:
-                continue
-            name = re.sub(r'\s+', ' ', name)
-            name = re.sub(r'\s*-\s*', ' - ', name).strip()
-            unit = re.sub(r'\s+', ' ', unit).strip() or 'gm'
-            key = name.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            rows.append({
-                'item_name': name,
-                'category': 'مخزون الخضار',
-                'unit': unit,
-                'sort_order': len(rows) + 1,
-            })
-        return rows
-    finally:
-        try:
-            os.unlink(path)
-        except Exception:
-            pass
-
-
-@app.route('/api/veg-inventory/items/import', methods=['POST'])
-def veg_inventory_items_import():
-    """استبدال قائمة أصناف مخزون الخضار بالكامل من ملف Excel.
-    الملف المتوقع: أول عمود اسم الصنف، ثاني عمود الوحدة. محفوظ للمدير فقط."""
-    _, err = _require_auth()
-    if err:
-        return err
-    file = request.files.get('file')
-    if not file:
-        return jsonify({'error': 'ارفع ملف Excel أولاً'}), 400
-    try:
-        rows = _read_veg_inventory_items_from_workbook(file)
-    except Exception as e:
-        return jsonify({'error': f'تعذر قراءة ملف الأصناف: {e}'}), 400
-    if not rows:
-        return jsonify({'error': 'ملف الأصناف فارغ أو غير مفهوم'}), 400
-
-    sb = get_client()
-    try:
-        execute_with_retry(sb.table('veg_inventory_items').delete().neq('item_name', '__never_match__'))
-        execute_with_retry(sb.table('veg_inventory_items').insert(rows))
-    except Exception as e:
-        return jsonify({'error': f'تعذر تحديث قائمة الأصناف: {e}'}), 400
-    return jsonify({'ok': True, 'count': len(rows), 'items': rows})
 
 
 @app.route('/api/veg-inventory/today', methods=['GET'])
@@ -3674,12 +3343,6 @@ def _detect_station_from_workbook(wb):
             return 'rice'  # شيت الأرز فيه أسماء شيتات عربية كتير
         if 'List of Meals' in sheets:
             return 'sauce'
-        sauce_markers = (
-            'tahina', 'sauce', 'pickle', 'sumak onion', 'coctail', 'cocktail',
-            'shabat', 'biryani yoghrt'
-        )
-        if any(any(marker in s.lower() for marker in sauce_markers) for s in sheets):
-            return 'sauce'
         # فطار أو حلويات — نفرق بينهم من اسم أول شيت بعد Ordering
         others = [s for s in wb.sheetnames if s != 'Ordering']
         if others:
@@ -3820,8 +3483,6 @@ def vegetables_receipt_data():
     if not uploaded:
         return jsonify({'error': 'مفيش ملفات مبعوتة'}), 400
     department, title = _vegetables_department_info(request.form.get('department') or request.args.get('department'))
-    selected_day_name = (request.form.get('selected_day_name') or request.args.get('selected_day_name') or '').strip()
-    selected_date = (request.form.get('selected_date') or request.args.get('selected_date') or '').strip()
     station_files, undetected = _detect_uploaded_station_files(uploaded)
     if not station_files:
         return jsonify({'error': f'مش قادر أحدد محطة أي ملف من اللي رفعتهم: {undetected}'}), 400
@@ -3840,8 +3501,6 @@ def vegetables_receipt_data():
             'title': title,
             'department': department,
             'department_label': title,
-            'selected_day_name': selected_day_name,
-            'selected_date': selected_date,
             'created_at': created_at,
             'rows': rows,
         }
@@ -3858,8 +3517,6 @@ def vegetables_receipt_data():
             'title': title,
             'department': department,
             'department_label': title,
-            'selected_day_name': selected_day_name,
-            'selected_date': selected_date,
             'created_at': created_at,
             'rows': rows,
         })
@@ -3890,8 +3547,6 @@ def vegetables_receipt_get(receipt_id):
         return jsonify({'error': 'بيانات رابط الخضروات غير مكتملة'}), 500
     payload.setdefault('department', 'general')
     payload.setdefault('department_label', payload.get('title') or 'استلام الخضروات')
-    payload.setdefault('selected_day_name', '')
-    payload.setdefault('selected_date', '')
     return jsonify(payload)
 
 
@@ -3948,8 +3603,6 @@ def vegetables_receipt_submit():
     receipt_id = (payload.get('receipt_id') or '').strip()
     department, department_label = _vegetables_department_info(payload.get('department'))
     link_created_at = payload.get('created_at') or None
-    selected_day_name = (payload.get('selected_day_name') or '').strip()
-    selected_date = (payload.get('selected_date') or '').strip()
     if receipt_id:
         try:
             sb = get_client()
@@ -3966,8 +3619,6 @@ def vegetables_receipt_submit():
                 link_payload = json.loads(found[0].get('message') or '{}')
                 department, department_label = _vegetables_department_info(link_payload.get('department'))
                 link_created_at = link_payload.get('created_at') or found[0].get('created_at')
-                selected_day_name = selected_day_name or (link_payload.get('selected_day_name') or '')
-                selected_date = selected_date or (link_payload.get('selected_date') or '')
         except Exception:
             pass
     received_count = sum(1 for r in rows if str(r.get('received') or '').strip())
@@ -3982,8 +3633,6 @@ def vegetables_receipt_submit():
         'department': department,
         'department_label': department_label,
         'link_created_at': link_created_at,
-        'selected_day_name': selected_day_name,
-        'selected_date': selected_date,
         'submitted_at': now_iso,
         'rows_count': len(rows),
         'received_count': received_count,
@@ -4400,312 +4049,6 @@ def smart_order_export_stations():
     except Exception as e:
         app.logger.exception('smart_order_export_stations failed')
         return jsonify({'error': f'حصل خطأ في التصدير: {e}'}), 500
-
-
-# ============================================================
-# سجل الخضار اليومي المجمّع (Veg Daily Log) — رفع صور سكرين شوت يومية،
-# استخراج الأصناف بالـ Claude Vision، مراجعة/تعديل قبل الحفظ، وتجميع كل
-# الأيام مع دمج الأصناف المتشابهة بدل ما تتكرر كصفوف منفصلة
-# ============================================================
-def _veg_log_match_key(name_en, name_ar):
-    """بيحوّل اسم الصنف لمفتاح موحّد للمقارنة/الدمج - بيشيل المسافات
-    الزيادة وعلامات الترقيم وفروق حالة الأحرف، عشان 'Garlic' و'garlic '
-    و'GARLIC' يتحسبوا نفس الصنف بالظبط."""
-    base = (name_en or name_ar or '').strip().lower()
-    base = re.sub(r'[^\w\u0600-\u06FF]+', ' ', base)
-    return re.sub(r'\s+', ' ', base).strip()
-
-
-@app.route('/api/veg-daily-log/extract', methods=['POST'])
-def veg_daily_log_extract():
-    """بتاخد صورة أو أكتر (multipart 'files')، وتستخرج منها صفوف الأصناف
-    بالـ Claude Vision - من غير ما تحفظ حاجة في قاعدة البيانات لسه، عشان
-    المستخدم يراجع/يعدّل الأسماء والكميات الأول قبل التأكيد النهائي."""
-    _, err = _require_auth()
-    if err:
-        return err
-    files = request.files.getlist('files')
-    if not files:
-        return jsonify({'error': 'مفيش صور مبعوتة'}), 400
-
-    all_rows = []
-    errors = []
-    for f in files:
-        suffix = os.path.splitext(f.filename or '')[1].lower() or '.jpg'
-        if suffix not in ('.jpg', '.jpeg', '.png'):
-            suffix = '.jpg'
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            f.save(tmp.name)
-            path = tmp.name
-        try:
-            rows = extract_vegetable_rows(path)
-            for r in rows:
-                r['source_file'] = f.filename
-                r['match_key'] = _veg_log_match_key(r['name_en'], r['name_ar'])
-            all_rows.extend(rows)
-        except Exception as e:
-            errors.append({'file': f.filename, 'error': str(e)})
-        finally:
-            os.unlink(path)
-
-    return jsonify({'rows': all_rows, 'errors': errors})
-
-
-@app.route('/api/veg-daily-log/save', methods=['POST'])
-def veg_daily_log_save():
-    """بتحفظ صفوف يوم معيّن (بعد المراجعة/التعديل من المستخدم) - بتمسح أي
-    صفوف قديمة لنفس اليوم الأول وتستبدلها بالجديدة، عشان لو المستخدم رجع
-    عدّل نفس اليوم تاني ميتكررش. Body: { "date": "2026-07-15", "rows": [...] }"""
-    username, err = _require_auth()
-    if err:
-        return err
-    payload = request.get_json(silent=True) or {}
-    log_date = (payload.get('date') or '').strip()
-    rows = payload.get('rows') or []
-    if not log_date:
-        return jsonify({'error': 'حدد التاريخ'}), 400
-    if not rows:
-        return jsonify({'error': 'مفيش صفوف للحفظ'}), 400
-
-    sb = get_client()
-    try:
-        execute_with_retry(sb.table('veg_daily_log').delete().eq('log_date', log_date))
-    except Exception as e:
-        return jsonify({'error': f'تعذر تنظيف بيانات اليوم القديمة: {e}'}), 400
-
-    db_rows = []
-    for r in rows:
-        name_en = (r.get('name_en') or '').strip()
-        name_ar = (r.get('name_ar') or '').strip()
-        if not name_en and not name_ar:
-            continue
-        try:
-            qty = float(r.get('qty') or 0)
-        except (TypeError, ValueError):
-            qty = 0
-        unit = (r.get('unit') or 'UNKNOWN').strip().upper()
-        db_rows.append({
-            'log_date': log_date, 'name_en': name_en, 'name_ar': name_ar,
-            'match_key': _veg_log_match_key(name_en, name_ar),
-            'qty': qty, 'unit': unit,
-            'source_note': r.get('source_file') or None,
-        })
-
-    if not db_rows:
-        return jsonify({'error': 'مفيش صفوف صحيحة للحفظ'}), 400
-
-    try:
-        execute_with_retry(sb.table('veg_daily_log').insert(db_rows))
-    except Exception as e:
-        return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
-    return jsonify({'ok': True, 'date': log_date, 'count': len(db_rows)})
-
-
-@app.route('/api/veg-daily-log/days', methods=['GET'])
-def veg_daily_log_days():
-    """قايمة كل الأيام المسجّلة مع عدد الأصناف في كل يوم - للداش بورد."""
-    _, err = _require_auth()
-    if err:
-        return err
-    sb = get_client()
-    res = execute_with_retry(
-        sb.table('veg_daily_log').select('log_date').order('log_date', desc=True)
-    )
-    counts = {}
-    for row in (res.data or []):
-        d = row['log_date']
-        counts[d] = counts.get(d, 0) + 1
-    days = [{'date': d, 'count': c} for d, c in sorted(counts.items(), reverse=True)]
-    return jsonify({'days': days})
-
-
-@app.route('/api/veg-daily-log/day/<log_date>', methods=['GET'])
-def veg_daily_log_day_get(log_date):
-    """بترجّع كل صفوف يوم معيّن بالتفصيل - لمراجعتها أو تعديلها تاني."""
-    _, err = _require_auth()
-    if err:
-        return err
-    sb = get_client()
-    res = execute_with_retry(
-        sb.table('veg_daily_log').select('*').eq('log_date', log_date).order('name_en')
-    )
-    return jsonify({'rows': res.data or []})
-
-
-@app.route('/api/veg-daily-log/day/<log_date>/excel', methods=['GET'])
-def veg_daily_log_day_excel(log_date):
-    """تحميل يوم محدد من سجل الخضار اليومي كملف Excel منسق."""
-    _, err = _require_auth()
-    if err:
-        return err
-    sb = get_client()
-    res = execute_with_retry(
-        sb.table('veg_daily_log').select('*').eq('log_date', log_date).order('name_en')
-    )
-    rows = res.data or []
-    if not rows:
-        return jsonify({'error': 'لا توجد بيانات لهذا اليوم'}), 404
-
-    grouped = {}
-    for row in rows:
-        key = row.get('match_key') or _veg_log_match_key(row.get('name_en'), row.get('name_ar'))
-        unit = (row.get('unit') or 'UNKNOWN').strip().upper()
-        try:
-            qty = float(row.get('qty') or 0)
-        except (TypeError, ValueError):
-            qty = 0
-        if unit == 'GM':
-            unit = 'KG'
-            qty = qty / 1000.0
-        group_key = (key, unit)
-        if group_key not in grouped:
-            grouped[group_key] = {
-                'log_date': row.get('log_date') or log_date,
-                'name_en': row.get('name_en') or '',
-                'name_ar': row.get('name_ar') or '',
-                'qty': 0.0,
-                'unit': unit,
-            }
-        entry = grouped[group_key]
-        entry['qty'] += qty
-        if not entry['name_en'] and row.get('name_en'):
-            entry['name_en'] = row.get('name_en')
-        if not entry['name_ar'] and row.get('name_ar'):
-            entry['name_ar'] = row.get('name_ar')
-    rows = sorted(grouped.values(), key=lambda r: (r.get('name_en') or r.get('name_ar') or '').lower())
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = str(log_date)[:31]
-    ws.sheet_view.rightToLeft = True
-
-    red_fill = PatternFill('solid', fgColor='EC1510')
-    light_fill = PatternFill('solid', fgColor='FFF1F0')
-    white_fill = PatternFill('solid', fgColor='FFFFFF')
-    thin = Side(style='thin', color='F1D8D6')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    ws.merge_cells('A1:F1')
-    title_cell = ws['A1']
-    title_cell.value = f'سجل الخضار اليومي — {log_date}'
-    title_cell.fill = red_fill
-    title_cell.font = Font(color='FFFFFF', bold=True, size=16)
-    title_cell.alignment = Alignment(horizontal='center', vertical='center')
-    ws.row_dimensions[1].height = 30
-
-    headers = ['#', 'التاريخ', 'الاسم الإنجليزي', 'الاسم العربي', 'الكمية', 'الوحدة']
-    for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=2, column=col, value=header)
-        cell.fill = red_fill
-        cell.font = Font(color='FFFFFF', bold=True)
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-        cell.border = border
-
-    for idx, row in enumerate(rows, 1):
-        excel_row = idx + 2
-        values = [
-            idx,
-            row.get('log_date') or log_date,
-            row.get('name_en') or '',
-            row.get('name_ar') or '',
-            round(float(row.get('qty') or 0), 3),
-            row.get('unit') or '',
-        ]
-        for col, value in enumerate(values, 1):
-            cell = ws.cell(row=excel_row, column=col, value=value)
-            cell.fill = light_fill if idx % 2 == 0 else white_fill
-            cell.border = border
-            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-            if col in (3, 4):
-                cell.font = Font(bold=True)
-
-    widths = [8, 16, 30, 30, 14, 12]
-    for col, width in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(col)].width = width
-    ws.freeze_panes = 'A3'
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return send_file(
-        buf,
-        as_attachment=True,
-        download_name=f'Veg_Daily_Log_{log_date}.xlsx',
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    )
-
-
-@app.route('/api/veg-daily-log/day/<log_date>', methods=['DELETE'])
-def veg_daily_log_day_delete(log_date):
-    """حذف يوم كامل - محمي بتسجيل الدخول."""
-    _, err = _require_auth()
-    if err:
-        return err
-    sb = get_client()
-    try:
-        execute_with_retry(sb.table('veg_daily_log').delete().eq('log_date', log_date))
-    except Exception as e:
-        return jsonify({'error': f'تعذر حذف اليوم: {e}'}), 400
-    return jsonify({'ok': True})
-
-
-@app.route('/api/veg-daily-log/aggregate', methods=['GET'])
-def veg_daily_log_aggregate():
-    """التجميع الكلي - كل الأصناف المتشابهة (بنفس match_key) بتتجمّع في صف
-    واحد، والكميات بتتجمع حسب الوحدة (الجرام بيتحوّل لكيلو تلقائي عشان
-    يتجمع مع الكيلو، والوحدات التانية زي Pack/Box بتفضل منفصلة لأنها مش
-    قابلة للمقارنة بالوزن). فلترة اختيارية بالتاريخ: ?from=YYYY-MM-DD&to=YYYY-MM-DD"""
-    _, err = _require_auth()
-    if err:
-        return err
-    date_from = request.args.get('from')
-    date_to = request.args.get('to')
-
-    sb = get_client()
-    q = sb.table('veg_daily_log').select('*')
-    if date_from:
-        q = q.gte('log_date', date_from)
-    if date_to:
-        q = q.lte('log_date', date_to)
-    res = execute_with_retry(q)
-    rows = res.data or []
-
-    # match_key -> { name_en, name_ar, units: {unit: total_qty}, days: set() }
-    grouped = {}
-    for r in rows:
-        key = r['match_key']
-        if key not in grouped:
-            grouped[key] = {
-                'name_en': r['name_en'], 'name_ar': r['name_ar'],
-                'units': {}, 'days': set(),
-            }
-        entry = grouped[key]
-        unit = r['unit']
-        qty = float(r['qty'] or 0)
-        # الجرام بيتحوّل لكيلو تلقائي عشان يتجمع صح مع باقي أوزان الكيلو
-        if unit == 'GM':
-            unit = 'KG'
-            qty = qty / 1000.0
-        entry['units'][unit] = entry['units'].get(unit, 0) + qty
-        entry['days'].add(r['log_date'])
-        # لو الاسم الإنجليزي فاضي في أول ظهور واتلقى بعدين، حدّثه
-        if not entry['name_en'] and r['name_en']:
-            entry['name_en'] = r['name_en']
-        if not entry['name_ar'] and r['name_ar']:
-            entry['name_ar'] = r['name_ar']
-
-    items = []
-    for key, entry in grouped.items():
-        items.append({
-            'match_key': key,
-            'name_en': entry['name_en'],
-            'name_ar': entry['name_ar'],
-            'units': {u: round(q, 3) for u, q in entry['units'].items()},
-            'days_count': len(entry['days']),
-        })
-    items.sort(key=lambda x: (x['name_en'] or x['name_ar'] or '').lower())
-
-    return jsonify({'items': items, 'days_total': len({r['log_date'] for r in rows})})
 
 
 if __name__ == '__main__':
