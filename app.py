@@ -916,6 +916,36 @@ def receipt_notifications_vegetables_delete(receipt_id):
     return jsonify({'ok': True})
 
 
+THEME_FIELDS = [
+    'primary_color', 'primary_dark_color', 'ink_color', 'muted_color', 'soft_color',
+    'line_color', 'ok_color', 'font_family', 'font_label', 'animations_enabled',
+    'dark_mode_enabled', 'dark_bg', 'dark_surface', 'dark_text', 'dark_muted', 'dark_border',
+]
+
+
+@app.route('/api/theme', methods=['GET', 'PUT'])
+def system_theme():
+    """بتقرا/تحفظ إعدادات تصميم النظام (ألوان + فونت) من جدول system_theme
+    (صف واحد بس، id=1) - صفحة design-dashboard.html بتستخدمه - محتاج تسجيل دخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+
+    if request.method == 'GET':
+        res = execute_with_retry(sb.table('system_theme').select('*').eq('id', 1))
+        rows = res.data or []
+        theme = {k: rows[0].get(k) for k in THEME_FIELDS} if rows else {}
+        return jsonify({'theme': theme})
+
+    payload = request.get_json(silent=True) or {}
+    update_data = {k: payload[k] for k in THEME_FIELDS if k in payload}
+    if not update_data:
+        return jsonify({'error': 'مفيش بيانات تصميم مبعوتة'}), 400
+    execute_with_retry(sb.table('system_theme').update(update_data).eq('id', 1))
+    return jsonify({'ok': True})
+
+
 def _next_month(month):
     y, m = map(int, month.split('-'))
     return f'{y+1}-01-01' if m == 12 else f'{y}-{m+1:02d}-01'
