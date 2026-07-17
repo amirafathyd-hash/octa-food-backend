@@ -1355,7 +1355,7 @@ def sauce_receipt_submit_day(receipt_id):
         return jsonify({'error': 'الرابط ده مش موجود أو انتهى'}), 404
     receipt = found[0]
 
-    # اربط الصفوف المُستلَمة بالبيانات الأصلية المتوقعة لنفس اليوم واحسب الزيادة/النقص
+    # اربط الصفوف المُستلَمة بالبيانات الأصلية المتوقعة لنفس اليوم واحسب فروق كل عمود وحده.
     expected_by_key = {}
     for day in receipt['days']:
         if day.get('day') == day_name:
@@ -1371,21 +1371,24 @@ def sauce_receipt_submit_day(receipt_id):
         tp_expected = exp.get('expectedTopping')
         pm_received = r.get('proteinMixReceived') or 0
         tp_received = r.get('toppingReceived') or 0
-        total_expected = pm_expected + (tp_expected or 0)
-        total_received = pm_received + (tp_received or 0)
-        excess = max(0, total_received - total_expected)
-        shortage = max(0, total_expected - total_received)
+        pm_diff = pm_received - pm_expected
+        tp_diff = (tp_received - (tp_expected or 0)) if tp_expected is not None else None
+        total_diff = pm_diff + (tp_diff or 0)
+        excess = max(0, total_diff)
+        shortage = max(0, -total_diff)
         result_rows.append({
             'key': r.get('key'), 'title': exp.get('title', ''),
             'proteinMixReceived': pm_received, 'toppingReceived': tp_received,
+            'proteinMixDiff': pm_diff, 'toppingDiff': tp_diff,
             'excess': excess, 'shortage': shortage,
         })
-        if excess or shortage:
-            summary_lines.append(
-                f"{exp.get('title','')}: "
-                f"{'زيادة ' + str(round(excess,2)) if excess else ''}"
-                f"{'نقص ' + str(round(shortage,2)) if shortage else ''}"
-            )
+        diff_parts = []
+        if pm_diff:
+            diff_parts.append(f"Protein + Mix {'+' if pm_diff > 0 else ''}{round(pm_diff, 2)}")
+        if tp_diff:
+            diff_parts.append(f"Topping {'+' if tp_diff > 0 else ''}{round(tp_diff, 2)}")
+        if diff_parts:
+            summary_lines.append(f"{exp.get('title','')}: " + ' / '.join(diff_parts))
 
     now_iso = datetime.now(timezone.utc).isoformat()
     submitted_days = receipt.get('submitted_days') or {}
@@ -1506,21 +1509,24 @@ def sauce_receipt_submit(receipt_id):
             tp_expected = exp.get('expectedTopping')
             pm_received = r.get('proteinMixReceived') or 0
             tp_received = r.get('toppingReceived') or 0
-            total_expected = pm_expected + (tp_expected or 0)
-            total_received = pm_received + (tp_received or 0)
-            excess = max(0, total_received - total_expected)
-            shortage = max(0, total_expected - total_received)
+            pm_diff = pm_received - pm_expected
+            tp_diff = (tp_received - (tp_expected or 0)) if tp_expected is not None else None
+            total_diff = pm_diff + (tp_diff or 0)
+            excess = max(0, total_diff)
+            shortage = max(0, -total_diff)
             result_rows.append({
                 'key': r.get('key'), 'title': exp.get('title', ''),
                 'proteinMixReceived': pm_received, 'toppingReceived': tp_received,
+                'proteinMixDiff': pm_diff, 'toppingDiff': tp_diff,
                 'excess': excess, 'shortage': shortage,
             })
-            if excess or shortage:
-                summary_lines.append(
-                    f"{day_name} - {exp.get('title','')}: "
-                    f"{'زيادة ' + str(round(excess,2)) if excess else ''}"
-                    f"{'نقص ' + str(round(shortage,2)) if shortage else ''}"
-                )
+            diff_parts = []
+            if pm_diff:
+                diff_parts.append(f"Protein + Mix {'+' if pm_diff > 0 else ''}{round(pm_diff, 2)}")
+            if tp_diff:
+                diff_parts.append(f"Topping {'+' if tp_diff > 0 else ''}{round(tp_diff, 2)}")
+            if diff_parts:
+                summary_lines.append(f"{day_name} - {exp.get('title','')}: " + ' / '.join(diff_parts))
         result_days.append({'day': day_name, 'rows': result_rows})
 
     execute_with_retry(sb.table('sauce_receipts').update({
