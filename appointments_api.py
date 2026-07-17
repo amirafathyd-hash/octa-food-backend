@@ -50,6 +50,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 VAPID_PRIVATE_KEY_PATH = os.environ.get("VAPID_PRIVATE_KEY_PATH", "private_key.pem")
 VAPID_CLAIM_EMAIL = os.environ.get("VAPID_CLAIM_EMAIL", "mailto:admin@example.com")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY) if SUPABASE_URL and SUPABASE_SERVICE_KEY else None
 
@@ -123,6 +124,8 @@ def delete_note(note_id):
 
 @appointments_bp.route("/api/push/subscribe", methods=["POST"])
 def push_subscribe():
+    if supabase is None:
+        return jsonify({"error": "Supabase not configured"}), 500
     body = request.get_json(force=True)
     sub = body.get("subscription")
     if not sub or not sub.get("endpoint"):
@@ -137,6 +140,11 @@ def push_subscribe():
     # upsert بالـ endpoint عشان ميتكررش نفس الاشتراك
     supabase.table("push_subscriptions").upsert(row, on_conflict="endpoint").execute()
     return jsonify({"ok": True})
+
+
+@appointments_bp.route("/api/push/public-key", methods=["GET"])
+def push_public_key():
+    return jsonify({"publicKey": VAPID_PUBLIC_KEY})
 
 
 def _send_push(subscription_row, title, body_text, url):
@@ -156,6 +164,20 @@ def _send_push(subscription_row, title, body_text, url):
         if ex.response is not None and ex.response.status_code in (404, 410):
             supabase.table("push_subscriptions").delete().eq("endpoint", subscription_row["endpoint"]).execute()
         return False
+
+
+def send_push_to_all(title, body_text, url="index"):
+    if supabase is None:
+        return 0
+    try:
+        subs = supabase.table("push_subscriptions").select("*").execute().data or []
+    except Exception:
+        return 0
+    sent_count = 0
+    for sub in subs:
+        if _send_push(sub, title, body_text, url):
+            sent_count += 1
+    return sent_count
 
 
 # ===================== فحص وإرسال التذكيرات (تستدعيها الـ cron job كل دقيقة) =====================
