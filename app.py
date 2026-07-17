@@ -1866,7 +1866,12 @@ WEIGHT_LOG_VIEW_TOKEN = 'vXq3mZpLd8RwTfKhY0eB2nCsUj7A'
 
 
 def _weight_log_worker_ok():
-    token = request.values.get('token') or (request.form.get('token') if request.method != 'GET' else None)
+    payload = request.get_json(silent=True) if request.is_json else {}
+    token = (
+        request.values.get('token')
+        or (request.form.get('token') if request.method != 'GET' else None)
+        or ((payload or {}).get('token') if isinstance(payload, dict) else None)
+    )
     return bool(token) and token == WEIGHT_LOG_TOKEN
 
 
@@ -2061,6 +2066,67 @@ def weight_log_photo(entry_id):
     except Exception:
         return jsonify({'error': 'الصورة تالفة'}), 400
     return send_file(io.BytesIO(img_bytes), mimetype=mime)
+
+
+@app.route('/api/weight-log/photos/today', methods=['GET'])
+def weight_log_today_photos_zip():
+    """ينزّل كل صور الميزان الخاصة بيوم محدد من شاشة الإدارة فقط."""
+    _, err = _require_auth()
+    if err:
+        return err
+    from datetime import time
+    day_key = (request.args.get('day') or '').strip()
+    if day_key:
+        try:
+            day_date = datetime.fromisoformat(day_key).date()
+        except ValueError:
+            return jsonify({'error': 'تاريخ اليوم غير صحيح'}), 400
+        day_start_ksa = datetime.combine(day_date, time.min, tzinfo=timezone.utc)
+        day_end_ksa = day_start_ksa + timedelta(days=1)
+        start_iso = (day_start_ksa - timedelta(hours=3)).isoformat()
+        end_iso = (day_end_ksa - timedelta(hours=3)).isoformat()
+        today = day_key
+    else:
+        start_iso, end_iso = _weight_log_day_bounds_utc()
+        today = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime('%Y-%m-%d')
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('weight_log_entries').select('id, item_name, photo_base64, logged_at')
+        .gte('logged_at', start_iso).lt('logged_at', end_iso)
+        .eq('deleted', False)
+        .order('logged_at', desc=True)
+    )
+    rows = [r for r in (res.data or []) if r.get('photo_base64')]
+    if not rows:
+        return jsonify({'error': 'لا توجد صور محفوظة لهذا اليوم'}), 404
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for idx, row in enumerate(rows, 1):
+            data_url = row.get('photo_base64') or ''
+            try:
+                header, b64data = data_url.split(',', 1)
+                mime = header.split(':')[1].split(';')[0]
+                img_bytes = base64.b64decode(b64data)
+            except Exception:
+                continue
+            ext = 'jpg'
+            if 'png' in mime:
+                ext = 'png'
+            elif 'webp' in mime:
+                ext = 'webp'
+            item_name = re.sub(r'[^\w\u0600-\u06FF\- ]+', '', str(row.get('item_name') or 'item')).strip() or 'item'
+            item_name = re.sub(r'\s+', '-', item_name)[:48]
+            stamp = str(row.get('logged_at') or '').replace(':', '-').replace('.', '-')
+            zf.writestr(f'{idx:03d}-{item_name}-{stamp}.{ext}', img_bytes)
+
+    zip_buf.seek(0)
+    return send_file(
+        zip_buf,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=f'Weight_Log_Photos_{today}.zip',
+    )
 
 
 # ============================================================
