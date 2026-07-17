@@ -925,11 +925,8 @@ THEME_FIELDS = [
 
 @app.route('/api/theme', methods=['GET', 'PUT'])
 def system_theme():
-    """بتقرا/تحفظ إعدادات تصميم النظام (ألوان + فونت) من جدول system_theme
-    (صف واحد بس، id=1) - صفحة design-dashboard.html بتستخدمه - محتاج تسجيل دخول."""
-    _, err = _require_auth()
-    if err:
-        return err
+    """GET مفتوح للكل (بيتقري تلقائي في كل صفحة في الموقع عند التحميل) - PUT
+    بس هو اللي محتاج تسجيل دخول (صفحة design-dashboard.html)."""
     sb = get_client()
 
     if request.method == 'GET':
@@ -938,11 +935,42 @@ def system_theme():
         theme = {k: rows[0].get(k) for k in THEME_FIELDS} if rows else {}
         return jsonify({'theme': theme})
 
+    _, err = _require_auth()
+    if err:
+        return err
     payload = request.get_json(silent=True) or {}
     update_data = {k: payload[k] for k in THEME_FIELDS if k in payload}
     if not update_data:
         return jsonify({'error': 'مفيش بيانات تصميم مبعوتة'}), 400
     execute_with_retry(sb.table('system_theme').update(update_data).eq('id', 1))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/texts', methods=['GET', 'PUT'])
+def system_texts():
+    """GET مفتوح للكل (بيتقري في كل صفحة عند التحميل زي الثيم بالظبط) -
+    PUT محتاج تسجيل دخول (صفحة texts-dashboard.html) وبياخد {texts: {key: value}}
+    ويعمل upsert bulk على جدول system_texts."""
+    sb = get_client()
+
+    if request.method == 'GET':
+        res = execute_with_retry(sb.table('system_texts').select('key,value'))
+        texts = {row['key']: row['value'] for row in (res.data or [])}
+        return jsonify({'texts': texts})
+
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    texts = payload.get('texts') or {}
+    if not texts:
+        return jsonify({'error': 'مفيش نصوص مبعوتة'}), 400
+    rows = [{
+        'key': k, 'value': str(v),
+        'page': k.split('.')[0] if '.' in k else 'general',
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+    } for k, v in texts.items()]
+    execute_with_retry(sb.table('system_texts').upsert(rows, on_conflict='key'))
     return jsonify({'ok': True})
 
 
