@@ -2204,6 +2204,46 @@ def weight_log_items_all():
     return jsonify({'items': res.data or []})
 
 
+@app.route('/api/weight-log/items/replace', methods=['POST'])
+def weight_log_items_replace_day():
+    """استبدال أصناف يوم كامل من شاشة الإدارة: يمسح القديم لهذا اليوم فقط ثم
+    يضيف الأصناف الجديدة بنفس ترتيب ملف Excel."""
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    day = (payload.get('day') or '').strip()
+    raw_items = payload.get('items') or []
+    if not day or not isinstance(raw_items, list):
+        return jsonify({'error': 'محتاج اليوم وقائمة الأصناف'}), 400
+
+    clean_items = []
+    seen = set()
+    for value in raw_items:
+        name = re.sub(r'\s+', ' ', str(value or '')).strip()
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        clean_items.append(name)
+
+    if not clean_items:
+        return jsonify({'error': 'قائمة الأصناف الجديدة فاضية'}), 400
+
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('weight_log_items').delete().eq('day_name', day))
+        rows = [
+            {'day_name': day, 'item_name': item_name, 'sort_order': idx}
+            for idx, item_name in enumerate(clean_items)
+        ]
+        res = execute_with_retry(sb.table('weight_log_items').insert(rows))
+    except Exception as e:
+        return jsonify({'error': f'تعذر استبدال أصناف اليوم: {e}'}), 400
+
+    return jsonify({'ok': True, 'count': len(clean_items), 'items': res.data or []})
+
+
 @app.route('/api/weight-log/items/<int:item_id>', methods=['PUT'])
 def weight_log_items_update(item_id):
     """تعديل اسم صنف - محمي بتسجيل الدخول."""
