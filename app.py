@@ -1918,7 +1918,16 @@ def update_theme():
         if base_updates:
             execute_with_retry(sb.table('system_theme').update({**base_updates, 'updated_at': updates['updated_at'], 'updated_by': username}).eq('id', 1))
         if extra_updates:
-            rows = [{'key': f'theme.{k}', 'value': json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else str(v)} for k, v in extra_updates.items()]
+            rows = [
+                {
+                    'key': f'theme.{k}',
+                    'value': json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else str(v),
+                    'page': 'theme',
+                    'updated_at': updates['updated_at'],
+                    'updated_by': username,
+                }
+                for k, v in extra_updates.items()
+            ]
             execute_with_retry(sb.table('system_texts').upsert(rows, on_conflict='key'))
     except Exception as e:
         return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
