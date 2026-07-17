@@ -1850,6 +1850,11 @@ DEFAULT_THEME = {
     'animations_enabled': True, 'dark_mode_enabled': False,
     'dark_bg': '#17120F', 'dark_surface': '#241C17', 'dark_text': '#F2EAE4',
     'dark_muted': '#B3A79C', 'dark_border': '#3B2E25',
+    'page_bg_start': '#EC1510', 'page_bg_mid': '#2B1D17', 'page_bg_end': '#6B2418',
+    'surface_color': '#FFFDF8', 'panel_color': '#1C1512', 'button_text_color': '#FFFFFF',
+    'heading_color': '#FFF7EF', 'accent_color': '#FFC15A', 'grid_line_color': 'rgba(255,255,255,.025)',
+    'page_radius': 22, 'card_radius': 18, 'control_radius': 10, 'shadow_strength': 18,
+    'background_style': 'warm',
 }
 
 
@@ -1860,6 +1865,23 @@ def get_theme():
     res = execute_with_retry(sb.table('system_theme').select('*').eq('id', 1))
     rows = res.data or []
     theme = {**DEFAULT_THEME, **(rows[0] if rows else {})}
+    try:
+        extra_res = execute_with_retry(sb.table('system_texts').select('key, value').like('key', 'theme.%'))
+        for row in (extra_res.data or []):
+            key = str(row.get('key') or '').replace('theme.', '', 1)
+            if key in DEFAULT_THEME:
+                raw = row.get('value')
+                if isinstance(DEFAULT_THEME[key], bool):
+                    theme[key] = str(raw).lower() in ('1', 'true', 'yes', 'on')
+                elif isinstance(DEFAULT_THEME[key], int):
+                    try:
+                        theme[key] = int(raw)
+                    except Exception:
+                        theme[key] = DEFAULT_THEME[key]
+                else:
+                    theme[key] = raw
+    except Exception:
+        pass
     return jsonify({'theme': theme})
 
 
@@ -1878,8 +1900,19 @@ def update_theme():
     updates['updated_by'] = username
 
     sb = get_client()
+    base_keys = {
+        'primary_color', 'primary_dark_color', 'ink_color', 'muted_color', 'soft_color', 'line_color', 'ok_color',
+        'font_family', 'font_label', 'animations_enabled', 'dark_mode_enabled',
+        'dark_bg', 'dark_surface', 'dark_text', 'dark_muted', 'dark_border',
+    }
+    base_updates = {k: v for k, v in updates.items() if k in base_keys}
+    extra_updates = {k: v for k, v in updates.items() if k not in base_keys}
     try:
-        execute_with_retry(sb.table('system_theme').update(updates).eq('id', 1))
+        if base_updates:
+            execute_with_retry(sb.table('system_theme').update({**base_updates, 'updated_at': updates['updated_at'], 'updated_by': username}).eq('id', 1))
+        if extra_updates:
+            rows = [{'key': f'theme.{k}', 'value': str(v)} for k, v in extra_updates.items()]
+            execute_with_retry(sb.table('system_texts').upsert(rows, on_conflict='key'))
     except Exception as e:
         return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
     return jsonify({'ok': True})
