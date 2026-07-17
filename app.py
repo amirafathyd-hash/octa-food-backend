@@ -719,6 +719,205 @@ def sauce_receipt_submit(receipt_id):
     return jsonify({'ok': True, 'has_discrepancy': bool(summary_lines)})
 
 
+# ===================== استلام الخضروات (vegetables-receipt) =====================
+# فيتشر كان ناقص بالكامل (مفيش جدول ولا route ليه) - الأسطر دي بتضيفه من غير
+# ما تلمس أي حاجة تانية. بيستخدم نفس منطق استخراج صفوف الخضروات المستخدم أصلاً
+# في زرار "Vegetables" (_read_vegetable_rows) بدل ما يتكرر الكود.
+
+def _department_station_key(department):
+    return 'salads' if department == 'salad' else 'hot'
+
+
+def _department_label(department):
+    if department == 'hot':
+        return 'خضار القسم الساخن'
+    if department == 'salad':
+        return 'خضار قسم السلطة'
+    return 'استلام الخضروات'
+
+
+@app.route('/api/vegetables-receipt-data', methods=['POST'])
+def vegetables_receipt_data():
+    """بتاخد نفس الملفات اللي بتترفع لـ auto-detect-stations، تدور على ملف
+    المحطة المطلوبة (hot/salad) وتستخرج صفوف الخضروات منه، وتعمل رابط استلام
+    جديد (زي رابط استلام الصوص بالظبط) - محتاج تسجيل دخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+
+    uploaded = request.files.getlist('files')
+    if not uploaded:
+        return jsonify({'error': 'مفيش ملفات مبعوتة'}), 400
+    department = (request.form.get('department') or 'general').strip()
+    selected_day_name = (request.form.get('selected_day_name') or '').strip()
+    selected_date = (request.form.get('selected_date') or '').strip()
+    station_key = _department_station_key(department)
+
+    target_file = None
+    for f in uploaded:
+        try:
+            wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
+            kind = _detect_station_from_workbook(wb)
+            wb.close()
+            f.seek(0)
+        except Exception:
+            continue
+        if kind == station_key or (kind == 'tokyo' and station_key == 'hot'):
+            target_file = f
+            break
+    if target_file is None:
+        return jsonify({'error': 'مقدرش ألاقي ملف مناسب للقسم ده في الملفات اللي رفعتها'}), 400
+
+    rows = _read_vegetable_rows(target_file, STATION_SHEET_MAP[station_key])
+    if not rows:
+        return jsonify({'error': 'مفيش أصناف خضروات في الملف ده'}), 400
+
+    department_label = _department_label(department)
+    sb = get_client()
+    res = execute_with_retry(sb.table('vegetable_receipts').insert({
+        'department': department, 'department_label': department_label,
+        'selected_day_name': selected_day_name, 'selected_date': selected_date,
+        'rows': rows, 'status': 'pending',
+    }))
+    row = res.data[0]
+    return jsonify({
+        'id': row['id'], 'department': department, 'department_label': department_label,
+        'selected_day_name': selected_day_name, 'selected_date': selected_date,
+    })
+
+
+@app.route('/api/vegetables-receipt/<receipt_id>', methods=['GET'])
+def vegetables_receipt_get(receipt_id):
+    """اندبوينت عام (من غير تسجيل دخول) - صفحة veg-hot.html/veg-salad.html
+    بتناديه عشان تعرض للعامل الأصناف المطلوبة يملأ كمياتها المستلمة."""
+    sb = get_client()
+    res = execute_with_retry(sb.table('vegetable_receipts').select('*').eq('id', receipt_id))
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'الرابط ده مش موجود أو انتهى'}), 404
+    receipt = rows[0]
+    return jsonify({
+        'id': receipt['id'], 'department': receipt['department'],
+        'department_label': receipt.get('department_label'),
+        'selected_day_name': receipt.get('selected_day_name'),
+        'selected_date': receipt.get('selected_date'),
+        'created_at': receipt['created_at'],
+        'rows': receipt.get('rows') or [],
+    })
+
+
+@app.route('/api/vegetables-receipt/submit', methods=['POST'])
+def vegetables_receipt_submit():
+    """بتسجّل الكميات المستلمة والتوقيعات اللي العامل دخلها - عام (من غير تسجيل دخول)،
+    زي submit-day بتاع الصوص بالظبط."""
+    payload = request.get_json(silent=True) or {}
+    receipt_id = payload.get('receipt_id')
+    rows = payload.get('rows') or []
+    if not receipt_id:
+        return jsonify({'error': 'رقم رابط الاستلام ناقص'}), 400
+    if not rows:
+        return jsonify({'error': 'مفيش بيانات استلام مبعوتة'}), 400
+
+    sb = get_client()
+    execute_with_retry(sb.table('vegetable_receipts').update({
+        'submitted_rows': rows, 'status': 'submitted',
+        'submitted_at': datetime.now(timezone.utc).isoformat(),
+    }).eq('id', receipt_id))
+    received_count = sum(1 for r in rows if str(r.get('received') or '').strip())
+    return jsonify({'ok': True, 'rows_count': len(rows), 'received_count': received_count})
+
+
+@app.route('/api/vegetables-receipt/email', methods=['POST'])
+def vegetables_receipt_email():
+    """بتبعت نفس ملف الإكسيل اللي بينزل عند العامل كمرفق بالإيميل - نفس منطق
+    email-day بتاع الصوص بالظبط."""
+    if not (SMTP_USER and SMTP_PASSWORD):
+        return jsonify({'error': 'إعدادات الإيميل لسه مش متظبطة على السيرفر (SMTP_USER / SMTP_PASSWORD)'}), 503
+    to_email = (request.form.get('to') or '').strip()
+    if not to_email or '@' not in to_email:
+        return jsonify({'error': 'إيميل المستلم ناقص أو غير صحيح'}), 400
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'error': 'مفيش ملف مرفوع'}), 400
+    file_bytes = file.read()
+
+    msg = EmailMessage()
+    msg['Subject'] = f'استلام خضروات — {datetime.now().strftime("%Y-%m-%d")}'
+    msg['From'] = SMTP_USER
+    msg['To'] = to_email
+    if NOTIFY_EMAIL_TO:
+        msg['Bcc'] = NOTIFY_EMAIL_TO
+    msg.set_content('تم استلام خضروات. الملف المرفق فيه كل التفاصيل.')
+    msg.add_attachment(
+        file_bytes, maintype='application',
+        subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        filename=file.filename or 'vegetables-receipt.xlsx',
+    )
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+    except Exception as e:
+        app.logger.exception('vegetables_receipt_email failed to send email')
+        return jsonify({'error': f'تعذر إرسال الإيميل: {e}'}), 500
+    return jsonify({'ok': True})
+
+
+@app.route('/api/receipt-notifications/list', methods=['GET'])
+def receipt_notifications_list():
+    """بترجّع قايمة إشعارات الاستلام (صوص + خضروات) مع بعض - صفحة
+    receiving-archive.html بتناديها عشان تعرض الأرشيف الموحّد - محتاج تسجيل دخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    sauce_res = execute_with_retry(
+        sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(100)
+    )
+    veg_res = execute_with_retry(
+        sb.table('vegetable_receipts').select('*').order('created_at', desc=True).limit(100)
+    )
+    vegetable_receipts = []
+    for row in (veg_res.data or []):
+        ordered_rows = row.get('rows') or []
+        submitted_rows = row.get('submitted_rows')
+        display_rows = submitted_rows if submitted_rows else ordered_rows
+        received_count = sum(1 for r in (submitted_rows or []) if str(r.get('received') or '').strip())
+        total_required = sum(
+            float(r.get('daily_order') or 0) for r in ordered_rows
+            if isinstance(r.get('daily_order'), (int, float))
+        )
+        total_received = sum(
+            float(r.get('received') or 0) for r in (submitted_rows or [])
+            if str(r.get('received') or '').strip()
+        )
+        message = {
+            'department': row.get('department'), 'department_label': row.get('department_label'),
+            'selected_day_name': row.get('selected_day_name'), 'selected_date': row.get('selected_date'),
+            'receipt_id': row['id'], 'rows_count': len(ordered_rows), 'received_count': received_count,
+            'total_required': total_required, 'total_received': total_received,
+            'status': row.get('status'), 'submitted_at': row.get('submitted_at'), 'rows': display_rows,
+        }
+        vegetable_receipts.append({
+            'id': row['id'], 'created_at': row['created_at'],
+            'file_name': row.get('department_label'),
+            'message': json.dumps(message, ensure_ascii=False),
+        })
+    return jsonify({'sauce_receipts': sauce_res.data or [], 'vegetable_receipts': vegetable_receipts})
+
+
+@app.route('/api/receipt-notifications/vegetables/<receipt_id>', methods=['DELETE'])
+def receipt_notifications_vegetables_delete(receipt_id):
+    """حذف رابط استلام خضروات بالكامل - محتاج تسجيل دخول."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    execute_with_retry(sb.table('vegetable_receipts').delete().eq('id', receipt_id))
+    return jsonify({'ok': True})
+
+
 def _next_month(month):
     y, m = map(int, month.split('-'))
     return f'{y+1}-01-01' if m == 12 else f'{y}-{m+1:02d}-01'
