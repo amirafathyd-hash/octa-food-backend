@@ -1591,7 +1591,11 @@ def _require_auth():
     username = _check_session(token)
     if not username:
         return None, (jsonify({'error': 'جلسة غير صالحة، سجّل دخول تاني'}), 401)
-    if _role_for_username(username) == REVIEW_ROLE:
+    permissions = _permissions_for_username(username)
+    if permissions.get('enabled') is False:
+        return None, (jsonify({'error': 'تم إيقاف هذا الحساب من الأدمن'}), 403)
+    role = permissions.get('role') or ADMIN_ROLE
+    if role == REVIEW_ROLE:
         path = request.path or ''
         allowed_paths = (
             '/api/customer-reviews',
@@ -1611,8 +1615,8 @@ def _default_permissions_for_role(role):
     مالوش صلاحيات تفصيلية متسجلة."""
     if role == REVIEW_ROLE:
         return {'role': REVIEW_ROLE, 'enabled': True, 'pages': ['customer-reviews'],
-                'actions': ['view', 'create', 'edit']}
-    return {'role': ADMIN_ROLE, 'enabled': True, 'pages': ['*'], 'actions': ['*']}
+                'actions': ['view', 'create', 'edit'], 'label': ''}
+    return {'role': ADMIN_ROLE, 'enabled': True, 'pages': ['*'], 'actions': ['*'], 'label': ''}
 
 
 def _user_meta_events():
@@ -1846,6 +1850,7 @@ def update_user_permissions(user_id):
         'enabled': payload.get('enabled') is not False,
         'pages': payload.get('pages') if isinstance(payload.get('pages'), list) and payload.get('pages') else ['index'],
         'actions': payload.get('actions') if isinstance(payload.get('actions'), list) and payload.get('actions') else ['view'],
+        'label': (payload.get('label') or '').strip()[:120],
     }
     _set_user_role(username, role, permissions)
     return jsonify({'ok': True, 'permissions': {**permissions, 'role': REVIEW_ROLE if role == REVIEW_ROLE else ADMIN_ROLE}})
