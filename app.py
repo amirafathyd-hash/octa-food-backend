@@ -1855,6 +1855,7 @@ DEFAULT_THEME = {
     'heading_color': '#FFF7EF', 'accent_color': '#FFC15A', 'grid_line_color': 'rgba(255,255,255,.025)',
     'page_radius': 22, 'card_radius': 18, 'control_radius': 10, 'shadow_strength': 18,
     'background_style': 'warm',
+    'theme_apply_pages': ['*'], 'theme_immersive_pages': ['index'],
 }
 
 
@@ -1878,6 +1879,12 @@ def get_theme():
                         theme[key] = int(raw)
                     except Exception:
                         theme[key] = DEFAULT_THEME[key]
+                elif isinstance(DEFAULT_THEME[key], list):
+                    try:
+                        parsed = json.loads(raw)
+                        theme[key] = parsed if isinstance(parsed, list) else DEFAULT_THEME[key]
+                    except Exception:
+                        theme[key] = [p.strip() for p in str(raw).split(',') if p.strip()] or DEFAULT_THEME[key]
                 else:
                     theme[key] = raw
     except Exception:
@@ -1906,12 +1913,12 @@ def update_theme():
         'dark_bg', 'dark_surface', 'dark_text', 'dark_muted', 'dark_border',
     }
     base_updates = {k: v for k, v in updates.items() if k in base_keys}
-    extra_updates = {k: v for k, v in updates.items() if k not in base_keys}
+    extra_updates = {k: v for k, v in updates.items() if k not in base_keys and k not in ('updated_at', 'updated_by')}
     try:
         if base_updates:
             execute_with_retry(sb.table('system_theme').update({**base_updates, 'updated_at': updates['updated_at'], 'updated_by': username}).eq('id', 1))
         if extra_updates:
-            rows = [{'key': f'theme.{k}', 'value': str(v)} for k, v in extra_updates.items()]
+            rows = [{'key': f'theme.{k}', 'value': json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else str(v)} for k, v in extra_updates.items()]
             execute_with_retry(sb.table('system_texts').upsert(rows, on_conflict='key'))
     except Exception as e:
         return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
