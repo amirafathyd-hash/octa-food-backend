@@ -74,7 +74,7 @@ NOTIFY_EMAIL_TO = os.environ.get('NOTIFY_EMAIL_TO')
 app = Flask(__name__)
 CORS(app)  # allow calls from the Netlify frontend domain
 
-from appointments_api import appointments_bp
+from appointments_api import appointments_bp, send_push_to_all
 app.register_blueprint(appointments_bp)
 
 
@@ -124,6 +124,40 @@ def _log(file_type, file_name, item_date, message, level='info'):
         }), max_attempts=2)
     except Exception:
         pass  # logging is best-effort; never let a logging failure break the actual request
+    _push_log_notification(file_type, file_name, message)
+
+
+def _push_log_notification(file_type, file_name, message):
+    push_map = {
+        'vegetables_receipt': ('استلام خضار جديد', 'receiving-archive?type=veg-salad'),
+        'sauce_receipt': ('استلام صوص جديد', 'receiving-archive?type=sauce'),
+        'employee_request': ('طلب عامل جديد', 'employee-requests-dashboard'),
+        'customer_review': ('تقييم عميل جديد', 'customer-reviews'),
+        'weight_log': ('تعديل جديد في الأوزان', 'weight-log-dashboard'),
+    }
+    if file_type not in push_map:
+        return
+    title, url = push_map[file_type]
+    body = str(file_name or '').strip() or 'تم تسجيل تعديل جديد في النظام'
+    try:
+        data = json.loads(message or '{}') if isinstance(message, str) else {}
+        if file_type == 'vegetables_receipt':
+            receipt_type = data.get('receipt_type') or data.get('type') or data.get('kind') or ''
+            if 'hot' in str(receipt_type).lower() or 'ساخن' in str(receipt_type):
+                title = 'استلام خضار القسم الساخن'
+                url = 'receiving-archive?type=veg-hot'
+            else:
+                title = 'استلام خضار السلطة'
+            count = data.get('rows_count') or data.get('items_count') or data.get('received_count')
+            body = f"تم تسجيل {count} صنف" if count else 'تم تسجيل استلام خضروات'
+        elif file_type == 'employee_request':
+            body = data.get('employee_name') or data.get('department') or body
+    except Exception:
+        pass
+    try:
+        send_push_to_all(title, body, url)
+    except Exception:
+        pass
 
 
 def _read_upload_log_message(row):
