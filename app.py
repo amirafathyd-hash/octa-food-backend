@@ -740,11 +740,9 @@ def _department_label(department):
 def vegetables_receipt_data():
     """بتاخد نفس الملفات اللي بتترفع لـ auto-detect-stations، تدور على ملف
     المحطة المطلوبة (hot/salad) وتستخرج صفوف الخضروات منه، وتعمل رابط استلام
-    جديد (زي رابط استلام الصوص بالظبط) - محتاج تسجيل دخول."""
-    _, err = _require_auth()
-    if err:
-        return err
-
+    جديد (زي رابط استلام الصوص بالظبط) - مفتوح من غير تسجيل دخول، زي
+    /api/sauce-receipt/create بالظبط (صفحة ordering-stations مبتبعتش X-Auth-Token
+    في الطلب ده أصلاً)."""
     uploaded = request.files.getlist('files')
     if not uploaded:
         return jsonify({'error': 'مفيش ملفات مبعوتة'}), 400
