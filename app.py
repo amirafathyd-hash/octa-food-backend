@@ -12,7 +12,7 @@ import smtplib
 from email.message import EmailMessage
 import openpyxl
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from copy import copy
 from datetime import datetime, timedelta, timezone
@@ -60,6 +60,7 @@ from sauce_ordering import (
     update_sauce_counts_from_upload,
 )
 from xlsx_to_images import add_workbook_images_to_zip
+from veg_screenshot_ocr import extract_vegetable_rows
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 
@@ -3734,6 +3735,417 @@ def smart_order_export_stations():
     except Exception as e:
         app.logger.exception('smart_order_export_stations failed')
         return jsonify({'error': f'حصل خطأ في التصدير: {e}'}), 500
+
+
+# ============================================================
+# سجل الخضار اليومي المجمّع (Veg Daily Log)
+# ============================================================
+def _veg_log_match_key(name_en, name_ar):
+    base = (name_en or name_ar or '').strip().lower()
+    base = re.sub(r'[^\w\u0600-\u06FF]+', ' ', base)
+    return re.sub(r'\s+', ' ', base).strip()
+
+
+@app.route('/api/veg-daily-log/extract', methods=['POST'])
+def veg_daily_log_extract():
+    _, err = _require_auth()
+    if err:
+        return err
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'error': 'مفيش صور مبعوتة'}), 400
+
+    all_rows = []
+    errors = []
+    for f in files:
+        suffix = os.path.splitext(f.filename or '')[1].lower() or '.jpg'
+        if suffix not in ('.jpg', '.jpeg', '.png'):
+            suffix = '.jpg'
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            f.save(tmp.name)
+            path = tmp.name
+        try:
+            rows = extract_vegetable_rows(path)
+            for r in rows:
+                r['source_file'] = f.filename
+                r['match_key'] = _veg_log_match_key(r.get('name_en'), r.get('name_ar'))
+            all_rows.extend(rows)
+        except Exception as e:
+            errors.append({'file': f.filename, 'error': str(e)})
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    return jsonify({'rows': all_rows, 'errors': errors})
+
+
+@app.route('/api/veg-daily-log/save', methods=['POST'])
+def veg_daily_log_save():
+    username, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    log_date = (payload.get('date') or '').strip()
+    rows = payload.get('rows') or []
+    if not log_date:
+        return jsonify({'error': 'حدد التاريخ'}), 400
+    if not rows:
+        return jsonify({'error': 'مفيش صفوف للحفظ'}), 400
+
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('veg_daily_log').delete().eq('log_date', log_date))
+    except Exception as e:
+        return jsonify({'error': f'تعذر تنظيف بيانات اليوم القديمة: {e}'}), 400
+
+    db_rows = []
+    for r in rows:
+        name_en = (r.get('name_en') or '').strip()
+        name_ar = (r.get('name_ar') or '').strip()
+        if not name_en and not name_ar:
+            continue
+        try:
+            qty = float(r.get('qty') or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        unit = (r.get('unit') or 'UNKNOWN').strip().upper()
+        db_rows.append({
+            'log_date': log_date,
+            'name_en': name_en,
+            'name_ar': name_ar,
+            'match_key': _veg_log_match_key(name_en, name_ar),
+            'qty': qty,
+            'unit': unit,
+            'source_note': r.get('source_file') or username or None,
+        })
+
+    if not db_rows:
+        return jsonify({'error': 'مفيش صفوف صحيحة للحفظ'}), 400
+
+    try:
+        execute_with_retry(sb.table('veg_daily_log').insert(db_rows))
+    except Exception as e:
+        return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
+    return jsonify({'ok': True, 'date': log_date, 'count': len(db_rows)})
+
+
+@app.route('/api/veg-daily-log/days', methods=['GET'])
+def veg_daily_log_days():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('veg_daily_log').select('log_date').order('log_date', desc=True)
+    )
+    counts = {}
+    for row in (res.data or []):
+        d = row['log_date']
+        counts[d] = counts.get(d, 0) + 1
+    days = [{'date': d, 'count': c} for d, c in sorted(counts.items(), reverse=True)]
+    return jsonify({'days': days})
+
+
+@app.route('/api/veg-daily-log/day/<log_date>', methods=['GET'])
+def veg_daily_log_day_get(log_date):
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('veg_daily_log').select('*').eq('log_date', log_date).order('name_en')
+    )
+    return jsonify({'rows': res.data or []})
+
+
+@app.route('/api/veg-daily-log/day/<log_date>/excel', methods=['GET'])
+def veg_daily_log_day_excel(log_date):
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('veg_daily_log').select('*').eq('log_date', log_date).order('name_en')
+    )
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'لا توجد بيانات لهذا اليوم'}), 404
+
+    grouped = {}
+    for row in rows:
+        key = row.get('match_key') or _veg_log_match_key(row.get('name_en'), row.get('name_ar'))
+        unit = (row.get('unit') or 'UNKNOWN').strip().upper()
+        try:
+            qty = float(row.get('qty') or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if unit == 'GM':
+            unit = 'KG'
+            qty = qty / 1000.0
+        group_key = (key, unit)
+        if group_key not in grouped:
+            grouped[group_key] = {
+                'log_date': row.get('log_date') or log_date,
+                'name_en': row.get('name_en') or '',
+                'name_ar': row.get('name_ar') or '',
+                'qty': 0.0,
+                'unit': unit,
+            }
+        entry = grouped[group_key]
+        entry['qty'] += qty
+        if not entry['name_en'] and row.get('name_en'):
+            entry['name_en'] = row.get('name_en')
+        if not entry['name_ar'] and row.get('name_ar'):
+            entry['name_ar'] = row.get('name_ar')
+    rows = sorted(grouped.values(), key=lambda r: (r.get('name_en') or r.get('name_ar') or '').lower())
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = str(log_date)[:31]
+    ws.sheet_view.rightToLeft = True
+
+    red_fill = PatternFill('solid', fgColor='EC1510')
+    light_fill = PatternFill('solid', fgColor='FFF1F0')
+    white_fill = PatternFill('solid', fgColor='FFFFFF')
+    thin = Side(style='thin', color='F1D8D6')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.merge_cells('A1:F1')
+    title_cell = ws['A1']
+    title_cell.value = f'سجل الخضار اليومي - {log_date}'
+    title_cell.fill = red_fill
+    title_cell.font = Font(color='FFFFFF', bold=True, size=16)
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 30
+
+    headers = ['#', 'التاريخ', 'الاسم الإنجليزي', 'الاسم العربي', 'الكمية', 'الوحدة']
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=2, column=col, value=header)
+        cell.fill = red_fill
+        cell.font = Font(color='FFFFFF', bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = border
+
+    for idx, row in enumerate(rows, 1):
+        excel_row = idx + 2
+        values = [
+            idx,
+            row.get('log_date') or log_date,
+            row.get('name_en') or '',
+            row.get('name_ar') or '',
+            round(float(row.get('qty') or 0), 3),
+            row.get('unit') or '',
+        ]
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row=excel_row, column=col, value=value)
+            cell.fill = light_fill if idx % 2 == 0 else white_fill
+            cell.border = border
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            if col in (3, 4):
+                cell.font = Font(bold=True)
+
+    for col, width in enumerate([8, 16, 30, 30, 14, 12], 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.freeze_panes = 'A3'
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=f'Veg_Daily_Log_{log_date}.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
+@app.route('/api/veg-daily-log/day/<log_date>', methods=['DELETE'])
+def veg_daily_log_day_delete(log_date):
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('veg_daily_log').delete().eq('log_date', log_date))
+    except Exception as e:
+        return jsonify({'error': f'تعذر حذف اليوم: {e}'}), 400
+    return jsonify({'ok': True})
+
+
+@app.route('/api/veg-daily-log/aggregate', methods=['GET'])
+def veg_daily_log_aggregate():
+    _, err = _require_auth()
+    if err:
+        return err
+    date_from = request.args.get('from')
+    date_to = request.args.get('to')
+
+    sb = get_client()
+    q = sb.table('veg_daily_log').select('*')
+    if date_from:
+        q = q.gte('log_date', date_from)
+    if date_to:
+        q = q.lte('log_date', date_to)
+    res = execute_with_retry(q)
+    rows = res.data or []
+
+    grouped = {}
+    for r in rows:
+        key = r.get('match_key') or _veg_log_match_key(r.get('name_en'), r.get('name_ar'))
+        if key not in grouped:
+            grouped[key] = {
+                'name_en': r.get('name_en') or '',
+                'name_ar': r.get('name_ar') or '',
+                'units': {},
+                'days': set(),
+            }
+        entry = grouped[key]
+        unit = (r.get('unit') or 'UNKNOWN').strip().upper()
+        try:
+            qty = float(r.get('qty') or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if unit == 'GM':
+            unit = 'KG'
+            qty = qty / 1000.0
+        entry['units'][unit] = entry['units'].get(unit, 0) + qty
+        if r.get('log_date'):
+            entry['days'].add(r.get('log_date'))
+        if not entry['name_en'] and r.get('name_en'):
+            entry['name_en'] = r.get('name_en')
+        if not entry['name_ar'] and r.get('name_ar'):
+            entry['name_ar'] = r.get('name_ar')
+
+    items = []
+    for key, entry in grouped.items():
+        items.append({
+            'match_key': key,
+            'name_en': entry['name_en'],
+            'name_ar': entry['name_ar'],
+            'units': {u: round(qty, 3) for u, qty in entry['units'].items()},
+            'days_count': len(entry['days']),
+        })
+    items.sort(key=lambda x: (x.get('name_en') or x.get('name_ar') or '').lower())
+
+    return jsonify({'items': items, 'days_total': len({r.get('log_date') for r in rows if r.get('log_date')})})
+
+
+@app.route('/api/veg-daily-log/aggregate/excel', methods=['GET'])
+def veg_daily_log_aggregate_excel():
+    _, err = _require_auth()
+    if err:
+        return err
+
+    date_from = request.args.get('from')
+    date_to = request.args.get('to')
+
+    sb = get_client()
+    q = sb.table('veg_daily_log').select('*')
+    if date_from:
+        q = q.gte('log_date', date_from)
+    if date_to:
+        q = q.lte('log_date', date_to)
+    res = execute_with_retry(q)
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'لا توجد بيانات للتجميع'}), 404
+
+    grouped = {}
+    for r in rows:
+        key = r.get('match_key') or _veg_log_match_key(r.get('name_en'), r.get('name_ar'))
+        unit = (r.get('unit') or 'UNKNOWN').strip().upper()
+        try:
+            qty = float(r.get('qty') or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if unit == 'GM':
+            unit = 'KG'
+            qty = qty / 1000.0
+
+        group_key = (key, unit)
+        if group_key not in grouped:
+            grouped[group_key] = {
+                'name_en': r.get('name_en') or '',
+                'name_ar': r.get('name_ar') or '',
+                'qty': 0.0,
+                'unit': unit,
+                'days': set(),
+            }
+        item = grouped[group_key]
+        item['qty'] += qty
+        if r.get('log_date'):
+            item['days'].add(r.get('log_date'))
+        if not item['name_en'] and r.get('name_en'):
+            item['name_en'] = r.get('name_en')
+        if not item['name_ar'] and r.get('name_ar'):
+            item['name_ar'] = r.get('name_ar')
+
+    items = sorted(grouped.values(), key=lambda x: (x.get('name_en') or x.get('name_ar') or '').lower())
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'التجميع الكلي'
+    ws.sheet_view.rightToLeft = True
+
+    red_fill = PatternFill('solid', fgColor='EC1510')
+    light_fill = PatternFill('solid', fgColor='FFF1F0')
+    white_fill = PatternFill('solid', fgColor='FFFFFF')
+    thin = Side(style='thin', color='F1D8D6')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    period = 'كل الأيام'
+    if date_from or date_to:
+        period = f'{date_from or "البداية"} إلى {date_to or "النهاية"}'
+
+    ws.merge_cells('A1:F1')
+    title_cell = ws['A1']
+    title_cell.value = f'تجميع مخزون الخضار اليومي - {period}'
+    title_cell.fill = red_fill
+    title_cell.font = Font(color='FFFFFF', bold=True, size=16)
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 30
+
+    headers = ['#', 'الاسم الإنجليزي', 'الاسم العربي', 'الكمية المجمعة', 'الوحدة', 'عدد الأيام']
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=2, column=col, value=header)
+        cell.fill = red_fill
+        cell.font = Font(color='FFFFFF', bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        cell.border = border
+
+    for idx, item in enumerate(items, 1):
+        excel_row = idx + 2
+        values = [
+            idx,
+            item.get('name_en') or '',
+            item.get('name_ar') or '',
+            round(float(item.get('qty') or 0), 3),
+            item.get('unit') or '',
+            len(item.get('days') or []),
+        ]
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row=excel_row, column=col, value=value)
+            cell.fill = light_fill if idx % 2 == 0 else white_fill
+            cell.border = border
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            if col in (2, 3):
+                cell.font = Font(bold=True)
+
+    for col, width in enumerate([8, 32, 32, 18, 12, 14], 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.freeze_panes = 'A3'
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=f'Veg_Daily_Aggregate_{datetime.now().strftime("%Y-%m-%d")}.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
 
 
 if __name__ == '__main__':
