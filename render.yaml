@@ -3,7 +3,7 @@ services:
     name: octa-food-backend
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT"
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600 --workers 2"
     envVars:
       - key: SUPABASE_URL
         sync: false

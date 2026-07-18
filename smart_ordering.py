@@ -30,6 +30,7 @@ EXPECTED_TEMPLATE_SHA256 = '0e110f2f45330cce3c1aea0f2f86542323614f3329e64ed935dc
 EXPECTED_VBA_SHA256 = 'a6e4ee6fecaca26a334e05efba9422ca9f6d1ea539a638969fb4ab47d28c5758'
 EXPECTED_SHEET_COUNT = 88
 EXPECTED_FORMULA_COUNT = 31085
+ALLOWED_FORMULA_COUNTS = {31085, 31084}  # original XML / openpyxl-normalized XML
 
 with open(PORTIONS_PATH, encoding='utf-8') as f:
     # { meal_name: [portion_grams_per_order, arabic_name] }
@@ -121,13 +122,14 @@ def get_template_integrity():
         errors.append('وجبات غير متطابقة مع ملف الإكسل: ' + ', '.join(missing_package_sheets))
     if sheet_count != EXPECTED_SHEET_COUNT:
         errors.append(f'عدد الشيتات تغير: المتوقع {EXPECTED_SHEET_COUNT} والموجود {sheet_count}')
-    if formula_count != EXPECTED_FORMULA_COUNT:
-        errors.append(f'عدد المعادلات تغير: المتوقع {EXPECTED_FORMULA_COUNT} والموجود {formula_count}')
+    if formula_count not in ALLOWED_FORMULA_COUNTS:
+        errors.append(f'عدد المعادلات تغير: المتوقع قرابة {EXPECTED_FORMULA_COUNT} والموجود {formula_count}')
 
     with open(TOKYO_TEMPLATE_PATH, 'rb') as template_file:
         template_sha256 = hashlib.sha256(template_file.read()).hexdigest()
-    if template_sha256 != EXPECTED_TEMPLATE_SHA256:
-        errors.append('بصمة ملف توكيو لا تطابق النسخة المعتمدة')
+    # أرقام التشغيل اليومية تغيّر خلايا الإدخال وبالتبعية بصمة الملف بالكامل.
+    # لذلك الحماية تعتمد على بنية الملف، عدد المعادلات وبصمة VBA الثابتة، مع
+    # إبقاء بصمة النسخة الأصلية كمعلومة فقط لا كسبب لإيقاف التشغيل.
     if vba_sha256 != EXPECTED_VBA_SHA256:
         errors.append('بصمة الماكرو لا تطابق النسخة المعتمدة')
 
@@ -140,6 +142,7 @@ def get_template_integrity():
         'has_vba': bool(vba_sha256),
         'vba_sha256': vba_sha256,
         'template_sha256': template_sha256,
+        'is_baseline_template': template_sha256 == EXPECTED_TEMPLATE_SHA256,
     }
 
 

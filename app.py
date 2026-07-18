@@ -30,6 +30,7 @@ from matcher import match_invoice_item
 from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
 from tokyo_ordering import read_day_file_meals, merge_day_into_template
+from tokyo_production_reports import build_tokyo_day_package
 from dessert_ordering import (
     export_dessert_cost_report_pdf_with_edits,
     export_dessert_cost_report_with_edits,
@@ -506,6 +507,38 @@ def tokyo_ordering_update_from_day_file():
     # لصيغة \uXXXX (ensure_ascii=True) وإلا السيرفر (gunicorn) بيرفض يبعت الرد
     # كله بخطأ "Invalid HTTP Header" والمتصفح بيشوفه فشل اتصال تام (CORS مضلِّل).
     response.headers['X-Match-Report'] = json.dumps(report, ensure_ascii=True)
+    return response
+
+
+@app.route('/api/tokyo-production/process-day', methods=['POST'])
+def tokyo_production_process_day():
+    """يرفع ملف تشغيل يوم واحد ويُرجع حزمة الإنتاج الكاملة بنفس جداول
+    ملف توكيو: PDF القسم الساخن + PDF التتبيلات + نسخة XLSM محدّثة."""
+    if not os.path.exists(TOKYO_TEMPLATE_PATH):
+        return jsonify({'error': 'ملف توكيو الرئيسي غير موجود على السيرفر'}), 404
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف اليوم بصيغة Excel'}), 400
+
+    try:
+        zip_path, updated_xlsm, report = build_tokyo_day_package(
+            TOKYO_TEMPLATE_PATH, uploaded
+        )
+        # لا نحدّث النسخة التشغيلية إلا بعد نجاح إنشاء كل المخرجات.
+        shutil.copyfile(updated_xlsm, TOKYO_TEMPLATE_PATH)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('tokyo_production_process_day failed')
+        return jsonify({'error': f'تعذّر إنشاء مخرجات توكيو: {exc}'}), 500
+
+    response = send_file(
+        zip_path, as_attachment=True,
+        download_name=f"Tokyo_Production_Day{report['day_no']}.zip",
+        mimetype='application/zip',
+    )
+    response.headers['X-Tokyo-Report'] = json.dumps(report, ensure_ascii=True)
+    response.headers['Access-Control-Expose-Headers'] = 'X-Tokyo-Report, Content-Disposition'
     return response
 
 

@@ -9,6 +9,7 @@
 """
 import shutil
 import tempfile
+from difflib import SequenceMatcher
 from openpyxl import load_workbook
 
 DAY_NAMES = {1: 'السبت', 2: 'الأحد', 3: 'الاثنين', 4: 'الثلاثاء', 5: 'الأربعاء', 6: 'الخميس'}
@@ -17,6 +18,25 @@ DAY_NO_COL = 36   # AJ
 SHEET_NAME_COL = 37  # AK
 COUNT_COL = 44    # AR
 GRAMS_COL = 45    # AS
+
+# Recipe tabs whose operational upload name is deliberately different from
+# the English tab name. Values are searched in both Arabic and English names
+# read from the daily workbook.
+SHEET_INPUT_ALIASES = {
+    'Almond Chicken': ['Almond chicken in the oven with potato wedges', 'دجاج باللوز في الفرن'],
+    'Pasta with Vegetable(Pasta)': ['Chicken pasta with vegetables', 'دجاج مكروني بالخضار'],
+    'Daoud Basha': ['Daoud Basha with saffron rice', 'داوود باشا'],
+    'Fish with cream': ['Fish with cream and mashed potatoes', 'سمك بالكريمة'],
+    'Moussaka Vegi': ['High protein Meat moussaka with white rice', 'مسقعة اللحم عالية البروتين'],
+    'Moussaka Meat': ['High protein Meat moussaka with white rice', 'مسقعة اللحم عالية البروتين'],
+    'Laham Oriental': ['Oriental beef with nuts rice', 'لحم أوريانتل'],
+    'Beef Oriental rice': ['Oriental beef with nuts rice', 'الأرز بالمكسرات'],
+    'Chicken Caesar Salad': ['Caesar salad', 'سلطة السيزر'],
+    'Chicken Fajita': ['Chicken Fajita sandwich served with oat bread', 'ساندوتش فاهيتا الدجاج بخبز الشوفان'],
+    'Mached Potato(3)': ['Mashed potato', 'Mashed potatoes', 'بطاطس مهروسة'],
+    'Potato Wedges': ['Potato wedges', 'بطاطس ويدجز'],
+    'Oven Vegetables (3)': ['Sauteed vegetables', 'خضار سوتيه'],
+}
 
 
 def read_current_inputs(template_path):
@@ -61,7 +81,7 @@ def read_day_file_meals(file_storage):
     if not day_no:
         raise ValueError(f"مش عارف أحدد اليوم من الخلية A6 (لقيت: '{day_label}')")
 
-    meals = {}
+    arabic_totals = {}
     for r in range(10, ws.max_row + 1):
         name = ws.cell(row=r, column=1).value
         if not name:
@@ -73,7 +93,30 @@ def read_day_file_meals(file_storage):
         grams = grams if isinstance(grams, (int, float)) else None
         if count is None and grams is None:
             continue
-        meals[name] = (count, grams)
+        if name.strip().lower() == 'grand total':
+            continue
+        old_count, old_grams = arabic_totals.get(name, (0, 0))
+        arabic_totals[name] = (
+            old_count + (count or 0),
+            old_grams + (grams or 0),
+        )
+
+    # The operational Update pivot is Arabic-only. This helper sheet carries
+    # the matching English product names, so recipe tab names can be matched
+    # safely even when Arabic labels or the weekly menu order change.
+    english_to_arabic = {}
+    if "Don't Use just refresh" in wb.sheetnames:
+        raw = wb["Don't Use just refresh"]
+        for r in range(3, raw.max_row + 1):
+            english = raw.cell(row=r, column=1).value
+            arabic = raw.cell(row=r, column=2).value
+            if english and arabic:
+                english_to_arabic[str(english).strip()] = str(arabic).strip()
+
+    meals = dict(arabic_totals)
+    for english, arabic in english_to_arabic.items():
+        if arabic in arabic_totals:
+            meals[english] = arabic_totals[arabic]
     wb.close()
     file_storage.seek(0)
     return day_no, meals
@@ -105,20 +148,66 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None)
         if not row_day or int(row_day) != day_no:
             continue
         meal_name = ws.cell(row=r, column=43).value  # AQ
-        if not meal_name:
+        sheet_name = str(ws.cell(row=r, column=SHEET_NAME_COL).value or '').strip()
+        if not meal_name and not sheet_name:
             continue
-        key = str(meal_name).strip()
+        key = str(meal_name or '').strip()
         norm_key = _normalize_meal_name(key)
-        found = meals_by_name.get(key) or norm_lookup.get(norm_key)
+
+        found = None
+        matched_input = None
+        candidates = [sheet_name, *SHEET_INPUT_ALIASES.get(sheet_name, [])]
+        for candidate in candidates:
+            normalized = _normalize_meal_name(candidate)
+            if candidate in meals_by_name:
+                found, matched_input = meals_by_name[candidate], candidate
+                break
+            if normalized in norm_lookup:
+                found, matched_input = norm_lookup[normalized], candidate
+                break
+
+        if found is None and sheet_name:
+            english_keys = [k for k in meals_by_name if any('a' <= ch.lower() <= 'z' for ch in str(k))]
+            fuzzy = max(
+                ((SequenceMatcher(None, sheet_name.lower(), str(candidate).lower()).ratio(), candidate)
+                 for candidate in english_keys),
+                default=(0, None),
+            )
+            if fuzzy[0] >= 0.62:
+                matched_input = fuzzy[1]
+                found = meals_by_name[matched_input]
+
+        # Last-resort compatibility for older templates whose AQ mapping is
+        # known to be correct. It intentionally comes after recipe-name match.
         if found is None:
-            unmatched.append(key)
+            if key in meals_by_name:
+                found, matched_input = meals_by_name[key], key
+            elif norm_key in norm_lookup:
+                found, matched_input = norm_lookup[norm_key], key
+        if found is None:
+            unmatched.append(sheet_name or key)
             continue
         count, grams = found
         if count is not None:
             ws.cell(row=r, column=COUNT_COL, value=float(count))
         if grams is not None:
             ws.cell(row=r, column=GRAMS_COL, value=float(grams))
-        matched.append({'row': r, 'name': key, 'count': count, 'grams': grams})
+        # نفس وظيفة ماكرو UpdateRecipeData: نقل مدخلات التشغيل إلى خلايا
+        # التحكم داخل شيت الوصفة. تشغيل VBA غير متاح على خادم Linux، لذلك
+        # ننقل القيم مباشرة من غير تغيير أي معادلة أو تنسيق في الوصفة.
+        if sheet_name in wb.sheetnames:
+            recipe = wb[sheet_name]
+            if grams is not None:
+                recipe['Z1'] = float(grams)
+            safety_value = ws.cell(row=r, column=39).value  # AM
+            if isinstance(safety_value, (int, float)):
+                recipe['AB1'] = float(safety_value)
+            if count is not None:
+                recipe['AD1'] = float(count)
+        matched.append({
+            'row': r, 'name': sheet_name or key, 'input_name': matched_input,
+            'count': count, 'grams': grams,
+        })
 
     if out_path is None:
         out_path = tempfile.NamedTemporaryFile(suffix='.xlsm', delete=False).name
