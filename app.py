@@ -1607,6 +1607,7 @@ def _require_auth():
             '/api/texts',
             '/api/theme',
             '/api/health',
+            '/api/worker-links/mine',
         )
         if not any(path == allowed or path.startswith(allowed + '/') for allowed in allowed_paths):
             return None, (jsonify({'error': 'هذا المستخدم مخصص لإدارة تقييمات العملاء فقط'}), 403)
@@ -4863,6 +4864,127 @@ def veg_daily_log_aggregate_excel():
         download_name=f'Veg_Daily_Aggregate_{datetime.now().strftime("%Y-%m-%d")}.xlsx',
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
+
+
+def _worker_link_public_row(row):
+    """البيانات الآمنة التي يمكن لصفحة العامل قراءتها بدون تسجيل دخول."""
+    return {
+        'worker_name': row.get('worker_name') or row.get('username') or 'العامل',
+        'task_title': row.get('task_title') or 'مهمة عمل',
+        'popup_title': row.get('popup_title') or 'الله يعطيك العافية',
+        'popup_message': row.get('popup_message') or '✨ شغلك يفتح النفس 🎉',
+        'popup_button': row.get('popup_button') or 'تمام 🙌',
+    }
+
+
+@app.route('/api/worker-links/public/<profile_token>', methods=['GET'])
+def worker_links_public(profile_token):
+    """رسالة الـPopup الخاصة بالرابط. الروابط القديمة لا تستدعي هذا المسار."""
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('worker_link_assignments').select('*')
+            .eq('profile_token', profile_token).eq('active', True).limit(1)
+        )
+    except Exception:
+        return jsonify({'error': 'إعداد الرابط غير متاح'}), 404
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'الرابط غير موجود أو موقوف'}), 404
+    return jsonify(_worker_link_public_row(rows[0]))
+
+
+@app.route('/api/worker-links/mine', methods=['GET'])
+def worker_links_mine():
+    """الروابط المسندة للمستخدم الحالي لتظهر في صفحته داخل النظام."""
+    username, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('worker_link_assignments')
+            .select('id, worker_name, username, task_title, target_url, profile_token, active, created_at')
+            .eq('username', username).eq('active', True).order('created_at', desc=True)
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تحميل روابطك: {exc}'}), 400
+    return jsonify({'links': res.data or []})
+
+
+@app.route('/api/worker-links', methods=['GET', 'POST'])
+def worker_links_collection():
+    """إنشاء وعرض تكليفات وروابط العمال من لوحة الإدارة."""
+    created_by, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    if request.method == 'GET':
+        try:
+            res = execute_with_retry(
+                sb.table('worker_link_assignments').select('*').order('created_at', desc=True)
+            )
+        except Exception as exc:
+            return jsonify({'error': f'تعذر تحميل روابط العمال: {exc}'}), 400
+        return jsonify({'links': res.data or []})
+
+    payload = request.get_json(silent=True) or {}
+    username = (payload.get('username') or '').strip()
+    worker_name = (payload.get('worker_name') or username).strip()
+    task_title = (payload.get('task_title') or '').strip()
+    target_url = (payload.get('target_url') or '').strip()
+    if not username or not worker_name or not task_title or not target_url:
+        return jsonify({'error': 'اختار حساب العامل واكتب اسمه واسم المهمة والرابط'}), 400
+    row = {
+        'username': username,
+        'worker_name': worker_name,
+        'task_title': task_title,
+        'target_url': target_url,
+        'profile_token': secrets.token_urlsafe(24),
+        'popup_title': (payload.get('popup_title') or 'الله يعطيك العافية').strip(),
+        'popup_message': (payload.get('popup_message') or '✨ شغلك يفتح النفس 🎉').strip(),
+        'popup_button': (payload.get('popup_button') or 'تمام 🙌').strip(),
+        'active': payload.get('active') is not False,
+        'created_by': created_by,
+        'created_at': datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        res = execute_with_retry(sb.table('worker_link_assignments').insert(row))
+    except Exception as exc:
+        return jsonify({'error': f'تعذر إنشاء رابط العامل: {exc}'}), 400
+    return jsonify({'ok': True, 'link': (res.data or [row])[0]})
+
+
+@app.route('/api/worker-links/<int:link_id>', methods=['PUT', 'DELETE'])
+def worker_links_item(link_id):
+    """تعديل الرسالة أو المهمة أو إيقاف/حذف الرابط من الإدارة."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    if request.method == 'DELETE':
+        try:
+            execute_with_retry(sb.table('worker_link_assignments').delete().eq('id', link_id))
+        except Exception as exc:
+            return jsonify({'error': f'تعذر حذف الرابط: {exc}'}), 400
+        return jsonify({'ok': True})
+
+    payload = request.get_json(silent=True) or {}
+    allowed = ('username', 'worker_name', 'task_title', 'target_url',
+               'popup_title', 'popup_message', 'popup_button', 'active')
+    updates = {key: payload[key] for key in allowed if key in payload}
+    for key in ('username', 'worker_name', 'task_title', 'target_url',
+                'popup_title', 'popup_message', 'popup_button'):
+        if key in updates:
+            updates[key] = str(updates[key] or '').strip()
+    if not updates:
+        return jsonify({'error': 'لا توجد تعديلات للحفظ'}), 400
+    updates['updated_at'] = datetime.now(timezone.utc).isoformat()
+    try:
+        res = execute_with_retry(sb.table('worker_link_assignments').update(updates).eq('id', link_id))
+    except Exception as exc:
+        return jsonify({'error': f'تعذر حفظ التعديلات: {exc}'}), 400
+    return jsonify({'ok': True, 'link': (res.data or [updates])[0]})
 
 
 if __name__ == '__main__':
