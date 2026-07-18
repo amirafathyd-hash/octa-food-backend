@@ -2469,6 +2469,69 @@ def update_theme():
     return jsonify({'ok': True})
 
 
+@app.route('/api/system/factory-reset', methods=['POST'])
+def system_factory_reset():
+    """Restore the approved system theme without touching operational records."""
+    username, err = _require_auth()
+    if err:
+        return err
+
+    permissions = _permissions_for_username(username)
+    pages = permissions.get('pages') if isinstance(permissions.get('pages'), list) else []
+    actions = permissions.get('actions') if isinstance(permissions.get('actions'), list) else []
+    if _role_for_username(username) != ADMIN_ROLE or '*' not in pages or '*' not in actions:
+        return jsonify({'error': 'ضبط المصنع متاح لمدير النظام كامل الصلاحيات فقط'}), 403
+
+    payload = request.get_json(silent=True) or {}
+    password = payload.get('password') or ''
+    if not password:
+        return jsonify({'error': 'اكتب باسورد مدير النظام للتأكيد'}), 400
+
+    sb = get_client()
+    user_res = execute_with_retry(sb.table('app_users').select('password_hash').eq('username', username).limit(1))
+    user_rows = user_res.data or []
+    if not user_rows or not check_password_hash(user_rows[0].get('password_hash') or '', password):
+        return jsonify({'error': 'باسورد مدير النظام غير صحيح'}), 403
+
+    now = datetime.now(timezone.utc).isoformat()
+    base_keys = {
+        'primary_color', 'primary_dark_color', 'ink_color', 'muted_color', 'soft_color', 'line_color', 'ok_color',
+        'font_family', 'font_label', 'animations_enabled', 'dark_mode_enabled',
+        'dark_bg', 'dark_surface', 'dark_text', 'dark_muted', 'dark_border',
+    }
+    base_values = {key: DEFAULT_THEME[key] for key in base_keys}
+    extra_values = {key: value for key, value in DEFAULT_THEME.items() if key not in base_keys}
+
+    try:
+        execute_with_retry(sb.table('system_theme').upsert({
+            'id': 1,
+            **base_values,
+            'updated_at': now,
+            'updated_by': username,
+        }, on_conflict='id'))
+        execute_with_retry(sb.table('system_texts').upsert([
+            {
+                'key': f'theme.{key}',
+                'value': json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value),
+                'page': 'theme',
+                'updated_at': now,
+                'updated_by': username,
+            }
+            for key, value in extra_values.items()
+        ], on_conflict='key'))
+        _log('system_factory_reset', username, None,
+             'تم استرجاع إعدادات النسخة المعتمدة مع الاحتفاظ ببيانات التشغيل', level='info')
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تنفيذ ضبط المصنع: {exc}'}), 400
+
+    return jsonify({
+        'ok': True,
+        'theme': DEFAULT_THEME,
+        'preserved_data': True,
+        'message': 'تم استرجاع إعدادات النظام مع الاحتفاظ بكل بيانات التشغيل',
+    })
+
+
 SYSTEM_ASSETS_BUCKET = os.environ.get('SYSTEM_ASSETS_BUCKET', 'system-assets')
 THEME_FONT_MAX_BYTES = int(os.environ.get('THEME_FONT_MAX_MB', '6')) * 1024 * 1024
 THEME_FONT_EXTENSIONS = {
