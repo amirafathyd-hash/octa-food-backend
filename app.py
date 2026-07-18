@@ -1214,11 +1214,16 @@ def owner_dashboard_report():
         .order('created_at', desc=True).limit(250),
         'invoice receipts',
     )
-    weights = rows_or_empty(
-        sb.table('weight_log_entries').select('id,item_name,weight,logged_at,deleted')
-        .order('logged_at', desc=True).limit(250),
+    weights_raw = rows_or_empty(
+        sb.table('weight_log_entries').select('id,item_name,weight,logged_at,deleted,photo_base64')
+        .order('logged_at', desc=True).limit(150),
         'weights',
     )
+    weights = []
+    for weight_row in weights_raw:
+        clean_row = {key: value for key, value in weight_row.items() if key != 'photo_base64'}
+        clean_row['has_photo'] = bool(weight_row.get('photo_base64'))
+        weights.append(clean_row)
     worker_links = rows_or_empty(
         sb.table('worker_link_assignments')
         .select('id,worker_name,username,task_title,target_url,active,created_at,updated_at')
