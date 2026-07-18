@@ -1101,6 +1101,39 @@ def receipt_notifications_vegetables_delete(log_id):
     return jsonify({'ok': True})
 
 
+@app.route('/api/vegetables-receipt-link/<receipt_id>', methods=['DELETE'])
+def vegetables_receipt_link_delete(receipt_id):
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+
+    assignments = execute_with_retry(
+        sb.table('worker_link_assignments')
+        .select('id,target_url')
+        .order('created_at', desc=True)
+        .limit(1000)
+    ).data or []
+    deleted_assignments = 0
+    for assignment in assignments:
+        target_url = str(assignment.get('target_url') or '')
+        match = re.search(r'[?&]id=([^&#]+)', target_url)
+        if not match or match.group(1) != receipt_id:
+            continue
+        execute_with_retry(
+            sb.table('worker_link_assignments').delete().eq('id', assignment.get('id'))
+        )
+        deleted_assignments += 1
+
+    execute_with_retry(
+        sb.table('upload_log')
+        .delete()
+        .eq('file_type', 'vegetables_receipt_link')
+        .eq('file_name', receipt_id)
+    )
+    return jsonify({'ok': True, 'deleted_assignments': deleted_assignments})
+
+
 def _employee_request_from_log(row):
     data = _read_upload_log_message(row)
     data.setdefault('id', row.get('id'))
