@@ -62,6 +62,32 @@ def _valid_iso_date(value):
         return None
 
 
+def _clean_known_pdf_text(value):
+    """Clean embedded-font placeholders in records saved before parser fixes."""
+    if not isinstance(value, str):
+        return value
+    value = value.replace('(cid:53)', 'مر')
+    value = value.replace('موسسة', 'مؤسسة').replace('ابراهيم', 'إبراهيم')
+    return re.sub(r'\s+', ' ', value).strip()
+
+
+def _normalize_saved_record(record):
+    record = dict(record or {})
+    for key in ('supplier_name', 'customer_name'):
+        record[key] = _clean_known_pdf_text(record.get(key))
+    parsed = dict(record.get('parsed_data') or {})
+    for key in ('party', 'supplier', 'customer', 'notes'):
+        parsed[key] = _clean_known_pdf_text(parsed.get(key))
+    items = []
+    for item in parsed.get('items') or []:
+        normalized_item = dict(item)
+        normalized_item['item'] = _clean_known_pdf_text(normalized_item.get('item'))
+        items.append(normalized_item)
+    parsed['items'] = items
+    record['parsed_data'] = parsed
+    return record
+
+
 def _next_month(month):
     try:
         year, month_no = [int(part) for part in str(month).split('-', 1)]
@@ -101,7 +127,8 @@ def _filtered_query(payload=None):
 
 
 def _list_records(payload=None):
-    return execute_with_retry(_filtered_query(payload)).data or []
+    rows = execute_with_retry(_filtered_query(payload)).data or []
+    return [_normalize_saved_record(row) for row in rows]
 
 
 @invoice_receipts_bp.route('/api/invoice-receipts/link-status', methods=['GET'])

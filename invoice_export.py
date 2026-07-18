@@ -59,12 +59,18 @@ def extract_fixed_lines(pdf_path):
 # نفس الرمز في مكان تاني بالفاتورة (زي اسم صنف "تمر")، نستبدله بالحروف الصحيحة
 # بدل ما نمسحه ويضيع الاسم.
 _CID_BOILERPLATE_RE = re.compile(r'ال\(cid:(\d+)\)كز الرئيسي')
+_CID_OMAR_RIFAI_RE = re.compile(r'ع\(cid:(\d+)\)(?=\s+رفاعي)')
 
 
 def resolve_known_cid_glyphs(lines):
     cid_map = {}
     for line in lines:
         m = _CID_BOILERPLATE_RE.search(line)
+        if m:
+            cid_map[m.group(1)] = 'مر'
+        # اسم المورد في بعض فواتير RIFAI يستخدم نسخة سياقية أخرى من نفس
+        # ligature "مر" عن النسخة الموجودة في "المركز الرئيسي".
+        m = _CID_OMAR_RIFAI_RE.search(line)
         if m:
             cid_map[m.group(1)] = 'مر'
     if not cid_map:
@@ -509,6 +515,7 @@ def parse_invoice_full(pdf_path, file_name=''):
     def clean_party(s):
         for b in BOILERPLATE:
             s = s.replace(b, '')
+        s = s.replace('موسسة', 'مؤسسة').replace('ابراهيم', 'إبراهيم')
         return re.sub(r'\s+', ' ', s).strip()
 
     items = parse_items(fixed_lines)
