@@ -1524,6 +1524,23 @@ def sauce_receipt_delete(receipt_id):
     if err:
         return err
     sb = get_client()
+    receipt_rows = execute_with_retry(
+        sb.table('sauce_receipts').select('*').eq('id', receipt_id).limit(1)
+    ).data or []
+    link_tokens = {str(receipt_id)}
+    if receipt_rows and receipt_rows[0].get('short_code'):
+        link_tokens.add(str(receipt_rows[0]['short_code']))
+
+    assignments = execute_with_retry(
+        sb.table('worker_link_assignments').select('id,target_url').order('created_at', desc=True).limit(1000)
+    ).data or []
+    for assignment in assignments:
+        target_url = str(assignment.get('target_url') or '')
+        match = re.search(r'[?&](?:c|id)=([^&#]+)', target_url)
+        if match and match.group(1) in link_tokens:
+            execute_with_retry(
+                sb.table('worker_link_assignments').delete().eq('id', assignment.get('id'))
+            )
     execute_with_retry(sb.table('sauce_receipts').delete().eq('id', receipt_id))
     return jsonify({'ok': True})
 
