@@ -3885,6 +3885,15 @@ def _detect_station_from_workbook(wb):
             return 'rice'  # شيت الأرز فيه أسماء شيتات عربية كتير
         if 'List of Meals' in sheets:
             return 'sauce'
+        # بعض نسخ ملف الصوص الجديدة لم تعد تحتوي على تاب List of Meals،
+        # لكنها تحتوي على عدة تابات وصفات صوص واضحة بجانب Ordering.
+        sauce_words = ('sauce', 'tahina', 'pickle', 'yogurt', 'yoghrt', 'sumak onion')
+        sauce_sheet_count = sum(
+            1 for sheet in sheets
+            if any(word in sheet.strip().lower() for word in sauce_words)
+        )
+        if sauce_sheet_count >= 2:
+            return 'sauce'
         # فطار أو حلويات — نفرق بينهم من اسم أول شيت بعد Ordering
         others = [s for s in wb.sheetnames if s != 'Ordering']
         if others:
