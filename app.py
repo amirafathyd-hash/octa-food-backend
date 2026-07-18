@@ -842,7 +842,7 @@ def receipt_notifications_list():
 
 @app.route('/api/home-notifications', methods=['GET'])
 def home_notifications():
-    _, err = _require_auth()
+    username, err = _require_auth()
     if err:
         return err
     sb = get_client()
@@ -936,6 +936,34 @@ def home_notifications():
             )
     except Exception as exc:
         app.logger.warning('home_notifications employees failed: %s', exc)
+
+    # لو التكليف اتبعت لحساب إدارة، يظهر له كإشعار بدل الفتح الإجباري.
+    if _role_for_username(username) == ADMIN_ROLE:
+        try:
+            links_res = execute_with_retry(
+                sb.table('worker_link_assignments')
+                .select('id, worker_name, task_title, target_url, profile_token, created_at')
+                .eq('username', username).eq('active', True)
+                .order('created_at', desc=True).limit(20),
+                max_attempts=2
+            )
+            for row in (links_res.data or []):
+                target_url = str(row.get('target_url') or 'my-worker-links')
+                profile_token = str(row.get('profile_token') or '').strip()
+                if profile_token:
+                    separator = '&' if '?' in target_url else '?'
+                    target_url = f'{target_url}{separator}worker_profile={profile_token}'
+                push(
+                    f"worker-task-{row.get('id')}",
+                    'worker_task',
+                    row.get('task_title') or 'مهمة جديدة',
+                    f"تم إرسال المهمة إلى حسابك — {row.get('worker_name') or username}",
+                    target_url,
+                    row.get('created_at'),
+                    'info',
+                )
+        except Exception as exc:
+            app.logger.warning('home_notifications worker tasks failed: %s', exc)
 
     notifications.sort(key=lambda item: item.get('created_at') or '', reverse=True)
     return jsonify({'notifications': notifications[:40]})
@@ -4950,9 +4978,18 @@ def worker_links_collection():
     }
     try:
         res = execute_with_retry(sb.table('worker_link_assignments').insert(row))
+        created_link = (res.data or [row])[0]
+        created_id = created_link.get('id')
+        deactivate = sb.table('worker_link_assignments').update({
+            'active': False,
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        }).eq('username', username).eq('active', True)
+        if created_id is not None:
+            deactivate = deactivate.neq('id', created_id)
+        execute_with_retry(deactivate)
     except Exception as exc:
         return jsonify({'error': f'تعذر إنشاء رابط العامل: {exc}'}), 400
-    return jsonify({'ok': True, 'link': (res.data or [row])[0]})
+    return jsonify({'ok': True, 'link': created_link})
 
 
 @app.route('/api/worker-links/<int:link_id>', methods=['PUT', 'DELETE'])
@@ -4982,9 +5019,19 @@ def worker_links_item(link_id):
     updates['updated_at'] = datetime.now(timezone.utc).isoformat()
     try:
         res = execute_with_retry(sb.table('worker_link_assignments').update(updates).eq('id', link_id))
+        updated_link = (res.data or [updates])[0]
+        if updates.get('active') is True:
+            active_username = updated_link.get('username') or updates.get('username')
+            if active_username:
+                execute_with_retry(
+                    sb.table('worker_link_assignments').update({
+                        'active': False,
+                        'updated_at': datetime.now(timezone.utc).isoformat(),
+                    }).eq('username', active_username).eq('active', True).neq('id', link_id)
+                )
     except Exception as exc:
         return jsonify({'error': f'تعذر حفظ التعديلات: {exc}'}), 400
-    return jsonify({'ok': True, 'link': (res.data or [updates])[0]})
+    return jsonify({'ok': True, 'link': updated_link})
 
 
 if __name__ == '__main__':
