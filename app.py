@@ -1230,13 +1230,6 @@ def owner_dashboard_report():
         .order('created_at', desc=True).limit(250),
         'worker links',
     )
-    employee_rows = rows_or_empty(
-        sb.table('upload_log').select('*').eq('file_type', 'employee_request')
-        .order('created_at', desc=True).limit(250),
-        'employee requests',
-    )
-    employee_requests = [_employee_request_from_log(row) for row in employee_rows]
-
     return jsonify({
         'generated_at': datetime.now(timezone.utc).isoformat(),
         'sauce_receipts': sauce,
@@ -1245,7 +1238,6 @@ def owner_dashboard_report():
         'invoice_receipts': invoices,
         'weight_logs': weights,
         'worker_links': worker_links,
-        'employee_requests': employee_requests,
     })
 
 
