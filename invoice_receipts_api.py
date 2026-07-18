@@ -170,9 +170,12 @@ def invoice_receipts_upload():
                 temp_path = tmp.name
 
             parsed = parse_invoice_full(temp_path, original_name)
+            # Supabase Storage rejects some Arabic/custom-font characters in
+            # object keys. Keep the original display name in the database, and
+            # use a stable ASCII-only object key internally.
             storage_path = (
                 f'{receipt_date[0:4]}/{receipt_date[5:7]}/{receipt_date[8:10]}/'
-                f'{uuid.uuid4().hex}-{original_name}'
+                f'{uuid.uuid4().hex}.pdf'
             )
             sb.storage.from_(BUCKET_NAME).upload(
                 storage_path,
