@@ -821,6 +821,105 @@ def sauce_receipt_list():
     return jsonify({'receipts': res.data or []})
 
 
+def _vegetable_receipt_item_names(payload):
+    names = set()
+    for row in payload.get('rows') or []:
+        name = row.get('name') or row.get('item') or row.get('items') or ''
+        clean = re.sub(r'\s+', ' ', str(name)).strip().lower()
+        if clean:
+            names.add(clean)
+    return names
+
+
+def _log_time_value(row, payload=None):
+    raw = (payload or {}).get('submitted_at') or row.get('created_at') or ''
+    try:
+        return datetime.fromisoformat(str(raw).replace('Z', '+00:00')).timestamp()
+    except (TypeError, ValueError):
+        return 0
+
+
+def _worker_names_by_receipt_id(worker_links):
+    result = {}
+    for assignment in worker_links:
+        target = str(assignment.get('target_url') or '')
+        match = re.search(r'[?&]id=([^&#]+)', target)
+        if not match:
+            continue
+        receipt_id = match.group(1)
+        names = result.setdefault(receipt_id, set())
+        for value in (assignment.get('worker_name'), assignment.get('username')):
+            clean = re.sub(r'\s+', ' ', str(value or '')).strip().lower()
+            if clean:
+                names.add(clean.split('@')[0])
+    return result
+
+
+def _enrich_legacy_vegetable_receipts(receipts, links, worker_links):
+    """يربط الاستلامات القديمة بالرابط الأصلي للعرض فقط، بدون تعديل قاعدة البيانات.
+
+    الإصدارات القديمة كانت تحفظ الأصناف والكميات بعد التنفيذ لكنها لا تحفظ
+    receipt_id أو القسم. نطابقها مع روابط الإنشاء بالمحتوى، واسم العامل إن وُجد،
+    ثم بالتوقيت. الاستلامات الجديدة تحمل receipt_id أصلًا ولا تحتاج مطابقة.
+    """
+    enriched = [dict(row) for row in receipts]
+    link_info = []
+    worker_names = _worker_names_by_receipt_id(worker_links)
+    for row in links:
+        payload = _read_upload_log_message(row)
+        receipt_id = str(payload.get('id') or row.get('file_name') or '').strip()
+        names = _vegetable_receipt_item_names(payload)
+        if receipt_id and names:
+            link_info.append({
+                'id': receipt_id,
+                'payload': payload,
+                'names': names,
+                'time': _log_time_value(row, payload),
+                'workers': worker_names.get(receipt_id, set()),
+            })
+
+    used_ids = {
+        str(_read_upload_log_message(row).get('receipt_id') or '').strip()
+        for row in enriched
+        if _read_upload_log_message(row).get('receipt_id')
+    }
+    for row in sorted(enriched, key=lambda item: _log_time_value(item, _read_upload_log_message(item))):
+        payload = _read_upload_log_message(row)
+        if payload.get('receipt_id'):
+            continue
+        receipt_names = _vegetable_receipt_item_names(payload)
+        if not receipt_names:
+            continue
+        signatures = ' '.join(
+            re.sub(r'\s+', ' ', str(item.get('signature') or '')).strip().lower()
+            for item in payload.get('rows') or []
+        )
+        receipt_time = _log_time_value(row, payload)
+        candidates = []
+        for link in link_info:
+            if link['id'] in used_ids or link['time'] > receipt_time + 300:
+                continue
+            overlap = len(receipt_names & link['names'])
+            coverage = overlap / max(1, len(link['names']))
+            if coverage < 0.7:
+                continue
+            worker_match = int(any(name and name in signatures for name in link['workers']))
+            seconds_apart = max(0, receipt_time - link['time'])
+            candidates.append(((worker_match, coverage, overlap, -seconds_apart), link))
+        if not candidates:
+            continue
+        matched = max(candidates, key=lambda item: item[0])[1]
+        used_ids.add(matched['id'])
+        link_payload = matched['payload']
+        for key in ('department', 'department_label', 'title', 'selected_day_name', 'selected_date'):
+            if not payload.get(key) and link_payload.get(key):
+                payload[key] = link_payload[key]
+        payload['receipt_id'] = matched['id']
+        payload['legacy_link_recovered'] = True
+        row['message'] = json.dumps(payload, ensure_ascii=False)
+    return enriched
+
+
 @app.route('/api/receipt-notifications/list', methods=['GET'])
 def receipt_notifications_list():
     _, err = _require_auth()
@@ -850,9 +949,14 @@ def receipt_notifications_list():
         .order('created_at', desc=True)
         .limit(1000)
     )
+    vegetable_receipts = _enrich_legacy_vegetable_receipts(
+        veg_res.data or [],
+        veg_links_res.data or [],
+        worker_links_res.data or [],
+    )
     return jsonify({
         'sauce_receipts': sauce_res.data or [],
-        'vegetable_receipts': veg_res.data or [],
+        'vegetable_receipts': vegetable_receipts,
         'vegetable_links': veg_links_res.data or [],
         'worker_links': worker_links_res.data or [],
     })
