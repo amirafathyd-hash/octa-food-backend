@@ -1179,6 +1179,71 @@ def live_feed():
     })
 
 
+@app.route('/api/owner-dashboard', methods=['GET'])
+def owner_dashboard_report():
+    """تقرير شامل للمالك — قراءة فقط ولا يحتوي أي عمليات تعديل أو حذف."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+
+    def rows_or_empty(query, label):
+        try:
+            return execute_with_retry(query, max_attempts=2).data or []
+        except Exception as exc:
+            app.logger.warning('owner dashboard %s failed: %s', label, exc)
+            return []
+
+    sauce = rows_or_empty(
+        sb.table('sauce_receipts').select('*').order('created_at', desc=True).limit(250),
+        'sauce receipts',
+    )
+    vegetable_receipts = rows_or_empty(
+        sb.table('upload_log').select('*').eq('file_type', 'vegetables_receipt')
+        .order('created_at', desc=True).limit(250),
+        'vegetable receipts',
+    )
+    vegetable_links = rows_or_empty(
+        sb.table('upload_log').select('*').eq('file_type', 'vegetables_receipt_link')
+        .order('created_at', desc=True).limit(250),
+        'vegetable links',
+    )
+    invoices = rows_or_empty(
+        sb.table('invoice_receipts')
+        .select('id,file_name,receipt_date,invoice_no,supplier_name,invoice_date,uploader_name,created_at,parsed_data')
+        .order('created_at', desc=True).limit(250),
+        'invoice receipts',
+    )
+    weights = rows_or_empty(
+        sb.table('weight_log_entries').select('id,item_name,weight,logged_at,deleted')
+        .order('logged_at', desc=True).limit(250),
+        'weights',
+    )
+    worker_links = rows_or_empty(
+        sb.table('worker_link_assignments')
+        .select('id,worker_name,username,task_title,target_url,active,created_at,updated_at')
+        .order('created_at', desc=True).limit(250),
+        'worker links',
+    )
+    employee_rows = rows_or_empty(
+        sb.table('upload_log').select('*').eq('file_type', 'employee_request')
+        .order('created_at', desc=True).limit(250),
+        'employee requests',
+    )
+    employee_requests = [_employee_request_from_log(row) for row in employee_rows]
+
+    return jsonify({
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'sauce_receipts': sauce,
+        'vegetable_receipts': vegetable_receipts,
+        'vegetable_links': vegetable_links,
+        'invoice_receipts': invoices,
+        'weight_logs': weights,
+        'worker_links': worker_links,
+        'employee_requests': employee_requests,
+    })
+
+
 CUSTOMER_REVIEWS_SEED_PATHS = [
     os.path.join(os.path.dirname(__file__), 'data', 'customer_reviews_seed.json'),
     os.path.join(os.path.dirname(__file__), 'customer_reviews_seed.json'),
