@@ -926,7 +926,7 @@ def _enrich_legacy_sauce_receipts(receipts, sauce_logs):
     بعض الصفوف القديمة في sauce_receipts لا تحتوي submitted_days/submitted_at
     رغم أن العامل نفذ الاستلام، لكن حدث الاستلام ما زال محفوظًا في upload_log.
     """
-    submission_prefixes = set()
+    submission_events = {}
     for log_row in sauce_logs:
         file_name = str(log_row.get('file_name') or '')
         message = str(log_row.get('message') or '')
@@ -935,15 +935,55 @@ def _enrich_legacy_sauce_receipts(receipts, sauce_logs):
             continue
         match = re.search(r'رابط استلام\s+([^\s-]+)', file_name)
         if match:
-            submission_prefixes.add(match.group(1).strip())
+            prefix = match.group(1).strip()
+            day_match = re.search(r'-\s*يوم\s+(.+)$', file_name)
+            day_name = day_match.group(1).strip() if day_match else 'استلام قديم'
+            submission_events.setdefault(prefix, []).append({
+                'day': day_name,
+                'created_at': log_row.get('created_at') or '',
+                'log_id': log_row.get('id'),
+            })
 
     enriched = []
+    matched_prefixes = set()
     for receipt in receipts:
         row = dict(receipt)
         receipt_id = str(row.get('id') or '')
-        if any(receipt_id.startswith(prefix) for prefix in submission_prefixes if prefix):
-            row['archive_received_hint'] = True
+        for prefix in submission_events:
+            if prefix and receipt_id.startswith(prefix):
+                row['archive_received_hint'] = True
+                matched_prefixes.add(prefix)
+                break
         enriched.append(row)
+
+    # لو صف sauce_receipts نفسه اختفى أو لم يعد يرجع من قاعدة البيانات، نبني
+    # بطاقة أرشيف آمنة من إشعارات الاستلام الباقية بدل ما يختفي التاريخ كله.
+    for prefix, events in submission_events.items():
+        if prefix in matched_prefixes:
+            continue
+        by_day = {}
+        for event in sorted(events, key=lambda item: item.get('created_at') or ''):
+            by_day[event['day']] = {
+                'rows': [],
+                'submitted_at': event.get('created_at') or '',
+                'edit_count': 1,
+            }
+        timestamps = [event.get('created_at') or '' for event in events if event.get('created_at')]
+        created_at = min(timestamps) if timestamps else ''
+        submitted_at = max(timestamps) if timestamps else created_at
+        enriched.append({
+            'id': f'archive-log-{prefix}',
+            'status': 'submitted',
+            'created_at': created_at,
+            'submitted_at': submitted_at,
+            'days': [{'day': day, 'rows': []} for day in by_day],
+            'submitted_days': by_day,
+            'archive_received_hint': True,
+            'archive_log_only': True,
+            'archive_receipt_prefix': prefix,
+        })
+
+    enriched.sort(key=lambda row: str(row.get('submitted_at') or row.get('created_at') or ''), reverse=True)
     return enriched
 
 
