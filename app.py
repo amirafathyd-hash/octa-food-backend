@@ -61,6 +61,7 @@ from sauce_ordering import (
 )
 from xlsx_to_images import add_workbook_images_to_zip
 from veg_screenshot_ocr import extract_vegetable_rows
+from invoice_receipts_api import invoice_receipts_bp, configure_invoice_receipts
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 
@@ -76,6 +77,7 @@ CORS(app)  # allow calls from the Netlify frontend domain
 
 from appointments_api import appointments_bp, send_push_to_all
 app.register_blueprint(appointments_bp)
+app.register_blueprint(invoice_receipts_bp)
 
 
 @app.after_request
@@ -87,7 +89,7 @@ def _ensure_cors_headers(response):
     origin = request.headers.get('Origin')
     if origin:
         response.headers.setdefault('Access-Control-Allow-Origin', origin)
-        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token')
+        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token, X-Invoice-Receipt-Token')
         response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
         response.headers.setdefault('Access-Control-Expose-Headers', 'X-Match-Report')
     return response
@@ -1608,6 +1610,9 @@ def _require_auth():
         if not any(path == allowed or path.startswith(allowed + '/') for allowed in allowed_paths):
             return None, (jsonify({'error': 'هذا المستخدم مخصص لإدارة تقييمات العملاء فقط'}), 403)
     return username, None
+
+
+configure_invoice_receipts(_require_auth)
 
 
 def _default_permissions_for_role(role):
