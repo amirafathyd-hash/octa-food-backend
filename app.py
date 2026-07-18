@@ -837,7 +837,25 @@ def receipt_notifications_list():
         .order('created_at', desc=True)
         .limit(1000)
     )
-    return jsonify({'sauce_receipts': sauce_res.data or [], 'vegetable_receipts': veg_res.data or []})
+    veg_links_res = execute_with_retry(
+        sb.table('upload_log')
+        .select('*')
+        .eq('file_type', 'vegetables_receipt_link')
+        .order('created_at', desc=True)
+        .limit(1000)
+    )
+    worker_links_res = execute_with_retry(
+        sb.table('worker_link_assignments')
+        .select('id,worker_name,username,task_title,target_url,active,created_at,updated_at')
+        .order('created_at', desc=True)
+        .limit(1000)
+    )
+    return jsonify({
+        'sauce_receipts': sauce_res.data or [],
+        'vegetable_receipts': veg_res.data or [],
+        'vegetable_links': veg_links_res.data or [],
+        'worker_links': worker_links_res.data or [],
+    })
 
 
 @app.route('/api/home-notifications', methods=['GET'])
@@ -4149,8 +4167,23 @@ def vegetables_receipt_submit():
     total_received = sum((_as_float_for_receipt(r.get('received')) or 0) for r in rows)
     now_iso = datetime.now(timezone.utc).isoformat()
     missing_count = max(0, len(rows) - received_count)
+    department = str(payload.get('department') or 'general').strip().lower()
+    if department not in {'general', 'hot', 'salad'}:
+        department = 'general'
+    department_label = {
+        'general': 'استلام الخضروات',
+        'hot': 'خضار القسم الساخن',
+        'salad': 'خضار قسم السلطة',
+    }[department]
     payload_log = {
         'kind': 'vegetables_receipt',
+        'receipt_id': str(payload.get('receipt_id') or '').strip(),
+        'department': department,
+        'department_label': department_label,
+        'title': department_label,
+        'link_created_at': payload.get('created_at') or '',
+        'selected_day_name': str(payload.get('selected_day_name') or '').strip(),
+        'selected_date': str(payload.get('selected_date') or '').strip(),
         'submitted_at': now_iso,
         'rows_count': len(rows),
         'received_count': received_count,
