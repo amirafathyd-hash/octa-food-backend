@@ -920,6 +920,33 @@ def _enrich_legacy_vegetable_receipts(receipts, links, worker_links):
     return enriched
 
 
+def _enrich_legacy_sauce_receipts(receipts, sauce_logs):
+    """يستعيد علامة الاستلام للسجلات القديمة من إشعارات upload_log.
+
+    بعض الصفوف القديمة في sauce_receipts لا تحتوي submitted_days/submitted_at
+    رغم أن العامل نفذ الاستلام، لكن حدث الاستلام ما زال محفوظًا في upload_log.
+    """
+    submission_prefixes = set()
+    for log_row in sauce_logs:
+        file_name = str(log_row.get('file_name') or '')
+        message = str(log_row.get('message') or '')
+        text = f'{file_name} {message}'
+        if not any(marker in text for marker in ('تم استلام', 'تم تعديل صوص', 'استلام الصوص')):
+            continue
+        match = re.search(r'رابط استلام\s+([^\s-]+)', file_name)
+        if match:
+            submission_prefixes.add(match.group(1).strip())
+
+    enriched = []
+    for receipt in receipts:
+        row = dict(receipt)
+        receipt_id = str(row.get('id') or '')
+        if any(receipt_id.startswith(prefix) for prefix in submission_prefixes if prefix):
+            row['archive_received_hint'] = True
+        enriched.append(row)
+    return enriched
+
+
 @app.route('/api/receipt-notifications/list', methods=['GET'])
 def receipt_notifications_list():
     _, err = _require_auth()
@@ -949,13 +976,24 @@ def receipt_notifications_list():
         .order('created_at', desc=True)
         .limit(1000)
     )
+    sauce_logs_res = execute_with_retry(
+        sb.table('upload_log')
+        .select('id,file_name,message,created_at')
+        .eq('file_type', 'sauce_receipt')
+        .order('created_at', desc=True)
+        .limit(2000)
+    )
+    sauce_receipts = _enrich_legacy_sauce_receipts(
+        sauce_res.data or [],
+        sauce_logs_res.data or [],
+    )
     vegetable_receipts = _enrich_legacy_vegetable_receipts(
         veg_res.data or [],
         veg_links_res.data or [],
         worker_links_res.data or [],
     )
     return jsonify({
-        'sauce_receipts': sauce_res.data or [],
+        'sauce_receipts': sauce_receipts,
         'vegetable_receipts': vegetable_receipts,
         'vegetable_links': veg_links_res.data or [],
         'worker_links': worker_links_res.data or [],
