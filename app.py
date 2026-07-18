@@ -4014,6 +4014,17 @@ def vegetables_receipt_data():
     uploaded = request.files.getlist('files')
     if not uploaded:
         return jsonify({'error': 'مفيش ملفات مبعوتة'}), 400
+    department = (request.form.get('department') or 'general').strip().lower()
+    if department not in {'general', 'hot', 'salad'}:
+        department = 'general'
+    department_labels = {
+        'general': 'استلام الخضروات',
+        'hot': 'خضار القسم الساخن',
+        'salad': 'خضار قسم السلطة',
+    }
+    selected_day_name = (request.form.get('selected_day_name') or '').strip()
+    selected_date = (request.form.get('selected_date') or '').strip()
+    department_label = department_labels[department]
     station_files, undetected = _detect_uploaded_station_files(uploaded)
     if not station_files:
         return jsonify({'error': f'مش قادر أحدد محطة أي ملف من اللي رفعتهم: {undetected}'}), 400
@@ -4027,20 +4038,24 @@ def vegetables_receipt_data():
             return jsonify({'error': 'مفيش خضروات في الملفات المرفوعة'}), 400
         receipt_id = secrets.token_urlsafe(8)
         created_at = datetime.now(timezone.utc).isoformat()
+        payload = {
+            'id': receipt_id,
+            'title': department_label,
+            'department': department,
+            'department_label': department_label,
+            'selected_day_name': selected_day_name,
+            'selected_date': selected_date,
+            'created_at': created_at,
+            'rows': rows,
+        }
         _log(
             'vegetables_receipt_link',
             receipt_id,
             None,
-            json.dumps({'id': receipt_id, 'title': 'استلام الخضروات', 'created_at': created_at, 'rows': rows}, ensure_ascii=False),
+            json.dumps(payload, ensure_ascii=False),
             level='info',
         )
-        return jsonify({
-            'ok': True,
-            'id': receipt_id,
-            'title': 'استلام الخضروات',
-            'created_at': created_at,
-            'rows': rows,
-        })
+        return jsonify({'ok': True, **payload})
     except Exception as e:
         app.logger.exception('vegetables_receipt_data failed')
         return jsonify({'error': f'حصل خطأ في تجهيز رابط الخضار: {e}'}), 500
