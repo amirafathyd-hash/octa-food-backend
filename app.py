@@ -8,6 +8,7 @@ import shutil
 import json
 import tempfile
 import zipfile
+import uuid
 import smtplib
 from email.message import EmailMessage
 import openpyxl
@@ -1941,6 +1942,12 @@ DEFAULT_THEME = {
     'surface_color': '#FFFDF8', 'panel_color': '#1C1512', 'button_text_color': '#FFFFFF',
     'heading_color': '#FFF7EF', 'accent_color': '#FFC15A', 'grid_line_color': 'rgba(255,255,255,.025)',
     'page_radius': 22, 'card_radius': 18, 'control_radius': 10, 'shadow_strength': 18,
+    'body_font_size': 15, 'body_font_weight': 400, 'heading_font_weight': 800,
+    'heading_scale': 100, 'line_height': 165, 'letter_spacing': 0,
+    'typography_override_enabled': False, 'unified_surfaces_enabled': False, 'unified_buttons_enabled': False,
+    'compact_mode_enabled': False, 'custom_css': '',
+    'custom_font_enabled': False, 'custom_font_name': '', 'custom_font_path': '',
+    'custom_font_format': '', 'custom_font_version': '',
     'background_style': 'warm',
     'theme_apply_pages': ['*'], 'theme_immersive_pages': ['index'],
 }
@@ -2019,6 +2026,126 @@ def update_theme():
     except Exception as e:
         return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
     return jsonify({'ok': True})
+
+
+SYSTEM_ASSETS_BUCKET = os.environ.get('SYSTEM_ASSETS_BUCKET', 'system-assets')
+THEME_FONT_MAX_BYTES = int(os.environ.get('THEME_FONT_MAX_MB', '6')) * 1024 * 1024
+THEME_FONT_EXTENSIONS = {
+    '.woff2': ('font/woff2', 'woff2'),
+    '.woff': ('font/woff', 'woff'),
+    '.ttf': ('font/ttf', 'truetype'),
+    '.otf': ('font/otf', 'opentype'),
+}
+
+
+def _theme_text_values(keys):
+    sb = get_client()
+    full_keys = [f'theme.{key}' for key in keys]
+    rows = execute_with_retry(sb.table('system_texts').select('key, value').in_('key', full_keys)).data or []
+    return {str(row.get('key') or '').replace('theme.', '', 1): row.get('value') for row in rows}
+
+
+@app.route('/api/theme/font', methods=['POST'])
+def upload_theme_font():
+    """Upload one system-wide custom font and store it in private Storage."""
+    username, err = _require_auth()
+    if err:
+        return err
+    uploaded = request.files.get('font')
+    if not uploaded or not uploaded.filename:
+        return jsonify({'error': 'اختار ملف خط أولًا'}), 400
+    original_name = os.path.basename(uploaded.filename).strip()
+    ext = os.path.splitext(original_name)[1].lower()
+    if ext not in THEME_FONT_EXTENSIONS:
+        return jsonify({'error': 'الصيغ المسموحة: WOFF2 أو WOFF أو TTF أو OTF'}), 400
+    content = uploaded.read(THEME_FONT_MAX_BYTES + 1)
+    if not content:
+        return jsonify({'error': 'ملف الخط فارغ'}), 400
+    if len(content) > THEME_FONT_MAX_BYTES:
+        return jsonify({'error': f'حجم الخط أكبر من {THEME_FONT_MAX_BYTES // (1024 * 1024)}MB'}), 400
+    mime, css_format = THEME_FONT_EXTENSIONS[ext]
+    storage_path = f'fonts/{uuid.uuid4().hex}{ext}'
+    sb = get_client()
+    old = _theme_text_values(['custom_font_path'])
+    try:
+        sb.storage.from_(SYSTEM_ASSETS_BUCKET).upload(
+            storage_path,
+            content,
+            file_options={'content-type': mime, 'upsert': 'false'},
+        )
+        version = uuid.uuid4().hex[:12]
+        now = datetime.now(timezone.utc).isoformat()
+        values = {
+            'custom_font_enabled': 'true',
+            'custom_font_name': os.path.splitext(original_name)[0][:120],
+            'custom_font_path': storage_path,
+            'custom_font_format': css_format,
+            'custom_font_version': version,
+        }
+        execute_with_retry(sb.table('system_texts').upsert([
+            {'key': f'theme.{key}', 'value': value, 'page': 'theme', 'updated_at': now, 'updated_by': username}
+            for key, value in values.items()
+        ], on_conflict='key'))
+        old_path = str(old.get('custom_font_path') or '')
+        if old_path and old_path != storage_path:
+            try:
+                sb.storage.from_(SYSTEM_ASSETS_BUCKET).remove([old_path])
+            except Exception:
+                pass
+        return jsonify({'ok': True, **values, 'font_url': f'/api/theme/font-file?v={version}'})
+    except Exception as exc:
+        try:
+            sb.storage.from_(SYSTEM_ASSETS_BUCKET).remove([storage_path])
+        except Exception:
+            pass
+        return jsonify({'error': f'تعذر رفع الخط. تأكد من تشغيل ملف SQL الخاص باستوديو التصميم: {exc}'}), 400
+
+
+@app.route('/api/theme/font', methods=['DELETE'])
+def delete_theme_font():
+    username, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    old = _theme_text_values(['custom_font_path'])
+    old_path = str(old.get('custom_font_path') or '')
+    if old_path:
+        try:
+            sb.storage.from_(SYSTEM_ASSETS_BUCKET).remove([old_path])
+        except Exception:
+            pass
+    now = datetime.now(timezone.utc).isoformat()
+    values = {
+        'custom_font_enabled': 'false', 'custom_font_name': '', 'custom_font_path': '',
+        'custom_font_format': '', 'custom_font_version': uuid.uuid4().hex[:12],
+    }
+    execute_with_retry(sb.table('system_texts').upsert([
+        {'key': f'theme.{key}', 'value': value, 'page': 'theme', 'updated_at': now, 'updated_by': username}
+        for key, value in values.items()
+    ], on_conflict='key'))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/theme/font-file', methods=['GET'])
+def get_theme_font_file():
+    values = _theme_text_values(['custom_font_enabled', 'custom_font_name', 'custom_font_path', 'custom_font_format'])
+    if str(values.get('custom_font_enabled') or '').lower() not in ('1', 'true', 'yes', 'on'):
+        return jsonify({'error': 'لا يوجد خط مخصص مفعّل'}), 404
+    storage_path = str(values.get('custom_font_path') or '')
+    if not storage_path:
+        return jsonify({'error': 'ملف الخط غير موجود'}), 404
+    css_format = str(values.get('custom_font_format') or 'woff2')
+    mime = {'woff2': 'font/woff2', 'woff': 'font/woff', 'truetype': 'font/ttf', 'opentype': 'font/otf'}.get(css_format, 'application/octet-stream')
+    try:
+        content = get_client().storage.from_(SYSTEM_ASSETS_BUCKET).download(storage_path)
+        response = send_file(
+            io.BytesIO(content), mimetype=mime, as_attachment=False,
+            download_name=os.path.basename(storage_path), max_age=31536000,
+        )
+        response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+        return response
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تحميل الخط: {exc}'}), 404
 
 
 # ============================================================
