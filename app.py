@@ -920,12 +920,23 @@ def _enrich_legacy_vegetable_receipts(receipts, links, worker_links):
     return enriched
 
 
-def _enrich_legacy_sauce_receipts(receipts, sauce_logs):
+def _enrich_legacy_sauce_receipts(receipts, sauce_logs, snapshot_logs=None):
     """يستعيد علامة الاستلام للسجلات القديمة من إشعارات upload_log.
 
     بعض الصفوف القديمة في sauce_receipts لا تحتوي submitted_days/submitted_at
     رغم أن العامل نفذ الاستلام، لكن حدث الاستلام ما زال محفوظًا في upload_log.
     """
+    snapshots = {}
+    for snapshot_row in snapshot_logs or []:
+        payload = _read_upload_log_message(snapshot_row)
+        receipt_id = str(payload.get('receipt_id') or snapshot_row.get('file_name') or '').strip()
+        if not receipt_id or not payload.get('days'):
+            continue
+        current = snapshots.get(receipt_id)
+        current_time = str((current or {}).get('submitted_at') or '')
+        if str(payload.get('submitted_at') or '') >= current_time:
+            snapshots[receipt_id] = payload
+
     submission_events = {}
     for log_row in sauce_logs:
         file_name = str(log_row.get('file_name') or '')
@@ -946,15 +957,32 @@ def _enrich_legacy_sauce_receipts(receipts, sauce_logs):
 
     enriched = []
     matched_prefixes = set()
+    matched_receipt_ids = set()
     for receipt in receipts:
         row = dict(receipt)
         receipt_id = str(row.get('id') or '')
+        snapshot = snapshots.get(receipt_id)
+        if snapshot:
+            matched_receipt_ids.add(receipt_id)
+            for key in ('days', 'submitted_days', 'submitted_at', 'created_at', 'status'):
+                if not row.get(key) and snapshot.get(key):
+                    row[key] = snapshot[key]
         for prefix in submission_events:
             if prefix and receipt_id.startswith(prefix):
                 row['archive_received_hint'] = True
                 matched_prefixes.add(prefix)
                 break
         enriched.append(row)
+
+    for receipt_id, snapshot in snapshots.items():
+        if receipt_id in matched_receipt_ids:
+            continue
+        row = dict(snapshot)
+        row['id'] = receipt_id
+        row['archive_received_hint'] = True
+        row['archive_snapshot_only'] = True
+        enriched.append(row)
+        matched_prefixes.add(receipt_id[:8])
 
     # لو صف sauce_receipts نفسه اختفى أو لم يعد يرجع من قاعدة البيانات، نبني
     # بطاقة أرشيف آمنة من إشعارات الاستلام الباقية بدل ما يختفي التاريخ كله.
@@ -1023,9 +1051,17 @@ def receipt_notifications_list():
         .order('created_at', desc=True)
         .limit(2000)
     )
+    sauce_snapshots_res = execute_with_retry(
+        sb.table('upload_log')
+        .select('id,file_name,message,created_at')
+        .eq('file_type', 'sauce_receipt_snapshot')
+        .order('created_at', desc=True)
+        .limit(1000)
+    )
     sauce_receipts = _enrich_legacy_sauce_receipts(
         sauce_res.data or [],
         sauce_logs_res.data or [],
+        sauce_snapshots_res.data or [],
     )
     vegetable_receipts = _enrich_legacy_vegetable_receipts(
         veg_res.data or [],
@@ -1619,8 +1655,44 @@ def sauce_receipt_delete(receipt_id):
             execute_with_retry(
                 sb.table('worker_link_assignments').delete().eq('id', assignment.get('id'))
             )
+    receipt_prefix = str(receipt_id)[:8]
+    for log_type in ('sauce_receipt', 'sauce_receipt_snapshot'):
+        log_rows = execute_with_retry(
+            sb.table('upload_log').select('id,file_name').eq('file_type', log_type).limit(3000)
+        ).data or []
+        for log_row in log_rows:
+            file_name = str(log_row.get('file_name') or '')
+            is_snapshot = log_type == 'sauce_receipt_snapshot' and file_name == str(receipt_id)
+            is_notice = log_type == 'sauce_receipt' and f'رابط استلام {receipt_prefix}' in file_name
+            if is_snapshot or is_notice:
+                execute_with_retry(sb.table('upload_log').delete().eq('id', log_row.get('id')))
     execute_with_retry(sb.table('sauce_receipts').delete().eq('id', receipt_id))
     return jsonify({'ok': True})
+
+
+@app.route('/api/sauce-receipt-archive-log/<receipt_prefix>', methods=['DELETE'])
+def sauce_receipt_archive_log_delete(receipt_prefix):
+    _, err = _require_auth()
+    if err:
+        return err
+    if not re.fullmatch(r'[A-Za-z0-9_-]{3,80}', str(receipt_prefix or '')):
+        return jsonify({'error': 'رقم سجل الصوص غير صحيح'}), 400
+    sb = get_client()
+    log_rows = execute_with_retry(
+        sb.table('upload_log')
+        .select('id,file_name')
+        .eq('file_type', 'sauce_receipt')
+        .limit(3000)
+    ).data or []
+    deleted = 0
+    for log_row in log_rows:
+        file_name = str(log_row.get('file_name') or '')
+        match = re.search(r'رابط استلام\s+([^\s-]+)', file_name)
+        if not match or match.group(1).strip() != receipt_prefix:
+            continue
+        execute_with_retry(sb.table('upload_log').delete().eq('id', log_row.get('id')))
+        deleted += 1
+    return jsonify({'ok': True, 'deleted_logs': deleted})
 
 
 @app.route('/api/sauce-receipt/<receipt_id>/reopen', methods=['POST'])
@@ -1676,6 +1748,25 @@ def sauce_receipt_get(receipt_id):
         'submitted_days': submitted_days,
         'created_at': receipt['created_at'],
     })
+
+
+def _save_sauce_receipt_snapshot(receipt_id, receipt, submitted_days, submitted_at):
+    snapshot = {
+        'kind': 'sauce_receipt_snapshot',
+        'receipt_id': str(receipt_id),
+        'created_at': receipt.get('created_at') or '',
+        'submitted_at': submitted_at,
+        'status': 'submitted',
+        'days': receipt.get('days') or [],
+        'submitted_days': submitted_days,
+    }
+    _log(
+        'sauce_receipt_snapshot',
+        str(receipt_id),
+        None,
+        json.dumps(snapshot, ensure_ascii=False),
+        level='info',
+    )
 
 
 @app.route('/api/sauce-receipt/<receipt_id>/submit-day', methods=['POST'])
@@ -1749,6 +1840,7 @@ def sauce_receipt_submit_day(receipt_id):
         'submitted_days': submitted_days,
         'submitted_at': now_iso,  # وقت آخر تعديل عمومًا على الرابط كله
     }).eq('id', receipt_id))
+    _save_sauce_receipt_snapshot(receipt_id, receipt, submitted_days, now_iso)
 
     day_time_cairo = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime('%Y-%m-%d %I:%M %p')
     action_word = 'تعديل' if is_edit else 'استلام'
@@ -1877,6 +1969,8 @@ def sauce_receipt_submit(receipt_id):
         'submitted_days': result_days,
         'submitted_at': datetime.now(timezone.utc).isoformat(),
     }).eq('id', receipt_id))
+    snapshot_time = datetime.now(timezone.utc).isoformat()
+    _save_sauce_receipt_snapshot(receipt_id, receipt, result_days, snapshot_time)
 
     notice = 'تم استلام الصوص بالكامل، كل الكميات مطابقة ✅' if not summary_lines else (
         'تم استلام الصوص - فيه فروقات محتاجة مراجعة:\n' + '\n'.join(summary_lines))
