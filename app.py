@@ -2469,66 +2469,240 @@ def update_theme():
     return jsonify({'ok': True})
 
 
-@app.route('/api/system/factory-reset', methods=['POST'])
-def system_factory_reset():
-    """Restore the approved system theme without touching operational records."""
+FACTORY_CHECKPOINT_KEY = 'system.factory_checkpoint'
+
+
+def _factory_manager_with_password():
     username, err = _require_auth()
     if err:
-        return err
-
+        return None, err
     permissions = _permissions_for_username(username)
     pages = permissions.get('pages') if isinstance(permissions.get('pages'), list) else []
     actions = permissions.get('actions') if isinstance(permissions.get('actions'), list) else []
     if _role_for_username(username) != ADMIN_ROLE or '*' not in pages or '*' not in actions:
-        return jsonify({'error': 'ضبط المصنع متاح لمدير النظام كامل الصلاحيات فقط'}), 403
-
+        return None, (jsonify({'error': 'نقاط الاستعادة متاحة لمدير النظام كامل الصلاحيات فقط'}), 403)
     payload = request.get_json(silent=True) or {}
     password = payload.get('password') or ''
     if not password:
-        return jsonify({'error': 'اكتب باسورد مدير النظام للتأكيد'}), 400
-
+        return None, (jsonify({'error': 'اكتب باسورد مدير النظام للتأكيد'}), 400)
     sb = get_client()
     user_res = execute_with_retry(sb.table('app_users').select('password_hash').eq('username', username).limit(1))
     user_rows = user_res.data or []
     if not user_rows or not check_password_hash(user_rows[0].get('password_hash') or '', password):
-        return jsonify({'error': 'باسورد مدير النظام غير صحيح'}), 403
+        return None, (jsonify({'error': 'باسورد مدير النظام غير صحيح'}), 403)
+    return username, None
 
+
+def _current_theme_for_checkpoint(sb):
+    res = execute_with_retry(sb.table('system_theme').select('*').eq('id', 1))
+    rows = res.data or []
+    theme = {**DEFAULT_THEME, **(rows[0] if rows else {})}
+    extra_res = execute_with_retry(sb.table('system_texts').select('key, value').like('key', 'theme.%'))
+    for row in (extra_res.data or []):
+        key = str(row.get('key') or '').replace('theme.', '', 1)
+        if key not in DEFAULT_THEME:
+            continue
+        raw = row.get('value')
+        if isinstance(DEFAULT_THEME[key], bool):
+            theme[key] = str(raw).lower() in ('1', 'true', 'yes', 'on')
+        elif isinstance(DEFAULT_THEME[key], int):
+            try:
+                theme[key] = int(raw)
+            except Exception:
+                theme[key] = DEFAULT_THEME[key]
+        elif isinstance(DEFAULT_THEME[key], list):
+            try:
+                parsed = json.loads(raw)
+                theme[key] = parsed if isinstance(parsed, list) else DEFAULT_THEME[key]
+            except Exception:
+                theme[key] = DEFAULT_THEME[key]
+        else:
+            theme[key] = raw
+    return {key: theme.get(key, value) for key, value in DEFAULT_THEME.items()}
+
+
+def _write_theme_checkpoint(sb, theme, username):
     now = datetime.now(timezone.utc).isoformat()
     base_keys = {
         'primary_color', 'primary_dark_color', 'ink_color', 'muted_color', 'soft_color', 'line_color', 'ok_color',
         'font_family', 'font_label', 'animations_enabled', 'dark_mode_enabled',
         'dark_bg', 'dark_surface', 'dark_text', 'dark_muted', 'dark_border',
     }
-    base_values = {key: DEFAULT_THEME[key] for key in base_keys}
-    extra_values = {key: value for key, value in DEFAULT_THEME.items() if key not in base_keys}
-
-    try:
-        execute_with_retry(sb.table('system_theme').upsert({
-            'id': 1,
-            **base_values,
+    execute_with_retry(sb.table('system_theme').upsert({
+        'id': 1,
+        **{key: theme.get(key, DEFAULT_THEME[key]) for key in base_keys},
+        'updated_at': now,
+        'updated_by': username,
+    }, on_conflict='id'))
+    execute_with_retry(sb.table('system_texts').upsert([
+        {
+            'key': f'theme.{key}',
+            'value': json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value),
+            'page': 'theme',
             'updated_at': now,
             'updated_by': username,
-        }, on_conflict='id'))
-        execute_with_retry(sb.table('system_texts').upsert([
-            {
-                'key': f'theme.{key}',
-                'value': json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value),
-                'page': 'theme',
-                'updated_at': now,
-                'updated_by': username,
-            }
-            for key, value in extra_values.items()
-        ], on_conflict='key'))
+        }
+        for key, value in theme.items() if key not in base_keys
+    ], on_conflict='key'))
+
+
+def _current_system_texts_for_checkpoint(sb):
+    rows = execute_with_retry(sb.table('system_texts').select('key, value')).data or []
+    return {
+        str(row.get('key')): row.get('value')
+        for row in rows
+        if row.get('key') and row.get('key') != FACTORY_CHECKPOINT_KEY
+        and not str(row.get('key')).startswith('theme.')
+    }
+
+
+def _write_system_texts_checkpoint(sb, texts, username):
+    if not isinstance(texts, dict) or not texts:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    execute_with_retry(sb.table('system_texts').upsert([
+        {
+            'key': key,
+            'value': value,
+            'page': str(key).split('.')[0],
+            'updated_at': now,
+            'updated_by': username,
+        }
+        for key, value in texts.items()
+        if key and key != FACTORY_CHECKPOINT_KEY and not str(key).startswith('theme.')
+    ], on_conflict='key'))
+
+
+def _hostinger_recovery(action, username):
+    recovery_url = (os.environ.get('HOSTINGER_RECOVERY_URL') or '').strip()
+    if not recovery_url:
+        raise RuntimeError('أضف HOSTINGER_RECOVERY_URL في إعدادات Render أولًا')
+    ticket = secrets.token_urlsafe(40)
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    _log('hostinger_recovery_ticket', ticket, None, json.dumps({
+        'action': action,
+        'username': username,
+        'expires_at': expires_at,
+        'used_at': None,
+    }, ensure_ascii=False), level='info')
+    response = requests.post(recovery_url, data={'action': action, 'ticket': ticket}, timeout=180)
+    data = response.json() if 'application/json' in response.headers.get('content-type', '') else {}
+    if not response.ok or not data.get('ok'):
+        raise RuntimeError(data.get('error') or f'تعذر تنفيذ نسخة Hostinger ({response.status_code})')
+    return data
+
+
+@app.route('/api/system/hostinger-ticket/consume', methods=['POST'])
+def consume_hostinger_recovery_ticket():
+    payload = request.get_json(silent=True) or request.form or {}
+    ticket = str(payload.get('ticket') or '')
+    action = str(payload.get('action') or '')
+    if len(ticket) < 40 or action not in ('checkpoint', 'restore'):
+        return jsonify({'error': 'طلب الاستعادة غير صالح'}), 400
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('upload_log').select('*')
+        .eq('file_type', 'hostinger_recovery_ticket').eq('file_name', ticket)
+        .order('created_at', desc=True).limit(1)
+    )
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'تصريح الاستعادة غير موجود'}), 403
+    row = rows[0]
+    try:
+        meta = json.loads(row.get('message') or '{}')
+        expires_at = datetime.fromisoformat(str(meta.get('expires_at') or '').replace('Z', '+00:00'))
+    except Exception:
+        return jsonify({'error': 'تصريح الاستعادة تالف'}), 403
+    if meta.get('used_at') or meta.get('action') != action or expires_at < datetime.now(timezone.utc):
+        return jsonify({'error': 'تصريح الاستعادة منتهي أو مستخدم'}), 403
+    meta['used_at'] = datetime.now(timezone.utc).isoformat()
+    execute_with_retry(sb.table('upload_log').update({
+        'message': json.dumps(meta, ensure_ascii=False),
+    }).eq('id', row.get('id')))
+    return jsonify({'ok': True, 'action': action})
+
+
+@app.route('/api/system/factory-checkpoint', methods=['POST'])
+def update_factory_checkpoint():
+    username, err = _factory_manager_with_password()
+    if err:
+        return err
+    backend_commit = (os.environ.get('RENDER_GIT_COMMIT') or '').strip()
+    if not backend_commit:
+        return jsonify({'error': 'Render لم يرسل رقم نسخة GitHub الحالية'}), 503
+    try:
+        frontend_result = _hostinger_recovery('checkpoint', username)
+        sb = get_client()
+        checkpoint = {
+            'version': 1,
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'created_by': username,
+            'backend_commit': backend_commit,
+            'frontend_archive': frontend_result.get('archive'),
+            'theme': _current_theme_for_checkpoint(sb),
+            'system_texts': _current_system_texts_for_checkpoint(sb),
+        }
+        execute_with_retry(sb.table('system_texts').upsert({
+            'key': FACTORY_CHECKPOINT_KEY,
+            'value': json.dumps(checkpoint, ensure_ascii=False),
+            'page': 'system',
+            'updated_at': checkpoint['created_at'],
+            'updated_by': username,
+        }, on_conflict='key'))
+        _log('system_factory_checkpoint', username, None,
+             f'تم تحديث نقطة الاستعادة: {backend_commit}', level='info')
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تحديث المستجدات: {exc}'}), 400
+    return jsonify({'ok': True, 'checkpoint': checkpoint,
+                    'message': 'تم حفظ آخر مستجدات الفرونت والباك إند كنقطة الاستعادة الجديدة'})
+
+
+@app.route('/api/system/factory-reset', methods=['POST'])
+def system_factory_reset():
+    """Restore the latest approved checkpoint without touching operational records."""
+    username, err = _factory_manager_with_password()
+    if err:
+        return err
+    sb = get_client()
+    rows = execute_with_retry(sb.table('system_texts').select('value').eq('key', FACTORY_CHECKPOINT_KEY).limit(1)).data or []
+    if not rows:
+        return jsonify({'error': 'لا توجد نقطة استعادة. اضغط «تحديث المستجدات» أولًا'}), 409
+    try:
+        checkpoint = json.loads(rows[0].get('value') or '{}')
+    except Exception:
+        return jsonify({'error': 'نقطة الاستعادة المحفوظة تالفة'}), 500
+    backend_commit = str(checkpoint.get('backend_commit') or '').strip()
+    theme = checkpoint.get('theme') if isinstance(checkpoint.get('theme'), dict) else None
+    system_texts = checkpoint.get('system_texts') if isinstance(checkpoint.get('system_texts'), dict) else {}
+    render_api_key = (os.environ.get('RENDER_API_KEY') or '').strip()
+    render_service_id = (os.environ.get('RENDER_SERVICE_ID') or '').strip()
+    if not backend_commit or not theme or not render_api_key or not render_service_id:
+        return jsonify({'error': 'نقطة الاستعادة أو إعداد RENDER_API_KEY غير مكتمل'}), 503
+
+    try:
+        _hostinger_recovery('restore', username)
+        _write_theme_checkpoint(sb, theme, username)
+        _write_system_texts_checkpoint(sb, system_texts, username)
+        deploy_response = requests.post(
+            f'https://api.render.com/v1/services/{render_service_id}/deploys',
+            headers={'Authorization': f'Bearer {render_api_key}', 'Accept': 'application/json'},
+            json={'commitId': backend_commit},
+            timeout=30,
+        )
+        if deploy_response.status_code not in (201, 202):
+            raise RuntimeError(f'Render رفض استعادة نسخة الباك إند ({deploy_response.status_code})')
         _log('system_factory_reset', username, None,
-             'تم استرجاع إعدادات النسخة المعتمدة مع الاحتفاظ ببيانات التشغيل', level='info')
+             f'تم طلب استرجاع نقطة النظام: {backend_commit}', level='info')
     except Exception as exc:
         return jsonify({'error': f'تعذر تنفيذ ضبط المصنع: {exc}'}), 400
 
     return jsonify({
         'ok': True,
-        'theme': DEFAULT_THEME,
+        'theme': theme,
         'preserved_data': True,
-        'message': 'تم استرجاع إعدادات النظام مع الاحتفاظ بكل بيانات التشغيل',
+        'backend_commit': backend_commit,
+        'message': 'بدأ استرجاع آخر نقطة محفوظة مع الاحتفاظ بكل بيانات التشغيل',
     })
 
 
@@ -4783,6 +4957,18 @@ def smart_order_packages():
     return jsonify({'packages': list_menu_packages()})
 
 
+@app.route('/api/smart-order/integrity', methods=['GET'])
+def smart_order_integrity():
+    """يؤكد أن القالب ومعادلاته والماكرو وقائمة الوجبات متطابقون قبل الحساب."""
+    try:
+        from smart_ordering import get_template_integrity
+        report = get_template_integrity()
+        return jsonify(report), (200 if report.get('ready') else 503)
+    except Exception as e:
+        app.logger.exception('smart_order_integrity failed')
+        return jsonify({'ready': False, 'errors': [f'تعذر فحص ملف توكيو: {e}']}), 500
+
+
 @app.route('/api/smart-order/calculate', methods=['POST'])
 def smart_order_calculate():
     """بتاخد {"orders": [{"meal_name": "...", "order_count": N}, ...]} وترجّع
@@ -4799,6 +4985,29 @@ def smart_order_calculate():
     except Exception as e:
         app.logger.exception('smart_order_calculate failed')
         return jsonify({'error': f'حصل خطأ في الحساب: {e}'}), 500
+
+
+@app.route('/api/smart-order/export-master', methods=['POST'])
+def smart_order_export_master():
+    """ينزّل نسخة xlsm أصلية بعد تحديث Z1 مع ضمان ثبات بصمة الماكرو."""
+    from smart_ordering import build_macro_workbook, get_template_integrity
+    payload = request.get_json(silent=True) or {}
+    orders = payload.get('orders') or []
+    integrity = get_template_integrity()
+    if not integrity.get('ready'):
+        return jsonify({'error': 'تم إيقاف التصدير لأن فحص الملف لم ينجح', 'details': integrity.get('errors', [])}), 409
+    try:
+        out_path = build_macro_workbook(orders)
+        today = datetime.now().strftime('%Y-%m-%d')
+        return send_file(
+            out_path,
+            as_attachment=True,
+            download_name=f'Tokyo_Production_Master_{today}.xlsm',
+            mimetype='application/vnd.ms-excel.sheet.macroEnabled.12',
+        )
+    except Exception as e:
+        app.logger.exception('smart_order_export_master failed')
+        return jsonify({'error': f'تعذر تجهيز ملف توكيو الأصلي: {e}'}), 500
 
 
 

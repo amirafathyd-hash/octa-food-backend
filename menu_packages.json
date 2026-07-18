@@ -14,7 +14,7 @@
     ["Chicken curry with coconut cream", "Coconut Chicken"],
     ["Meat steak with mushroom and saffron rice", "Chicken Steak Sauce"],
     ["Spicy Indian 65 chicken with white rice", "Chicken 65"],
-    ["Blankwet shrimp with saffron rice", "Blankwet Shrimp"],
+    ["Blankwet fish with saffron rice", "Blankwet Fish"],
     ["BBQ chicken skewers with African jollof rice", "BBQ Chicken Skewers"],
     ["Lamb mkhtoum with white rice", "Mkhtoum Lahm"],
     ["Beef burger", "Beef Burger"]
@@ -24,7 +24,7 @@
     ["Chicken pasta with vegetables", "Chicken Pasta with Vegetable"],
     ["Changzezi chicken with white rice", "Changezi Chicken"],
     ["Daoud Pasha with saffron rice", "Daoud Basha"],
-    ["Salmon with cream and mashed potatoes", "Salmon with cream"],
+    ["Fish with cream and mashed potatoes", "Fish with cream"],
     ["High protein meat moussaka with white rice", "Moussaka Meat"],
     ["Oriental beef with nuts rice", "Laham Oriental"],
     ["Chicken Fajita sandwich with oat bread", "Chicken Fajita"]
@@ -38,7 +38,7 @@
     ["Navy bean with meat and white rice", "Lahm Fasooliya"],
     ["BBQ chicken sandwich with Ciabatta Bread", "BBQ Chicken"],
     ["Octa chicken poke bowl", "Octa Poki Bowl"],
-    ["Lemon Shrimp with orzo and spinach", "Lemon Shrimp"]
+    ["Lemon Fish with orzo and spinach", "Lemon Fish"]
   ],
   "Wednesday": [
     ["Sriracha chicken with vegetable rice", "Sriracha Chicken"],
@@ -47,7 +47,7 @@
     ["High protein meat lasagna", "Lasagne Bachamel"],
     ["Meat kebab with mandi rice", "Meat Kebab"],
     ["Bolognese meat sauce with pasta", "Lahm Bolognese"],
-    ["Curry and cream shrimp with saffron rice", "Curry Shrimp"],
+    ["Curry and cream fish with saffron rice", "Curry Fish"],
     ["Indian kebab with white rice", "Kebab Hindi"],
     ["Philadelphia beef sandwich with oat bread", "Beef philly cheese steak"]
   ],

@@ -15,15 +15,25 @@
 """
 import os
 import json
+import hashlib
+import re
+import tempfile
+import zipfile
+import xml.etree.ElementTree as ET
+from openpyxl import load_workbook
 from pycel import ExcelCompiler
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 PORTIONS_PATH = os.path.join(os.path.dirname(__file__), 'meal_portions_data.json')
 PACKAGES_PATH = os.path.join(os.path.dirname(__file__), 'menu_packages.json')
+EXPECTED_TEMPLATE_SHA256 = '0e110f2f45330cce3c1aea0f2f86542323614f3329e64ed935dc0be71ddb5d18'
+EXPECTED_VBA_SHA256 = 'a6e4ee6fecaca26a334e05efba9422ca9f6d1ea539a638969fb4ab47d28c5758'
+EXPECTED_SHEET_COUNT = 88
+EXPECTED_FORMULA_COUNT = 31085
 
 with open(PORTIONS_PATH, encoding='utf-8') as f:
     # { meal_name: [portion_grams_per_order, arabic_name] }
-    MEAL_PORTIONS = json.load(f)
+    _SAVED_MEAL_PORTIONS = json.load(f)
 
 with open(PACKAGES_PATH, encoding='utf-8') as f:
     # { "Saturday": [["اسم المنيو", "اسم الشيت"], ...], ... }
@@ -34,6 +44,171 @@ DAY_LABELS_AR = {
     'Tuesday': 'الثلاثاء', 'Wednesday': 'الأربعاء', 'Thursday': 'الخميس',
     'Friday': 'الجمعة',
 }
+
+_RENAMED_MEALS = {
+    'Blankwet Fish': 'Blankwet Shrimp',
+    'Fish with cream': 'Salmon with cream',
+    'Lemon Fish': 'Lemon Shrimp',
+    'Curry Fish': 'Curry Shrimp',
+}
+_RENAMED_ARABIC = {
+    'Blankwet Fish': 'سمك بلانكويت',
+    'Fish with cream': 'سمك بالكريمة والبازلاء',
+    'Lemon Fish': 'سمك بالليمون',
+    'Curry Fish': 'سمك بالكاري والكريمة',
+}
+
+
+def _load_live_meal_portions():
+    """يقرأ وزن الحصة من نفس ملف توكيو المستخدم في الحساب.
+
+    الوزن = قيمة Z1 الحالية / عدد الوجبات المرجعي في All_Ingredients!AN.
+    بهذه الطريقة لا تظل الداشبورد مرتبطة بأرقام نسخة أقدم من ملف الإكسل.
+    """
+    if not os.path.exists(TOKYO_TEMPLATE_PATH):
+        return dict(_SAVED_MEAL_PORTIONS)
+
+    wb = load_workbook(TOKYO_TEMPLATE_PATH, data_only=True, read_only=False, keep_vba=True)
+    try:
+        ws = wb['All_Ingredients']
+        portions = {}
+        for row in range(2, ws.max_row + 1):
+            sheet_name = ws.cell(row=row, column=37).value  # AK
+            reference_count = ws.cell(row=row, column=40).value  # AN
+            if not sheet_name or sheet_name == 'Butchery' or sheet_name not in wb.sheetnames:
+                continue
+            z1_value = wb[sheet_name]['Z1'].value
+            if not isinstance(z1_value, (int, float)) or not isinstance(reference_count, (int, float)) or reference_count <= 0:
+                continue
+            saved_key = sheet_name if sheet_name in _SAVED_MEAL_PORTIONS else _RENAMED_MEALS.get(sheet_name)
+            arabic_name = _RENAMED_ARABIC.get(sheet_name) or (_SAVED_MEAL_PORTIONS.get(saved_key) or [None, ''])[1]
+            portions[str(sheet_name)] = [round(float(z1_value) / float(reference_count), 2), arabic_name]
+        return portions or dict(_SAVED_MEAL_PORTIONS)
+    finally:
+        wb.close()
+
+
+MEAL_PORTIONS = _load_live_meal_portions()
+
+
+def get_template_integrity():
+    """فحص سريع للقالب قبل السماح بأي حساب حساس."""
+    if not os.path.exists(TOKYO_TEMPLATE_PATH):
+        return {'ready': False, 'errors': ['ملف توكيو الرئيسي غير موجود على السيرفر']}
+
+    errors = []
+    with zipfile.ZipFile(TOKYO_TEMPLATE_PATH, 'r') as archive:
+        names = set(archive.namelist())
+        workbook_root = ET.fromstring(archive.read('xl/workbook.xml'))
+        sheet_count = len(workbook_root.findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet'))
+        if 'xl/vbaProject.bin' not in names:
+            errors.append('الماكرو غير موجود داخل الملف')
+            vba_sha256 = None
+        else:
+            vba_sha256 = hashlib.sha256(archive.read('xl/vbaProject.bin')).hexdigest()
+        formula_count = sum(
+            len(re.findall(br'<f(?:\s|>)', archive.read(name)))
+            for name in names if name.startswith('xl/worksheets/sheet') and name.endswith('.xml')
+        )
+
+    missing_package_sheets = sorted({
+        sheet_name
+        for items in MENU_PACKAGES.values()
+        for _, sheet_name in items
+        if sheet_name not in MEAL_PORTIONS
+    })
+    if missing_package_sheets:
+        errors.append('وجبات غير متطابقة مع ملف الإكسل: ' + ', '.join(missing_package_sheets))
+    if sheet_count != EXPECTED_SHEET_COUNT:
+        errors.append(f'عدد الشيتات تغير: المتوقع {EXPECTED_SHEET_COUNT} والموجود {sheet_count}')
+    if formula_count != EXPECTED_FORMULA_COUNT:
+        errors.append(f'عدد المعادلات تغير: المتوقع {EXPECTED_FORMULA_COUNT} والموجود {formula_count}')
+
+    with open(TOKYO_TEMPLATE_PATH, 'rb') as template_file:
+        template_sha256 = hashlib.sha256(template_file.read()).hexdigest()
+    if template_sha256 != EXPECTED_TEMPLATE_SHA256:
+        errors.append('بصمة ملف توكيو لا تطابق النسخة المعتمدة')
+    if vba_sha256 != EXPECTED_VBA_SHA256:
+        errors.append('بصمة الماكرو لا تطابق النسخة المعتمدة')
+
+    return {
+        'ready': not errors,
+        'errors': errors,
+        'sheet_count': sheet_count,
+        'meal_count': len(MEAL_PORTIONS),
+        'formula_count': formula_count,
+        'has_vba': bool(vba_sha256),
+        'vba_sha256': vba_sha256,
+        'template_sha256': template_sha256,
+    }
+
+
+def _sheet_xml_paths(archive):
+    workbook_root = ET.fromstring(archive.read('xl/workbook.xml'))
+    rels_root = ET.fromstring(archive.read('xl/_rels/workbook.xml.rels'))
+    rel_targets = {
+        rel.attrib['Id']: rel.attrib['Target'].lstrip('/')
+        for rel in rels_root
+    }
+    paths = {}
+    rel_attr = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
+    for sheet in workbook_root.findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheets/{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet'):
+        target = rel_targets.get(sheet.attrib.get(rel_attr), '')
+        if target.startswith('worksheets/'):
+            target = 'xl/' + target
+        elif not target.startswith('xl/'):
+            target = 'xl/' + target
+        paths[sheet.attrib['name']] = target
+    return paths
+
+
+def build_macro_workbook(meal_orders):
+    """ينشئ نسخة تشغيل من ملف xlsm بتعديل Z1 فقط داخل XML.
+
+    لا نفتح الملف ثم نعيد حفظه بمكتبة جداول، وبالتالي يظل الماكرو وكل المعادلات
+    والرسومات والإضافات الثنائية بنفس البايتات الموجودة في القالب الأصلي.
+    """
+    updates = {}
+    for item in meal_orders or []:
+        name = item.get('meal_name')
+        count = item.get('order_count')
+        if name not in MEAL_PORTIONS:
+            raise ValueError(f'الوجبة "{name}" غير موجودة في القالب الحالي')
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            raise ValueError(f'عدد طلبات "{name}" غير صحيح')
+        if count <= 0:
+            raise ValueError(f'عدد طلبات "{name}" لازم يكون أكبر من صفر')
+        updates[name] = round(count * MEAL_PORTIONS[name][0], 2)
+    if not updates:
+        raise ValueError('اختار وجبة واحدة على الأقل')
+
+    out_path = tempfile.NamedTemporaryFile(suffix='.xlsm', delete=False).name
+    with zipfile.ZipFile(TOKYO_TEMPLATE_PATH, 'r') as source:
+        sheet_paths = _sheet_xml_paths(source)
+        missing = sorted(name for name in updates if name not in sheet_paths)
+        if missing:
+            raise ValueError('شيتات غير موجودة في الملف: ' + ', '.join(missing))
+        path_updates = {sheet_paths[name]: value for name, value in updates.items()}
+        original_vba = hashlib.sha256(source.read('xl/vbaProject.bin')).hexdigest()
+        with zipfile.ZipFile(out_path, 'w') as output:
+            for info in source.infolist():
+                data = source.read(info.filename)
+                if info.filename in path_updates:
+                    value = ('%.10f' % path_updates[info.filename]).rstrip('0').rstrip('.')
+                    pattern = br'(<c\b[^>]*\br="Z1"[^>]*>.*?<v>)([^<]*)(</v>.*?</c>)'
+                    data, changed = re.subn(pattern, lambda m: m.group(1) + value.encode('ascii') + m.group(3), data, count=1)
+                    if changed != 1:
+                        raise ValueError(f'تعذر تحديث خلية Z1 داخل {info.filename}')
+                output.writestr(info, data)
+
+    with zipfile.ZipFile(out_path, 'r') as result:
+        result_vba = hashlib.sha256(result.read('xl/vbaProject.bin')).hexdigest()
+        if result_vba != original_vba:
+            os.unlink(out_path)
+            raise ValueError('تم إيقاف التصدير لأن بصمة الماكرو تغيرت')
+    return out_path
 
 def _get_excel():
     """بنعمل نسخة جديدة من المحرك في كل مرة (مش بنعيد استخدام نسخة قديمة) —
