@@ -17,13 +17,16 @@ import os
 import json
 import hashlib
 import re
+import shutil
 import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from openpyxl import load_workbook
 from pycel import ExcelCompiler
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
+TOKYO_BASELINE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_template_baseline.json')
 PORTIONS_PATH = os.path.join(os.path.dirname(__file__), 'meal_portions_data.json')
 PACKAGES_PATH = os.path.join(os.path.dirname(__file__), 'menu_packages.json')
 EXPECTED_TEMPLATE_SHA256 = '0e110f2f45330cce3c1aea0f2f86542323614f3329e64ed935dc0be71ddb5d18'
@@ -90,6 +93,59 @@ def _load_live_meal_portions():
 
 
 MEAL_PORTIONS = _load_live_meal_portions()
+_MEAL_PORTIONS_MTIME = os.path.getmtime(TOKYO_TEMPLATE_PATH) if os.path.exists(TOKYO_TEMPLATE_PATH) else None
+
+
+def _refresh_live_meal_portions(force=False):
+    """Refresh per worker after a template upload without restarting Render."""
+    global MEAL_PORTIONS, _MEAL_PORTIONS_MTIME
+    current_mtime = os.path.getmtime(TOKYO_TEMPLATE_PATH) if os.path.exists(TOKYO_TEMPLATE_PATH) else None
+    if force or current_mtime != _MEAL_PORTIONS_MTIME:
+        MEAL_PORTIONS = _load_live_meal_portions()
+        _MEAL_PORTIONS_MTIME = current_mtime
+    return MEAL_PORTIONS
+
+
+def _template_metrics(path):
+    with zipfile.ZipFile(path, 'r') as archive:
+        names = set(archive.namelist())
+        if 'xl/workbook.xml' not in names:
+            raise ValueError('الملف لا يحتوي على بنية Excel صحيحة')
+        workbook_root = ET.fromstring(archive.read('xl/workbook.xml'))
+        sheet_count = len(workbook_root.findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet'))
+        if 'xl/vbaProject.bin' not in names:
+            vba_sha256 = None
+        else:
+            vba_sha256 = hashlib.sha256(archive.read('xl/vbaProject.bin')).hexdigest()
+        formula_count = sum(
+            len(re.findall(br'<f(?:\s|>)', archive.read(name)))
+            for name in names if name.startswith('xl/worksheets/sheet') and name.endswith('.xml')
+        )
+    with open(path, 'rb') as template_file:
+        template_sha256 = hashlib.sha256(template_file.read()).hexdigest()
+    return {
+        'sheet_count': sheet_count,
+        'formula_count': formula_count,
+        'vba_sha256': vba_sha256,
+        'template_sha256': template_sha256,
+    }
+
+
+def _approved_baseline():
+    if os.path.exists(TOKYO_BASELINE_PATH):
+        try:
+            with open(TOKYO_BASELINE_PATH, encoding='utf-8') as handle:
+                data = json.load(handle)
+            if data.get('vba_sha256') and data.get('sheet_count') and data.get('formula_count'):
+                return data
+        except (OSError, ValueError, TypeError):
+            pass
+    return {
+        'template_sha256': EXPECTED_TEMPLATE_SHA256,
+        'vba_sha256': EXPECTED_VBA_SHA256,
+        'sheet_count': EXPECTED_SHEET_COUNT,
+        'formula_count': EXPECTED_FORMULA_COUNT,
+    }
 
 
 def get_template_integrity():
@@ -98,52 +154,155 @@ def get_template_integrity():
         return {'ready': False, 'errors': ['ملف توكيو الرئيسي غير موجود على السيرفر']}
 
     errors = []
-    with zipfile.ZipFile(TOKYO_TEMPLATE_PATH, 'r') as archive:
-        names = set(archive.namelist())
-        workbook_root = ET.fromstring(archive.read('xl/workbook.xml'))
-        sheet_count = len(workbook_root.findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet'))
-        if 'xl/vbaProject.bin' not in names:
-            errors.append('الماكرو غير موجود داخل الملف')
-            vba_sha256 = None
-        else:
-            vba_sha256 = hashlib.sha256(archive.read('xl/vbaProject.bin')).hexdigest()
-        formula_count = sum(
-            len(re.findall(br'<f(?:\s|>)', archive.read(name)))
-            for name in names if name.startswith('xl/worksheets/sheet') and name.endswith('.xml')
-        )
+    metrics = _template_metrics(TOKYO_TEMPLATE_PATH)
+    sheet_count = metrics['sheet_count']
+    formula_count = metrics['formula_count']
+    vba_sha256 = metrics['vba_sha256']
+    template_sha256 = metrics['template_sha256']
+    baseline = _approved_baseline()
+    portions = _refresh_live_meal_portions()
+    if not vba_sha256:
+        errors.append('الماكرو غير موجود داخل الملف')
 
     missing_package_sheets = sorted({
         sheet_name
         for items in MENU_PACKAGES.values()
         for _, sheet_name in items
-        if sheet_name not in MEAL_PORTIONS
+        if sheet_name not in portions
     })
     if missing_package_sheets:
         errors.append('وجبات غير متطابقة مع ملف الإكسل: ' + ', '.join(missing_package_sheets))
-    if sheet_count != EXPECTED_SHEET_COUNT:
-        errors.append(f'عدد الشيتات تغير: المتوقع {EXPECTED_SHEET_COUNT} والموجود {sheet_count}')
-    if formula_count not in ALLOWED_FORMULA_COUNTS:
-        errors.append(f'عدد المعادلات تغير: المتوقع قرابة {EXPECTED_FORMULA_COUNT} والموجود {formula_count}')
-
-    with open(TOKYO_TEMPLATE_PATH, 'rb') as template_file:
-        template_sha256 = hashlib.sha256(template_file.read()).hexdigest()
+    expected_sheet_count = int(baseline['sheet_count'])
+    expected_formula_count = int(baseline['formula_count'])
+    if sheet_count != expected_sheet_count:
+        errors.append(f'عدد الشيتات تغير: المتوقع {expected_sheet_count} والموجود {sheet_count}')
+    if formula_count not in {expected_formula_count, max(0, expected_formula_count - 1)}:
+        errors.append(f'عدد المعادلات تغير: المتوقع قرابة {expected_formula_count} والموجود {formula_count}')
     # أرقام التشغيل اليومية تغيّر خلايا الإدخال وبالتبعية بصمة الملف بالكامل.
     # لذلك الحماية تعتمد على بنية الملف، عدد المعادلات وبصمة VBA الثابتة، مع
     # إبقاء بصمة النسخة الأصلية كمعلومة فقط لا كسبب لإيقاف التشغيل.
-    if vba_sha256 != EXPECTED_VBA_SHA256:
+    if vba_sha256 != baseline['vba_sha256']:
         errors.append('بصمة الماكرو لا تطابق النسخة المعتمدة')
 
     return {
         'ready': not errors,
         'errors': errors,
         'sheet_count': sheet_count,
-        'meal_count': len(MEAL_PORTIONS),
+        'meal_count': len(portions),
         'formula_count': formula_count,
         'has_vba': bool(vba_sha256),
         'vba_sha256': vba_sha256,
         'template_sha256': template_sha256,
-        'is_baseline_template': template_sha256 == EXPECTED_TEMPLATE_SHA256,
+        'is_baseline_template': template_sha256 == baseline.get('template_sha256'),
+        'approved_at': baseline.get('approved_at'),
+        'approved_filename': baseline.get('original_filename'),
     }
+
+
+def replace_tokyo_template(file_storage):
+    """Validate and atomically approve a new macro-enabled Tokyo workbook."""
+    if not file_storage:
+        raise ValueError('ارفع ملف توكيو الرئيسي الجديد')
+    filename = os.path.basename(file_storage.filename or '')
+    if os.path.splitext(filename)[1].lower() != '.xlsm':
+        raise ValueError('ملف توكيو الرئيسي لازم يكون بصيغة .xlsm للحفاظ على الماكرو')
+
+    template_dir = os.path.dirname(TOKYO_TEMPLATE_PATH)
+    os.makedirs(template_dir, exist_ok=True)
+    candidate_handle = tempfile.NamedTemporaryFile(
+        suffix='.xlsm', prefix='.tokyo-candidate-', dir=template_dir, delete=False
+    )
+    candidate_path = candidate_handle.name
+    candidate_handle.close()
+    baseline_candidate = tempfile.NamedTemporaryFile(
+        suffix='.json', prefix='.tokyo-baseline-', dir=template_dir, delete=False
+    ).name
+    try:
+        file_storage.seek(0)
+        file_storage.save(candidate_path)
+        try:
+            metrics = _template_metrics(candidate_path)
+        except (zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
+            raise ValueError(f'ملف توكيو غير صالح أو تالف: {exc}')
+        if not metrics['vba_sha256']:
+            raise ValueError('تم رفض الملف لأن الماكرو غير موجود داخله')
+        if metrics['formula_count'] < 1000:
+            raise ValueError('تم رفض الملف لأن عدد المعادلات أقل من المتوقع لملف توكيو')
+
+        try:
+            wb = load_workbook(candidate_path, data_only=False, keep_vba=True, read_only=True)
+        except Exception as exc:
+            raise ValueError(f'تعذّر فتح ملف توكيو الجديد: {exc}')
+        try:
+            required = {'All_Ingredients', 'Marination_Ordering'}
+            missing_required = sorted(required.difference(wb.sheetnames))
+            if missing_required:
+                raise ValueError('شيتات أساسية غير موجودة: ' + ', '.join(missing_required))
+            ordering = wb['All_Ingredients']
+            safety_header = str(ordering['AM1'].value or '').strip().lower()
+            if safety_header not in {'safty', 'safety'}:
+                raise ValueError('عمود Safety غير موجود في All_Ingredients!AM')
+            mapped = []
+            days = set()
+            for row in range(2, ordering.max_row + 1):
+                day_value = ordering.cell(row, 36).value
+                sheet_name = str(ordering.cell(row, 37).value or '').strip()
+                try:
+                    day_no = int(day_value)
+                except (TypeError, ValueError):
+                    continue
+                if not sheet_name or sheet_name == 'Butchery':
+                    continue
+                mapped.append(sheet_name)
+                days.add(day_no)
+            if not mapped:
+                raise ValueError('لم يتم العثور على وصفات الأيام في All_Ingredients!AJ:AK')
+            missing_recipe_sheets = sorted({name for name in mapped if name not in wb.sheetnames})
+            if missing_recipe_sheets:
+                raise ValueError('شيتات وصفات مفقودة: ' + ', '.join(missing_recipe_sheets[:12]))
+            if not set(range(1, 7)).issubset(days):
+                raise ValueError('ملف توكيو لازم يحتوي على أيام التشغيل من 1 إلى 6')
+        finally:
+            wb.close()
+
+        baseline = {
+            **metrics,
+            'meal_count': len(set(mapped)),
+            'original_filename': filename,
+            'approved_at': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(baseline_candidate, 'w', encoding='utf-8') as handle:
+            json.dump(baseline, handle, ensure_ascii=False, indent=2)
+
+        previous_template = TOKYO_TEMPLATE_PATH + '.previous.xlsm'
+        previous_baseline = TOKYO_BASELINE_PATH + '.previous.json'
+        if os.path.exists(TOKYO_TEMPLATE_PATH):
+            shutil.copy2(TOKYO_TEMPLATE_PATH, previous_template)
+        if os.path.exists(TOKYO_BASELINE_PATH):
+            shutil.copy2(TOKYO_BASELINE_PATH, previous_baseline)
+        os.replace(candidate_path, TOKYO_TEMPLATE_PATH)
+        try:
+            os.replace(baseline_candidate, TOKYO_BASELINE_PATH)
+        except Exception:
+            if os.path.exists(previous_template):
+                shutil.copy2(previous_template, TOKYO_TEMPLATE_PATH)
+            raise
+        _refresh_live_meal_portions(force=True)
+        integrity = get_template_integrity()
+        if not integrity.get('ready'):
+            if os.path.exists(previous_template):
+                shutil.copy2(previous_template, TOKYO_TEMPLATE_PATH)
+            if os.path.exists(previous_baseline):
+                shutil.copy2(previous_baseline, TOKYO_BASELINE_PATH)
+            elif os.path.exists(TOKYO_BASELINE_PATH):
+                os.unlink(TOKYO_BASELINE_PATH)
+            _refresh_live_meal_portions(force=True)
+            raise ValueError('فشل فحص النسخة الجديدة بعد الحفظ: ' + ' — '.join(integrity.get('errors') or []))
+        return integrity
+    finally:
+        for path in (candidate_path, baseline_candidate):
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 def _sheet_xml_paths(archive):
@@ -171,6 +330,7 @@ def build_macro_workbook(meal_orders):
     لا نفتح الملف ثم نعيد حفظه بمكتبة جداول، وبالتالي يظل الماكرو وكل المعادلات
     والرسومات والإضافات الثنائية بنفس البايتات الموجودة في القالب الأصلي.
     """
+    _refresh_live_meal_portions()
     updates = {}
     for item in meal_orders or []:
         name = item.get('meal_name')
@@ -224,6 +384,7 @@ def _get_excel():
 def list_available_meals():
     """بترجع قائمة بكل الوجبات المتاحة للطلب (اسم إنجليزي + عربي لو موجود)،
     مرتبة أبجديًا، عشان تتعرض في الـ dropdown بتاع الداش بورد."""
+    _refresh_live_meal_portions()
     out = []
     for name, (portion, arabic) in MEAL_PORTIONS.items():
         out.append({'name': name, 'arabic_name': arabic, 'portion_g': portion})
@@ -236,6 +397,7 @@ def list_menu_packages():
     منه فعليًا)، بالاسم اللي العميل شايفه + اسم الشيت الحقيقي اللي هيتحسب
     عليه. أي وجبة موجودة في الشيتات بس مش في أي باقة لسه، بتتحط في باقة
     "أخرى" عشان تفضل متاحة للإضافة من غير ما تضيع."""
+    _refresh_live_meal_portions()
     mapped_sheets = set()
     packages = []
     for day_key, items in MENU_PACKAGES.items():
@@ -342,6 +504,7 @@ def _read_ingredient_list(excel, sheet, max_row=40):
 def calculate_meal(meal_name, order_count):
     """بياخد اسم وجبة وعدد أوردرات، ويرجّع جدول الباتشات المحسوب بناءً على
     صيغ الإكسل الحقيقية لنفس الوجبة دي."""
+    _refresh_live_meal_portions()
     if meal_name not in MEAL_PORTIONS:
         raise ValueError(f'الوجبة "{meal_name}" مش موجودة في قائمة الوجبات المتاحة')
     if not isinstance(order_count, (int, float)) or order_count <= 0:

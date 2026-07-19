@@ -579,6 +579,27 @@ def tokyo_production_analyze_day():
         return jsonify({'error': f'تعذّر تحليل ملف اليوم: {exc}'}), 500
 
 
+@app.route('/api/tokyo-production/replace-template', methods=['POST'])
+def tokyo_production_replace_template():
+    """Approve a new Tokyo XLSM only after structural and macro checks."""
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف توكيو الرئيسي الجديد بصيغة XLSM'}), 400
+    try:
+        from smart_ordering import replace_tokyo_template
+        integrity = replace_tokyo_template(uploaded)
+        return jsonify({
+            'ok': True,
+            'message': 'تم تحديث ملف توكيو الرئيسي بنجاح',
+            'integrity': integrity,
+        })
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('tokyo_production_replace_template failed')
+        return jsonify({'error': f'تعذّر تحديث ملف توكيو الرئيسي: {exc}'}), 500
+
+
 @app.route('/api/dessert-ordering/update', methods=['POST'])
 def dessert_ordering_update():
     """محطة تجهيز الديسرت: ترفع ملف أعداد الوجبات، نكتب الأعداد في
