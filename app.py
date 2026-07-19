@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from PIL import Image, ImageOps
 
 from parse_order import parse_order_pdf
 from parse_invoice import parse_invoice_pdf
@@ -2904,6 +2905,67 @@ def _weight_log_day_bounds_utc(offset_days=0):
     return start_utc.isoformat(), end_utc.isoformat()
 
 
+def _weight_log_light_entries(include_deleted=False):
+    """يرجع بيانات السجل بدون نصوص الصور الكبيرة.
+
+    الصور مخزنة Base64 داخل نفس الجدول، لذلك استبعاد العمود من طلب القائمة
+    يقلل حجم الرد بشكل ضخم. طلب ثانٍ خفيف يرجع أرقام الصفوف التي لها صور فقط.
+    لا يتم تعديل أو نقل أي بيانات محفوظة.
+    """
+    sb = get_client()
+    page_size = 1000
+
+    def fetch_all(build_query):
+        rows = []
+        offset = 0
+        while True:
+            result = execute_with_retry(
+                build_query().range(offset, offset + page_size - 1)
+            )
+            batch = result.data or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        return rows
+
+    def metadata_query():
+        fields = 'id, item_name, weight, logged_at'
+        if include_deleted:
+            fields += ', deleted'
+        query = sb.table('weight_log_entries').select(fields)
+        if not include_deleted:
+            query = query.eq('deleted', False)
+        return query.order('logged_at', desc=True)
+
+    entries = fetch_all(metadata_query)
+
+    try:
+        def photo_ids_query():
+            query = (
+                sb.table('weight_log_entries').select('id')
+                .not_.is_('photo_base64', 'null')
+            )
+            if not include_deleted:
+                query = query.eq('deleted', False)
+            return query.order('id')
+
+        photo_ids = {
+            str(row.get('id')) for row in fetch_all(photo_ids_query)
+            if row.get('id') is not None
+        }
+        for row in entries:
+            row['has_photo'] = str(row.get('id')) in photo_ids
+    except Exception:
+        # لو إصدار PostgREST قديم ولم يدعم فلتر not.is، لا نمنع الوصول
+        # للصور: نظهر زر الصورة، ونقطة الصورة نفسها تحسم وجودها عند الطلب.
+        app.logger.exception('weight-log photo metadata lookup failed')
+        for row in entries:
+            row['has_photo'] = True
+
+    return entries
+
+
 @app.route('/api/weight-log', methods=['POST'])
 def weight_log_add():
     """بيستقبل صنف واحد (اسم + وزن + صورة اختيارية) من صفحة العامل. من غير
@@ -2970,6 +3032,10 @@ def weight_log_list():
     _, err = _require_auth()
     if err:
         return err
+    if request.args.get('mode') == 'light':
+        response = jsonify({'entries': _weight_log_light_entries(include_deleted=False)})
+        response.headers['Cache-Control'] = 'private, no-store'
+        return response
     sb = get_client()
     res = execute_with_retry(
         sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at')
@@ -2987,6 +3053,10 @@ def weight_log_archive():
     token = request.args.get('view_token')
     if not token or token != WEIGHT_LOG_VIEW_TOKEN:
         return jsonify({'error': 'الرابط ده مش صحيح'}), 403
+    if request.args.get('mode') == 'light':
+        response = jsonify({'entries': _weight_log_light_entries(include_deleted=True)})
+        response.headers['Cache-Control'] = 'private, no-store'
+        return response
     sb = get_client()
     res = execute_with_retry(
         sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at, deleted')
@@ -3073,7 +3143,33 @@ def weight_log_photo(entry_id):
         img_bytes = base64.b64decode(b64data)
     except Exception:
         return jsonify({'error': 'الصورة تالفة'}), 400
-    return send_file(io.BytesIO(img_bytes), mimetype=mime)
+    is_thumbnail = request.args.get('thumb') in {'1', 'true', 'yes'}
+    if is_thumbnail:
+        try:
+            with Image.open(io.BytesIO(img_bytes)) as source_image:
+                image = ImageOps.exif_transpose(source_image)
+                image.thumbnail((360, 360), Image.Resampling.LANCZOS)
+                if image.mode not in ('RGB', 'L'):
+                    background = Image.new('RGB', image.size, 'white')
+                    if 'A' in image.getbands():
+                        background.paste(image, mask=image.getchannel('A'))
+                    else:
+                        background.paste(image)
+                    image = background
+                elif image.mode == 'L':
+                    image = image.convert('RGB')
+                thumb_buf = io.BytesIO()
+                image.save(thumb_buf, format='JPEG', quality=72, optimize=True)
+                thumb_buf.seek(0)
+            response = send_file(thumb_buf, mimetype='image/jpeg', max_age=86400)
+            response.headers['Cache-Control'] = 'public, max-age=86400, immutable'
+            return response
+        except Exception:
+            app.logger.exception('weight-log thumbnail generation failed for id=%s', entry_id)
+
+    response = send_file(io.BytesIO(img_bytes), mimetype=mime, max_age=86400)
+    response.headers['Cache-Control'] = 'public, max-age=86400, immutable'
+    return response
 
 
 @app.route('/api/weight-log/photos/today', methods=['GET'])
