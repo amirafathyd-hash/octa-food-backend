@@ -432,10 +432,7 @@ def _match_score(order, invoice):
 def _display_name(item):
     en = _text(item.get('name_en'))
     ar = _text(item.get('name_ar'))
-    label = ' — '.join(v for v in (en, ar) if v) or _text(item.get('name')) or 'بدون اسم'
-    if len(item.get('original_names') or []) > 1:
-        label += ' — تجميع ذكي'
-    return label
+    return ' — '.join(v for v in (en, ar) if v) or _text(item.get('name')) or 'بدون اسم'
 
 
 def _join(values):
@@ -680,6 +677,30 @@ def _stats_for_saved_rows(rows):
     }
 
 
+def _comparison_totals(rows):
+    units = defaultdict(lambda: {'order_qty': 0.0, 'invoice_qty': 0.0, 'difference': 0.0})
+    invoice_value = 0.0
+    for row in rows or []:
+        order_unit = _unit(row.get('order_unit')) if row.get('order_unit') else ''
+        invoice_unit = _unit(row.get('invoice_unit')) if row.get('invoice_unit') else ''
+        effective_invoice_unit = order_unit if invoice_unit in ('', 'UNKNOWN') and order_unit else invoice_unit
+        if order_unit:
+            units[order_unit]['order_qty'] += _number(row.get('order_qty'))
+        if effective_invoice_unit:
+            units[effective_invoice_unit]['invoice_qty'] += _number(row.get('invoice_qty'))
+        difference_unit = order_unit or effective_invoice_unit
+        if difference_unit:
+            units[difference_unit]['difference'] += _number(row.get('difference'))
+        invoice_value += _number(row.get('invoice_total'))
+    return {
+        'units': [
+            {'unit': unit, **{key: round(value, 3) for key, value in totals.items()}}
+            for unit, totals in sorted(units.items())
+        ],
+        'invoice_value': round(invoice_value, 3),
+    }
+
+
 @veg_comparison_bp.route('/api/veg-order-invoice-compare/archive', methods=['POST'])
 def save_comparison_day():
     username, err = _authenticated_user()
@@ -856,6 +877,36 @@ def export_comparison():
         status = _text(row.get('status'))
         sheet.cell(excel_row, 14).fill = PatternFill('solid', fgColor=status_colors.get(status, white))
         sheet.cell(excel_row, 14).font = Font(bold=True, color=dark)
+
+    totals = _comparison_totals(rows)
+    totals_title_row = len(rows) + 8
+    sheet.merge_cells(start_row=totals_title_row, start_column=1, end_row=totals_title_row, end_column=16)
+    totals_title = sheet.cell(totals_title_row, 1, 'الإجماليات النهائية')
+    totals_title.fill = PatternFill('solid', fgColor=red)
+    totals_title.font = Font(color=white, bold=True, size=13)
+    totals_title.alignment = Alignment(horizontal='center', vertical='center')
+    sheet.row_dimensions[totals_title_row].height = 24
+    totals_header_row = totals_title_row + 1
+    totals_headers = {4: 'البيان', 6: 'الوحدة', 8: 'إجمالي الأوردر', 9: 'إجمالي الفاتورة', 10: 'إجمالي الفرق', 12: 'إجمالي قيمة الفاتورة'}
+    for col, label in totals_headers.items():
+        cell = sheet.cell(totals_header_row, col, label)
+        cell.fill = PatternFill('solid', fgColor=dark)
+        cell.font = Font(color=white, bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    for offset, unit_total in enumerate(totals['units'], 1):
+        total_row = totals_header_row + offset
+        values = {4: 'إجمالي الكميات', 6: unit_total['unit'], 8: unit_total['order_qty'],
+                  9: unit_total['invoice_qty'], 10: unit_total['difference']}
+        if offset == 1:
+            values[12] = totals['invoice_value']
+        for col, value in values.items():
+            cell = sheet.cell(total_row, col, value)
+            cell.fill = PatternFill('solid', fgColor='FFF1F0' if offset % 2 else white)
+            cell.font = Font(bold=True, color=dark)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = border
+            if col in (8, 9, 10, 12):
+                cell.number_format = '#,##0.000'
 
     widths = [7, 15, 15, 30, 30, 13, 13, 14, 14, 12, 14, 16, 14, 22, 25, 25]
     for col, width in enumerate(widths, 1):
