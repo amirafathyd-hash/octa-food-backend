@@ -2370,7 +2370,11 @@ def get_texts():
     """بيرجّع كل النصوص كـ map { key: value }. مفيش auth هنا عشان أي صفحة
     (حتى صفحة اللوجين) تقدر تجيب النصوص بتاعتها من غير ما تتوقف على تسجيل الدخول."""
     sb = get_client()
-    res = execute_with_retry(sb.table('system_texts').select('key, value'))
+    # سجلات المقارنات اليومية JSON تشغيلية وليست نصوص واجهة؛ استبعادها هنا
+    # يمنع تضخم رد /api/texts مع تراكم الأيام المحفوظة.
+    res = execute_with_retry(
+        sb.table('system_texts').select('key, value').not_.like('key', 'veg_compare_archive.%')
+    )
     texts = {row['key']: row['value'] for row in (res.data or [])}
     return jsonify({'texts': texts})
 
@@ -2584,12 +2588,15 @@ def _write_theme_checkpoint(sb, theme, username):
 
 
 def _current_system_texts_for_checkpoint(sb):
-    rows = execute_with_retry(sb.table('system_texts').select('key, value')).data or []
+    rows = execute_with_retry(
+        sb.table('system_texts').select('key, value').not_.like('key', 'veg_compare_archive.%')
+    ).data or []
     return {
         str(row.get('key')): row.get('value')
         for row in rows
         if row.get('key') and row.get('key') != FACTORY_CHECKPOINT_KEY
         and not str(row.get('key')).startswith('theme.')
+        and not str(row.get('key')).startswith('veg_compare_archive.')
     }
 
 
@@ -2607,6 +2614,7 @@ def _write_system_texts_checkpoint(sb, texts, username):
         }
         for key, value in texts.items()
         if key and key != FACTORY_CHECKPOINT_KEY and not str(key).startswith('theme.')
+        and not str(key).startswith('veg_compare_archive.')
     ], on_conflict='key'))
 
 

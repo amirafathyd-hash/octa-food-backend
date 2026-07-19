@@ -1,10 +1,11 @@
 import io
+import json
 import os
 import re
 import tempfile
 import unicodedata
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from flask import Blueprint, jsonify, request, send_file
 from openpyxl import Workbook, load_workbook
@@ -31,6 +32,12 @@ def _require_auth():
         return jsonify({'error': 'إعدادات التحقق غير مكتملة'}), 500
     _, err = _auth_checker()
     return err
+
+
+def _authenticated_user():
+    if _auth_checker is None:
+        return None, (jsonify({'error': 'إعدادات التحقق غير مكتملة'}), 500)
+    return _auth_checker()
 
 
 def _text(value):
@@ -310,6 +317,35 @@ def _norm(value):
     return re.sub(r'[^a-z0-9\u0600-\u06ff]+', ' ', value).strip()
 
 
+_SMART_ALIAS_GROUPS = {
+    'basil': ('basil', 'basil leaves', 'ريحان', 'اوراق الريحان', 'ريحان مستورد'),
+    'coriander': ('coriander', 'coriander leaves', 'cilantro', 'كزبره', 'كزبرة', 'كزبره خضراء', 'كزبرة خضراء'),
+    'cucumber': ('cucumber', 'خيار'),
+    'green_chilli': ('green chilli', 'green chili', 'green chilli pepper', 'green chili pepper',
+                     'فلفل اخضر حار', 'فلفل حار اخضر', 'فلفل حار هندي'),
+    'bell_pepper': ('red bell pepper', 'red capsicum', 'فلفل احمر', 'فلفل رومي احمر',
+                    'yellow bell pepper', 'yellow capsicum', 'فلفل اصفر', 'فلفل رومي اصفر',
+                    'green bell pepper', 'green capsicum', 'فلفل اخضر رومي', 'فلفل رومي اخضر',
+                    'mixed bell pepper', 'mixed capsicum', 'فلفل رومي الوان', 'فلفل روعي الوان'),
+    'tomato': ('tomato', 'طماطم', 'sliced tomato', 'tomato sliced', 'طماطم شرائح', 'طماطم شرايح'),
+    'chinese_cabbage': ('chinese cabbage', 'ملفوف صيني', 'ملفوف صيني مستورد'),
+    'orange': ('orange', 'برتقال', 'برتقال ابو صره', 'برتقال ابو سرة', 'برتقال ابو سره'),
+    'parsley': ('parsley', 'بقدونس'),
+    'curly_parsley': ('curly parsley', 'بقدونس مجعد'),
+    'green_onion': ('green onion', 'spring onion', 'بصل اخضر'),
+    'onion': ('onion', 'بصل', 'red onion', 'بصل احمر'),
+}
+_SMART_ALIAS_INDEX = {
+    _norm(alias): canonical
+    for canonical, aliases in _SMART_ALIAS_GROUPS.items()
+    for alias in aliases
+}
+
+
+def _canonical_name(value):
+    return _SMART_ALIAS_INDEX.get(_norm(value), '')
+
+
 def _variants(item):
     return {v for v in (_norm(item.get('name_en')), _norm(item.get('name_ar')), _norm(item.get('name'))) if v}
 
@@ -321,9 +357,13 @@ def _aggregate(items, kind):
         variants = _variants(item)
         if not variants:
             continue
+        canonicals = {_canonical_name(variant) for variant in variants if _canonical_name(variant)}
         preferred = _norm(item.get('name_en')) or _norm(item.get('name_ar')) or sorted(variants)[0]
         existing_key = next((group_key for group_key, group in groups.items()
-                             if group_key[1] == unit and group['variants'].intersection(variants)), None)
+                             if group_key[1] == unit and (
+                                 group['variants'].intersection(variants)
+                                 or (canonicals and group['canonicals'].intersection(canonicals))
+                             )), None)
         key = existing_key or (preferred, unit)
         if key not in groups:
             groups[key] = {
@@ -335,14 +375,20 @@ def _aggregate(items, kind):
                 'total': 0.0,
                 'unit_price': 0.0,
                 'variants': set(),
+                'canonicals': set(),
                 'dates': set(),
                 'sources': set(),
+                'original_names': set(),
                 'needs_review': False,
             }
         group = groups[key]
         group['qty'] += qty
         group['total'] += _number(item.get('total'))
         group['variants'].update(variants)
+        group['canonicals'].update(canonicals)
+        original_name = _text(item.get('name') or item.get('name_ar') or item.get('name_en'))
+        if original_name:
+            group['original_names'].add(original_name)
         if item.get('date'):
             group['dates'].add(_date_text(item.get('date')))
         if item.get('source'):
@@ -361,21 +407,35 @@ def _aggregate(items, kind):
     return list(groups.values())
 
 
-def _match_score(order, invoice):
+def _match_quality(order, invoice):
+    if order.get('canonicals') and invoice.get('canonicals'):
+        if order['canonicals'].intersection(invoice['canonicals']):
+            return 5, 100.0
     scores = []
     for left in order['variants']:
         for right in invoice['variants']:
             if left == right:
-                scores.append(100.0)
-                continue
-            scores.append(max(float(fuzz.ratio(left, right)), float(fuzz.token_set_ratio(left, right))))
-    return max(scores or [0.0])
+                return 4, 100.0
+            ratio = float(fuzz.ratio(left, right))
+            token_score = float(fuzz.token_set_ratio(left, right))
+            left_tokens, right_tokens = set(left.split()), set(right.split())
+            if left_tokens and right_tokens and (left_tokens < right_tokens or right_tokens < left_tokens):
+                token_score = min(token_score, 88.0)
+            scores.append(max(ratio, token_score))
+    return 2, max(scores or [0.0])
+
+
+def _match_score(order, invoice):
+    return _match_quality(order, invoice)[1]
 
 
 def _display_name(item):
     en = _text(item.get('name_en'))
     ar = _text(item.get('name_ar'))
-    return ' — '.join(v for v in (en, ar) if v) or _text(item.get('name')) or 'بدون اسم'
+    label = ' — '.join(v for v in (en, ar) if v) or _text(item.get('name')) or 'بدون اسم'
+    if len(item.get('original_names') or []) > 1:
+        label += ' — تجميع ذكي'
+    return label
 
 
 def _join(values):
@@ -385,25 +445,41 @@ def _join(values):
 def _compare(order_items, invoice_items):
     orders = _aggregate(order_items, 'order')
     invoices = _aggregate(invoice_items, 'invoice')
-    candidates = []
+    pair_options = []
+    qualities_by_order = defaultdict(list)
     for order_idx, order in enumerate(orders):
-        ranked = sorted(
-            ((idx, _match_score(order, invoice)) for idx, invoice in enumerate(invoices)),
-            key=lambda pair: pair[1], reverse=True,
-        )
-        best_idx, best_score = ranked[0] if ranked else (None, 0.0)
-        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
-        candidates.append((best_score, best_score - second_score, order_idx, best_idx))
+        for invoice_idx, invoice in enumerate(invoices):
+            tier, score = _match_quality(order, invoice)
+            unit_match = order['unit'] == invoice['unit'] or 'UNKNOWN' in (order['unit'], invoice['unit'])
+            qualities_by_order[order_idx].append((tier, score, invoice_idx))
+            if score >= 82:
+                pair_options.append((tier, score, 1 if unit_match else 0, order_idx, invoice_idx))
 
     used_invoices = set()
+    assignments = {}
+    # نوزع أقوى الأزواج على الجدول كله أولًا، حتى لا يحجز اسم عام فاتورة
+    # تخص اسمًا أدق (مثل طماطم مقابل طماطم شرائح).
+    for tier, score, unit_rank, order_idx, invoice_idx in sorted(pair_options, reverse=True):
+        if order_idx in assignments or invoice_idx in used_invoices:
+            continue
+        assignments[order_idx] = (invoice_idx, tier, score)
+        used_invoices.add(invoice_idx)
+
     rows = []
-    for best_score, score_gap, order_idx, best_idx in sorted(candidates, reverse=True):
+    for order_idx, order in enumerate(orders):
+        assigned = assignments.get(order_idx)
+        best_idx, match_tier, best_score = assigned if assigned else (None, 0, 0.0)
+        if not assigned and qualities_by_order.get(order_idx):
+            best_score = max(score for _, score, _ in qualities_by_order[order_idx])
         order = orders[order_idx]
         invoice = invoices[best_idx] if best_idx is not None else None
-        accepted = invoice is not None and best_idx not in used_invoices and best_score >= 90 and score_gap >= 7
-        review = invoice is not None and best_idx not in used_invoices and best_score >= 82
-        if accepted or review:
-            used_invoices.add(best_idx)
+        alternatives = [
+            (tier, score) for tier, score, invoice_idx in qualities_by_order.get(order_idx, [])
+            if invoice_idx != best_idx and tier == match_tier and score >= best_score - 3
+        ]
+        accepted = invoice is not None and (match_tier >= 4 or (best_score >= 92 and not alternatives))
+        review = invoice is not None and not accepted
+        if invoice is not None:
             unit_match = order['unit'] == invoice['unit'] or 'UNKNOWN' in (order['unit'], invoice['unit'])
             difference = round(invoice['qty'] - order['qty'], 3)
             if review and not accepted:
@@ -576,6 +652,139 @@ def preview_comparison():
                     'source_counts': {'orders': len(orders), 'invoices': len(invoices),
                                       'invoices_in_scope': scope.get('included_invoice_items', len(invoices))},
                     'scope': scope})
+
+
+COMPARISON_ARCHIVE_PREFIX = 'veg_compare_archive.'
+COMPARISON_ARCHIVE_FIELDS = (
+    'order_date', 'invoice_date', 'order_item', 'invoice_item',
+    'order_unit', 'invoice_unit', 'order_qty', 'invoice_qty', 'difference',
+    'unit_price', 'invoice_total', 'score', 'status', 'order_source', 'invoice_source',
+)
+
+
+def _archive_date(value):
+    try:
+        return date.fromisoformat(str(value or '').strip()).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _stats_for_saved_rows(rows):
+    return {
+        'rows': len(rows),
+        'matched': sum(1 for row in rows if row.get('status') == 'مطابق'),
+        'differences': sum(1 for row in rows if row.get('status') in ('عجز في الفاتورة', 'زيادة في الفاتورة')),
+        'missing': sum(1 for row in rows if row.get('status') == 'غير موجود في الفاتورة'),
+        'extra': sum(1 for row in rows if row.get('status') == 'غير موجود في الأوردر'),
+        'review': sum(1 for row in rows if row.get('status') in ('مراجعة المطابقة', 'مراجعة اسم الفاتورة', 'اختلاف وحدة')),
+    }
+
+
+@veg_comparison_bp.route('/api/veg-order-invoice-compare/archive', methods=['POST'])
+def save_comparison_day():
+    username, err = _authenticated_user()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    log_date = _archive_date(payload.get('date'))
+    source_rows = payload.get('rows') or []
+    if not log_date:
+        return jsonify({'error': 'تاريخ المقارنة غير صحيح'}), 400
+    if not isinstance(source_rows, list) or not source_rows or len(source_rows) > 5000:
+        return jsonify({'error': 'لا توجد نتيجة صالحة للحفظ'}), 400
+
+    rows = []
+    for source in source_rows:
+        if not isinstance(source, dict):
+            continue
+        row = {field: source.get(field) for field in COMPARISON_ARCHIVE_FIELDS}
+        rows.append(row)
+    if not rows:
+        return jsonify({'error': 'لا توجد صفوف صالحة للحفظ'}), 400
+
+    now = datetime.now(timezone.utc).isoformat()
+    record = {
+        'version': 1,
+        'date': log_date,
+        'saved_at': now,
+        'saved_by': username,
+        'stats': _stats_for_saved_rows(rows),
+        'rows': rows,
+    }
+    encoded = json.dumps(record, ensure_ascii=False, separators=(',', ':'))
+    if len(encoded.encode('utf-8')) > 2 * 1024 * 1024:
+        return jsonify({'error': 'حجم نتيجة اليوم أكبر من الحد المسموح للحفظ'}), 413
+
+    db_row = {
+        'key': f'{COMPARISON_ARCHIVE_PREFIX}{log_date}',
+        'value': encoded,
+        'page': 'veg_compare_archive',
+        'updated_at': now,
+        'updated_by': username,
+    }
+    try:
+        execute_with_retry(get_client().table('system_texts').upsert(db_row, on_conflict='key'))
+    except Exception as exc:
+        return jsonify({'error': f'تعذر حفظ مقارنة اليوم: {exc}'}), 400
+    return jsonify({'ok': True, 'day': {key: record[key] for key in ('date', 'saved_at', 'saved_by', 'stats')}})
+
+
+@veg_comparison_bp.route('/api/veg-order-invoice-compare/archive', methods=['GET'])
+def list_comparison_days():
+    err = _require_auth()
+    if err:
+        return err
+    try:
+        result = execute_with_retry(
+            get_client().table('system_texts')
+            .select('key,value,updated_at,updated_by')
+            .eq('page', 'veg_compare_archive')
+            .order('key', desc=True)
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تحميل الأيام المحفوظة: {exc}'}), 400
+    days = []
+    for row in result.data or []:
+        try:
+            record = json.loads(row.get('value') or '{}')
+        except (TypeError, ValueError):
+            continue
+        log_date = _archive_date(record.get('date') or str(row.get('key') or '').replace(COMPARISON_ARCHIVE_PREFIX, '', 1))
+        if not log_date:
+            continue
+        days.append({
+            'date': log_date,
+            'saved_at': record.get('saved_at') or row.get('updated_at'),
+            'saved_by': record.get('saved_by') or row.get('updated_by'),
+            'stats': record.get('stats') or {},
+        })
+    days.sort(key=lambda item: item['date'], reverse=True)
+    return jsonify({'days': days})
+
+
+@veg_comparison_bp.route('/api/veg-order-invoice-compare/archive/<log_date>', methods=['GET'])
+def get_comparison_day(log_date):
+    err = _require_auth()
+    if err:
+        return err
+    log_date = _archive_date(log_date)
+    if not log_date:
+        return jsonify({'error': 'التاريخ غير صحيح'}), 400
+    try:
+        result = execute_with_retry(
+            get_client().table('system_texts').select('value')
+            .eq('key', f'{COMPARISON_ARCHIVE_PREFIX}{log_date}').limit(1)
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر فتح اليوم: {exc}'}), 400
+    rows = result.data or []
+    if not rows:
+        return jsonify({'error': 'اليوم المحفوظ غير موجود'}), 404
+    try:
+        record = json.loads(rows[0].get('value') or '{}')
+    except (TypeError, ValueError):
+        return jsonify({'error': 'بيانات اليوم المحفوظة غير صالحة'}), 500
+    return jsonify({'day': record})
 
 
 @veg_comparison_bp.route('/api/veg-order-invoice-compare/export', methods=['POST'])
