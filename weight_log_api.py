@@ -100,6 +100,21 @@ def _today_range_riyadh():
     return start_riyadh.astimezone(timezone.utc).isoformat(), end_riyadh.astimezone(timezone.utc).isoformat()
 
 
+def _strip_photo_payload(rows):
+    """بتشيل الصورة الكاملة (base64) من ردود القوايم/الأرشيف وتستبدلها بـ has_photo
+    (True/False) بس. ده بيقلل حجم رد الشبكة بشكل كبير جدًا لأن القايمة مبتحتاجش
+    تعرض الصور كلها مرة واحدة - الصورة الفعلية بتتحمّل بس لما المستخدم يفتحها،
+    من الرابط الموجود بالفعل /api/weight-log/<id>/photo. الشكل والسلوك في
+    الفرونت إند بيفضلوا زي ما هم بالظبط، بس أسرع بكتير مع زيادة عدد السجلات."""
+    stripped = []
+    for row in rows:
+        row = dict(row)
+        row['has_photo'] = bool(row.get('photo_base64'))
+        row.pop('photo_base64', None)
+        stripped.append(row)
+    return stripped
+
+
 def _decode_photo_data_url(data_url):
     """يرجّع (mimetype, bytes) من data URL زي 'data:image/jpeg;base64,...'، أو None لو مش صالح."""
     if not data_url or ',' not in data_url:
@@ -128,7 +143,7 @@ def weight_log_root():
         res = execute_with_retry(
             sb.table('weight_log_entries').select('*').eq('deleted', False).order('logged_at', desc=True)
         )
-        return jsonify({'entries': res.data or []})
+        return jsonify({'entries': _strip_photo_payload(res.data or [])})
 
     # POST - العامل بيضيف صنف جديد من صفحة weight-log-entry.html
     if not _has_valid_entry_token():
@@ -180,7 +195,7 @@ def weight_log_mine():
         .gte('logged_at', start_iso).lte('logged_at', end_iso)
         .order('logged_at', desc=True)
     )
-    return jsonify({'entries': res.data or []})
+    return jsonify({'entries': _strip_photo_payload(res.data or [])})
 
 
 @weight_log_bp.route('/api/weight-log/<int:entry_id>', methods=['PUT', 'DELETE'])
@@ -247,7 +262,7 @@ def weight_log_archive():
         return jsonify({'error': 'الرابط غير صالح'}), 401
     sb = get_client()
     res = execute_with_retry(sb.table('weight_log_entries').select('*').order('logged_at', desc=True))
-    return jsonify({'entries': res.data or []})
+    return jsonify({'entries': _strip_photo_payload(res.data or [])})
 
 
 # ===================== إدارة قايمة الأصناف (weight_log_items) =====================
