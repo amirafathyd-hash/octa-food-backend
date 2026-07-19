@@ -18,6 +18,7 @@ DAY_NO_COL = 36   # AJ
 SHEET_NAME_COL = 37  # AK
 COUNT_COL = 44    # AR
 GRAMS_COL = 45    # AS
+SAFETY_COL = 39   # AM
 
 # Recipe tabs whose operational upload name is deliberately different from
 # the English tab name. Values are searched in both Arabic and English names
@@ -122,6 +123,37 @@ def read_day_file_meals(file_storage):
     return day_no, meals
 
 
+def read_day_safety_fields(template_path, day_no):
+    """Return the editable Safety inputs for exactly one production day.
+
+    The row number is the stable identifier used by the UI and is validated
+    again while merging, so a value can never be written to another day.
+    """
+    wb = load_workbook(template_path, data_only=False, keep_vba=True, read_only=True)
+    ws = wb['All_Ingredients']
+    fields = []
+    for r in range(2, ws.max_row + 1):
+        row_day = ws.cell(row=r, column=DAY_NO_COL).value
+        try:
+            same_day = int(row_day) == int(day_no)
+        except (TypeError, ValueError):
+            same_day = False
+        if not same_day:
+            continue
+        sheet_name = str(ws.cell(row=r, column=SHEET_NAME_COL).value or '').strip()
+        if not sheet_name or sheet_name == 'Butchery':
+            continue
+        safety = ws.cell(row=r, column=SAFETY_COL).value
+        fields.append({
+            'id': str(r),
+            'row': r,
+            'name': sheet_name,
+            'value': float(safety) if isinstance(safety, (int, float)) else 0,
+        })
+    wb.close()
+    return fields
+
+
 def _normalize_meal_name(s):
     """بتشيل الإيموجي والمسافات الزيادة عشان المطابقة تنجح حتى لو فيه رمز
     حار 🌶️ أو مسافات مختلفة بين النسختين."""
@@ -131,7 +163,8 @@ def _normalize_meal_name(s):
     return re.sub(r'\s+', ' ', s).strip()
 
 
-def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None):
+def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
+                            safety_overrides=None):
     """بتاخد قاموس {اسم الصنف: (count, grams)} من ملف يوم واحد، وتحدّث بيه
     صفوف نفس اليوم (AJ=day_no) بس في شيت All_Ingredients، بالمطابقة على
     عمود AQ (Meal name). بترجع (out_path, report) - الـreport بيوضح كل صنف
@@ -141,8 +174,19 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None)
     ws = wb['All_Ingredients']
 
     norm_lookup = {_normalize_meal_name(k): v for k, v in meals_by_name.items()}
+    clean_safety = {}
+    for row, value in (safety_overrides or {}).items():
+        try:
+            row_no = int(row)
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f'قيمة Safety غير صحيحة للصف {row}')
+        if number < 0:
+            raise ValueError(f'قيمة Safety لا يمكن أن تكون سالبة للصف {row_no}')
+        clean_safety[row_no] = number
 
     matched, unmatched = [], []
+    applied_safety = []
     for r in range(2, ws.max_row + 1):
         row_day = ws.cell(row=r, column=DAY_NO_COL).value
         if not row_day or int(row_day) != day_no:
@@ -151,6 +195,20 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None)
         sheet_name = str(ws.cell(row=r, column=SHEET_NAME_COL).value or '').strip()
         if not meal_name and not sheet_name:
             continue
+        if r in clean_safety:
+            ws.cell(row=r, column=SAFETY_COL, value=clean_safety[r])
+            applied_safety.append({
+                'row': r,
+                'name': sheet_name or str(meal_name or '').strip(),
+                'value': clean_safety[r],
+            })
+        # Safety controls the recipe formulas independently of count/grams.
+        # Apply it even when a daily-file meal name did not match, otherwise
+        # the generated recipe could silently keep an old Safety value.
+        if sheet_name in wb.sheetnames:
+            safety_value = ws.cell(row=r, column=SAFETY_COL).value
+            if isinstance(safety_value, (int, float)):
+                wb[sheet_name]['AB1'] = float(safety_value)
         key = str(meal_name or '').strip()
         norm_key = _normalize_meal_name(key)
 
@@ -199,9 +257,6 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None)
             recipe = wb[sheet_name]
             if grams is not None:
                 recipe['Z1'] = float(grams)
-            safety_value = ws.cell(row=r, column=39).value  # AM
-            if isinstance(safety_value, (int, float)):
-                recipe['AB1'] = float(safety_value)
             if count is not None:
                 recipe['AD1'] = float(count)
         matched.append({
@@ -221,6 +276,8 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None)
         'unmatched_count': len(unmatched),
         'matched': matched,
         'unmatched': unmatched,  # أصناف في اليوم ده مالقتش ليها رقم في الملف المرفوع - اتسابت زي ما هي
+        'safety_count': len(applied_safety),
+        'safety': applied_safety,
     }
     return out_path, report
 

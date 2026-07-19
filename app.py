@@ -30,7 +30,7 @@ from item_db import load_db, seed_from_order
 from matcher import match_invoice_item
 from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
-from tokyo_ordering import read_day_file_meals, merge_day_into_template
+from tokyo_ordering import DAY_NAMES, read_day_file_meals, read_day_safety_fields, merge_day_into_template
 from tokyo_production_reports import build_tokyo_day_package
 from dessert_ordering import (
     export_dessert_cost_report_pdf_with_edits,
@@ -523,9 +523,19 @@ def tokyo_production_process_day():
     if not uploaded:
         return jsonify({'error': 'ارفع ملف اليوم بصيغة Excel'}), 400
 
+    safety_overrides = None
+    safety_text = request.form.get('safety_values')
+    if safety_text:
+        try:
+            safety_overrides = json.loads(safety_text)
+            if not isinstance(safety_overrides, dict):
+                raise ValueError('صيغة القيم غير صحيحة')
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return jsonify({'error': f'تعذّر قراءة كميات Safety: {exc}'}), 400
+
     try:
         zip_path, updated_xlsm, report = build_tokyo_day_package(
-            TOKYO_TEMPLATE_PATH, uploaded
+            TOKYO_TEMPLATE_PATH, uploaded, safety_overrides=safety_overrides
         )
         # لا نحدّث النسخة التشغيلية إلا بعد نجاح إنشاء كل المخرجات.
         shutil.copyfile(updated_xlsm, TOKYO_TEMPLATE_PATH)
@@ -543,6 +553,30 @@ def tokyo_production_process_day():
     response.headers['X-Tokyo-Report'] = json.dumps(report, ensure_ascii=True)
     response.headers['Access-Control-Expose-Headers'] = 'X-Tokyo-Report, Content-Disposition'
     return response
+
+
+@app.route('/api/tokyo-production/analyze-day', methods=['POST'])
+def tokyo_production_analyze_day():
+    """Read-only preflight used to ask for the day's Safety quantities."""
+    if not os.path.exists(TOKYO_TEMPLATE_PATH):
+        return jsonify({'error': 'ملف توكيو الرئيسي غير موجود على السيرفر'}), 404
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف اليوم بصيغة Excel'}), 400
+    try:
+        day_no, meals = read_day_file_meals(uploaded)
+        fields = read_day_safety_fields(TOKYO_TEMPLATE_PATH, day_no)
+        return jsonify({
+            'day_no': day_no,
+            'day_name': DAY_NAMES.get(day_no, str(day_no)),
+            'meal_count': len(meals),
+            'safety_fields': fields,
+        })
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('tokyo_production_analyze_day failed')
+        return jsonify({'error': f'تعذّر تحليل ملف اليوم: {exc}'}), 500
 
 
 @app.route('/api/dessert-ordering/update', methods=['POST'])

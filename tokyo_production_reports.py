@@ -283,13 +283,16 @@ def _make_libreoffice_copy(source: Path, destination: Path) -> Path:
     return destination
 
 
-def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str | None = None):
+def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str | None = None,
+                            safety_overrides=None):
     """Return ``(zip_path, updated_xlsm, report)`` for one uploaded day file."""
     root = Path(output_dir or tempfile.mkdtemp(prefix='tokyo-day-reports-'))
     root.mkdir(parents=True, exist_ok=True)
 
     day_no, meals = read_day_file_meals(uploaded_file)
-    updated_xlsm, match_report = merge_day_into_template(template_path, day_no, meals)
+    updated_xlsm, match_report = merge_day_into_template(
+        template_path, day_no, meals, safety_overrides=safety_overrides
+    )
     updated_xlsm = Path(updated_xlsm)
 
     wb = load_workbook(updated_xlsm, keep_vba=True, data_only=False)
