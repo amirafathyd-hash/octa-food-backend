@@ -106,6 +106,21 @@ def _refresh_live_meal_portions(force=False):
     return MEAL_PORTIONS
 
 
+def _template_recipe_sheet_names():
+    """Return the real recipe tabs from the active Tokyo workbook.
+
+    The integrity check must verify that a recipe *tab* exists, not that Z1
+    currently has a calculated numeric value. Some fish recipes legitimately
+    have an empty/stale cached Z1 before the day's update, and using the live
+    portions map here incorrectly blocks the whole production workflow.
+    """
+    wb = load_workbook(TOKYO_TEMPLATE_PATH, data_only=False, read_only=True, keep_vba=True)
+    try:
+        return set(wb.sheetnames)
+    finally:
+        wb.close()
+
+
 def _template_metrics(path):
     with zipfile.ZipFile(path, 'r') as archive:
         names = set(archive.namelist())
@@ -164,11 +179,12 @@ def get_template_integrity():
     if not vba_sha256:
         errors.append('الماكرو غير موجود داخل الملف')
 
+    recipe_sheets = _template_recipe_sheet_names()
     missing_package_sheets = sorted({
         sheet_name
         for items in MENU_PACKAGES.values()
         for _, sheet_name in items
-        if sheet_name not in portions
+        if sheet_name not in recipe_sheets
     })
     if missing_package_sheets:
         errors.append('وجبات غير متطابقة مع ملف الإكسل: ' + ', '.join(missing_package_sheets))
