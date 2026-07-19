@@ -9,6 +9,9 @@
 """
 import shutil
 import tempfile
+import os
+import re
+from datetime import datetime
 from difflib import SequenceMatcher
 from openpyxl import load_workbook
 
@@ -39,6 +42,70 @@ SHEET_INPUT_ALIASES = {
     'Oven Vegetables (3)': ['Sauteed vegetables', 'خضار سوتيه'],
 }
 
+# The website's "Repeat Update" export contains one row per package/size.
+# Each menu meal must be split into the exact Tokyo recipe tabs it drives.
+# ``protein`` reads column I, ``side`` reads column H and ``count`` uses the
+# subscriber quantity itself (sandwich recipes are count-driven in Tokyo).
+RAW_TOKYO_COMPONENT_MAP = {
+    'chicken mushroom with white rice': [
+        ('Chicken Mushroom', 'protein'),
+    ],
+    'chicken with mushrooms with sauteed vegetables': [
+        ('Chicken Mushroom', 'protein'),
+        ('Sautee Vegetables (4)', 'side'),
+    ],
+    'beef m&c with saffron rice': [
+        ('Beef Amansi', 'protein'),
+    ],
+    'beef amansi with sauteed vegetables': [
+        ('Beef Amansi', 'protein'),
+        ('Sautee Vegetables (4)', 'side'),
+    ],
+    'chicken steak with mashed potatoes': [
+        ('Chicken Steak Sauce', 'protein'),
+        ('Chicken Steak Topping', 'protein'),
+        ('Mached Potato(4)', 'side'),
+    ],
+    'chicken steak with sauteed vegetables': [
+        ('Chicken Steak Sauce', 'protein'),
+        ('Chicken Steak Topping', 'protein'),
+        ('Sautee Vegetables (4)', 'side'),
+    ],
+    'navy bean with meat and white rice': [
+        ('Lahm Fasooliya', 'protein'),
+    ],
+    'stroganoff pasta': [
+        ('Stroganoff Beef', 'protein'),
+        ('Stroganoff pasta', 'side'),
+    ],
+    'lemon shrimp with orzo and spinach': [
+        ('Lemon Fish', 'protein'),
+        ('Orzo Pasta', 'side'),
+    ],
+    'lemon fish with orzo and spinach': [
+        ('Lemon Fish', 'protein'),
+        ('Orzo Pasta', 'side'),
+    ],
+    'tikka chicken with buryani rice': [
+        ('Chicken Tikka', 'protein'),
+    ],
+    'octa chicken poke bowl (spicy)': [
+        ('Octa Poki Bowl', 'protein'),
+    ],
+    'chicken maqluba': [
+        ('Chicken Makloba', 'protein'),
+        ('Makloba Veggi', 'side'),
+    ],
+    'bbq chicken sandwich in ciabatta bread': [
+        ('BBQ Chicken', 'count'),
+    ],
+}
+
+RAW_REQUIRED_HEADERS = {
+    'الاسم الإنجليزي', 'الاسم العربي', 'التصنيف',
+    'مجموع الكارب', 'مجموع البروتين', 'الكمية',
+}
+
 
 def read_current_inputs(template_path):
     wb = load_workbook(template_path, data_only=False, keep_vba=True, read_only=False)
@@ -66,15 +133,117 @@ def read_current_inputs(template_path):
 DAY_NAME_TO_NO = {v: k for k, v in DAY_NAMES.items()}
 
 
-def read_day_file_meals(file_storage):
+def _number(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _day_no_from_filename(filename):
+    match = re.search(r'(20\d{2})[-_/](\d{1,2})[-_/](\d{1,2})', filename or '')
+    if not match:
+        raise ValueError('اسم ملف ابديت تكرار لازم يحتوي على التاريخ بصيغة YYYY-MM-DD لتحديد يوم توكيو')
+    date_value = datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    # Python: Monday=0. Tokyo: Saturday=1 ... Thursday=6.
+    day_no = {5: 1, 6: 2, 0: 3, 1: 4, 2: 5, 3: 6}.get(date_value.weekday())
+    if not day_no:
+        raise ValueError('ملف يوم الجمعة غير مدعوم في خطة توكيو الحالية')
+    return day_no
+
+
+def _find_repeat_update_sheet(wb):
+    for ws in wb.worksheets:
+        headers = {
+            str(ws.cell(row=1, column=column).value or '').strip(): column
+            for column in range(1, min(ws.max_column, 40) + 1)
+        }
+        if RAW_REQUIRED_HEADERS.issubset(headers):
+            return ws, headers
+    return None, None
+
+
+def _read_repeat_update(wb, file_storage):
+    ws, headers = _find_repeat_update_sheet(wb)
+    if ws is None:
+        return None
+    upload_name = (
+        getattr(file_storage, 'filename', '') or
+        os.path.basename(getattr(file_storage, 'name', '') or '')
+    )
+    day_no = _day_no_from_filename(upload_name)
+    totals = {}
+    source_names = set()
+    ignored_names = set()
+    unmapped_production = set()
+    source_rows = 0
+
+    for row in range(2, ws.max_row + 1):
+        english = str(ws.cell(row, headers['الاسم الإنجليزي']).value or '').strip()
+        if not english:
+            continue
+        category = str(ws.cell(row, headers['التصنيف']).value or '').strip()
+        quantity = _number(ws.cell(row, headers['الكمية']).value)
+        if quantity <= 0:
+            continue
+        source_rows += 1
+        normalized = re.sub(r'\s+', ' ', english).strip().lower()
+        components = RAW_TOKYO_COMPONENT_MAP.get(normalized)
+        is_production_meal = 'الوجبات الرئيسية' in category or 'لو كارب' in category
+        if not components:
+            if is_production_meal:
+                unmapped_production.add(english)
+            else:
+                ignored_names.add(english)
+            continue
+
+        source_names.add(english)
+        carb_grams = _number(ws.cell(row, headers['مجموع الكارب']).value)
+        protein_grams = _number(ws.cell(row, headers['مجموع البروتين']).value)
+        for target, weight_kind in components:
+            count, grams = totals.get(target, (0.0, 0.0))
+            if weight_kind == 'protein':
+                row_grams = protein_grams
+            elif weight_kind == 'side':
+                row_grams = carb_grams
+            else:
+                row_grams = quantity
+            totals[target] = (count + quantity, grams + row_grams)
+
+    if unmapped_production:
+        raise ValueError(
+            'توجد وجبات إنتاج جديدة غير مربوطة بتوكيو: ' +
+            ', '.join(sorted(unmapped_production))
+        )
+    if not totals:
+        raise ValueError('لم يتم العثور على وجبات إنتاج قابلة لتحديث توكيو في ملف ابديت تكرار')
+
+    report = {
+        'kind': 'repeat_update',
+        'sheet_name': ws.title,
+        'source_rows': source_rows,
+        'source_meals': len(source_names),
+        'target_recipes': len(totals),
+        'ignored_meals': len(ignored_names),
+        'ignored_names': sorted(ignored_names),
+    }
+    return day_no, totals, report
+
+
+def read_day_file_payload(file_storage):
     """بتقرا شيت 'Update' من ملف يوم واحد (زي Octa_Food_Sat_...xlsx) وترجع:
-    (day_no, {اسم الصنف: (Total Count, Total Grams)})
+    (day_no, {اسم الصنف: (Total Count, Total Grams)}, input_report)
     - اسم اليوم بيتقرا من الخلية A6 (زي 'السبت') وبيتحول لرقم اليوم.
-    - الأعمدة الثابتة: A=اسم الصنف، L=Total Count، M=Total Grams (الصفوف بتبدأ من 10)."""
+    - أو يحول ملف "ابديت تكرار" الخام إلى وصفات توكيو أولًا."""
     file_storage.seek(0)
     wb = load_workbook(file_storage, data_only=True, read_only=True)
     if 'Update' not in wb.sheetnames:
-        raise ValueError("شيت 'Update' مش موجود في الملف ده")
+        raw_result = _read_repeat_update(wb, file_storage)
+        wb.close()
+        file_storage.seek(0)
+        if raw_result:
+            return raw_result
+        raise ValueError("الملف لا يحتوي على شيت Update ولا أعمدة ابديت تكرار المطلوبة")
     ws = wb['Update']
 
     day_label = str(ws['A6'].value or '').strip()
@@ -120,7 +289,42 @@ def read_day_file_meals(file_storage):
             meals[english] = arabic_totals[arabic]
     wb.close()
     file_storage.seek(0)
+    return day_no, meals, {
+        'kind': 'prepared_update',
+        'sheet_name': 'Update',
+        'source_meals': len(arabic_totals),
+        'target_recipes': len(meals),
+        'ignored_meals': 0,
+    }
+
+
+def read_day_file_meals(file_storage):
+    day_no, meals, _ = read_day_file_payload(file_storage)
     return day_no, meals
+
+
+def validate_raw_targets_for_day(template_path, day_no, meals_by_name):
+    """Stop a raw export if its filename points to the wrong Tokyo day."""
+    wb = load_workbook(template_path, data_only=False, keep_vba=True, read_only=True)
+    ws = wb['All_Ingredients']
+    day_sheets = set()
+    for row in range(2, ws.max_row + 1):
+        try:
+            same_day = int(ws.cell(row, DAY_NO_COL).value) == int(day_no)
+        except (TypeError, ValueError):
+            same_day = False
+        if same_day:
+            name = str(ws.cell(row, SHEET_NAME_COL).value or '').strip()
+            if name and name != 'Butchery':
+                day_sheets.add(name)
+    wb.close()
+    wrong_day = sorted(set(meals_by_name).difference(day_sheets))
+    if wrong_day:
+        raise ValueError(
+            f'تاريخ الملف يشير إلى {DAY_NAMES.get(day_no, day_no)} لكن الوصفات لا تطابق هذا اليوم: ' +
+            ', '.join(wrong_day)
+        )
+    return len(set(meals_by_name).intersection(day_sheets))
 
 
 def read_day_safety_fields(template_path, day_no):

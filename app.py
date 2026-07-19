@@ -30,7 +30,13 @@ from item_db import load_db, seed_from_order
 from matcher import match_invoice_item
 from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
-from tokyo_ordering import DAY_NAMES, read_day_file_meals, read_day_safety_fields, merge_day_into_template
+from tokyo_ordering import (
+    DAY_NAMES,
+    read_day_file_payload,
+    read_day_safety_fields,
+    validate_raw_targets_for_day,
+    merge_day_into_template,
+)
 from tokyo_production_reports import build_tokyo_day_package
 from dessert_ordering import (
     export_dessert_cost_report_pdf_with_edits,
@@ -493,7 +499,9 @@ def tokyo_ordering_update_from_day_file():
         return jsonify({'error': 'ارفع ملف يوم واحد (اسمه file في الطلب)'}), 400
 
     try:
-        day_no, meals = read_day_file_meals(f)
+        day_no, meals, input_report = read_day_file_payload(f)
+        if input_report.get('kind') == 'repeat_update':
+            validate_raw_targets_for_day(TOKYO_TEMPLATE_PATH, day_no, meals)
     except Exception as e:
         return jsonify({'error': f'تعذّر قراءة ملف اليوم: {e}'}), 400
 
@@ -564,13 +572,16 @@ def tokyo_production_analyze_day():
     if not uploaded:
         return jsonify({'error': 'ارفع ملف اليوم بصيغة Excel'}), 400
     try:
-        day_no, meals = read_day_file_meals(uploaded)
+        day_no, meals, input_report = read_day_file_payload(uploaded)
+        if input_report.get('kind') == 'repeat_update':
+            validate_raw_targets_for_day(TOKYO_TEMPLATE_PATH, day_no, meals)
         fields = read_day_safety_fields(TOKYO_TEMPLATE_PATH, day_no)
         return jsonify({
             'day_no': day_no,
             'day_name': DAY_NAMES.get(day_no, str(day_no)),
             'meal_count': len(meals),
             'safety_fields': fields,
+            'input': input_report,
         })
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400

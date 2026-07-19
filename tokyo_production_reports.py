@@ -19,7 +19,12 @@ from pathlib import Path
 from openpyxl import load_workbook
 from pypdf import PdfWriter
 
-from tokyo_ordering import DAY_NAMES, merge_day_into_template, read_day_file_meals
+from tokyo_ordering import (
+    DAY_NAMES,
+    merge_day_into_template,
+    read_day_file_payload,
+    validate_raw_targets_for_day,
+)
 
 
 SPECIAL_SHEETS = [
@@ -289,11 +294,22 @@ def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str |
     root = Path(output_dir or tempfile.mkdtemp(prefix='tokyo-day-reports-'))
     root.mkdir(parents=True, exist_ok=True)
 
-    day_no, meals = read_day_file_meals(uploaded_file)
+    day_no, meals, input_report = read_day_file_payload(uploaded_file)
+    if input_report.get('kind') == 'repeat_update':
+        validate_raw_targets_for_day(template_path, day_no, meals)
     updated_xlsm, match_report = merge_day_into_template(
         template_path, day_no, meals, safety_overrides=safety_overrides
     )
     updated_xlsm = Path(updated_xlsm)
+
+    # A raw Repeat Update file is the authoritative input for the whole day.
+    # Never continue with old values left in an unmatched Tokyo recipe: that
+    # would make the exported production sheets look valid while incomplete.
+    if input_report.get('kind') == 'repeat_update' and match_report['unmatched_count']:
+        raise ValueError(
+            'تم إيقاف التشغيل لحماية الأرقام؛ توجد وصفات توكيو بلا بيانات في ابديت تكرار: ' +
+            ', '.join(match_report['unmatched'])
+        )
 
     wb = load_workbook(updated_xlsm, keep_vba=True, data_only=False)
     wb['All_Ingredients']['R1'] = day_no
@@ -343,6 +359,7 @@ def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str |
 
     report = {
         **match_report,
+        'input': input_report,
         'hot_sheets': len(hot_sheets),
         'marination_sheets': len(marination_sheets),
         'pages': {**counts, 'hot_total': sum(counts.values()), 'marination': mar_count},
