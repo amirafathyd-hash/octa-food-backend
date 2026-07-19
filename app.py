@@ -65,6 +65,7 @@ from sauce_ordering import (
 from xlsx_to_images import add_workbook_images_to_zip
 from veg_screenshot_ocr import extract_vegetable_rows
 from invoice_receipts_api import invoice_receipts_bp, configure_invoice_receipts
+from veg_comparison import veg_comparison_bp, configure_veg_comparison, group_veg_daily_rows
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 
@@ -81,6 +82,7 @@ CORS(app)  # allow calls from the Netlify frontend domain
 from appointments_api import appointments_bp, send_push_to_all
 app.register_blueprint(appointments_bp)
 app.register_blueprint(invoice_receipts_bp)
+app.register_blueprint(veg_comparison_bp)
 
 
 @app.after_request
@@ -2083,6 +2085,7 @@ def _require_auth():
 
 
 configure_invoice_receipts(_require_auth)
+configure_veg_comparison(_require_auth)
 
 
 def _default_permissions_for_role(role):
@@ -5319,6 +5322,15 @@ def _veg_log_match_key(name_en, name_ar):
     return re.sub(r'\s+', ' ', base).strip()
 
 
+def _veg_daily_group_day_rows(rows, log_date=None):
+    """نفس تجميع ملف Excel اليومي، ويُستخدم أيضًا في شاشة تعديل الأصناف.
+
+    التجميع حسب الصنف والوحدة، مع تحويل الجرام إلى كيلوجرام قبل الجمع، حتى
+    تكون شاشة التعديل والتنزيل متطابقتين ولا يظهر الصنف مكررًا في التعديل.
+    """
+    return group_veg_daily_rows(rows, log_date)
+
+
 @app.route('/api/veg-daily-log/extract', methods=['POST'])
 def veg_daily_log_extract():
     _, err = _require_auth()
@@ -5430,7 +5442,8 @@ def veg_daily_log_day_get(log_date):
     res = execute_with_retry(
         sb.table('veg_daily_log').select('*').eq('log_date', log_date).order('name_en')
     )
-    return jsonify({'rows': res.data or []})
+    rows = _veg_daily_group_day_rows(res.data or [], log_date)
+    return jsonify({'rows': rows, 'raw_count': len(res.data or []), 'grouped_count': len(rows)})
 
 
 @app.route('/api/veg-daily-log/day/<log_date>/excel', methods=['GET'])
@@ -5446,33 +5459,7 @@ def veg_daily_log_day_excel(log_date):
     if not rows:
         return jsonify({'error': 'لا توجد بيانات لهذا اليوم'}), 404
 
-    grouped = {}
-    for row in rows:
-        key = row.get('match_key') or _veg_log_match_key(row.get('name_en'), row.get('name_ar'))
-        unit = (row.get('unit') or 'UNKNOWN').strip().upper()
-        try:
-            qty = float(row.get('qty') or 0)
-        except (TypeError, ValueError):
-            qty = 0
-        if unit == 'GM':
-            unit = 'KG'
-            qty = qty / 1000.0
-        group_key = (key, unit)
-        if group_key not in grouped:
-            grouped[group_key] = {
-                'log_date': row.get('log_date') or log_date,
-                'name_en': row.get('name_en') or '',
-                'name_ar': row.get('name_ar') or '',
-                'qty': 0.0,
-                'unit': unit,
-            }
-        entry = grouped[group_key]
-        entry['qty'] += qty
-        if not entry['name_en'] and row.get('name_en'):
-            entry['name_en'] = row.get('name_en')
-        if not entry['name_ar'] and row.get('name_ar'):
-            entry['name_ar'] = row.get('name_ar')
-    rows = sorted(grouped.values(), key=lambda r: (r.get('name_en') or r.get('name_ar') or '').lower())
+    rows = _veg_daily_group_day_rows(rows, log_date)
 
     wb = Workbook()
     ws = wb.active
