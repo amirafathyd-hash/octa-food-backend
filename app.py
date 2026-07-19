@@ -2909,8 +2909,8 @@ def _weight_log_light_entries(include_deleted=False):
     """يرجع بيانات السجل بدون نصوص الصور الكبيرة.
 
     الصور مخزنة Base64 داخل نفس الجدول، لذلك استبعاد العمود من طلب القائمة
-    يقلل حجم الرد بشكل ضخم. طلب ثانٍ خفيف يرجع أرقام الصفوف التي لها صور فقط.
-    لا يتم تعديل أو نقل أي بيانات محفوظة.
+    يقلل حجم الرد بشكل ضخم. لا نفحص عمود الصور في طلب القائمة نهائيًا؛ وجود
+    الصورة يُحسم عند فتح اليوم وطلب الصورة نفسها. لا يتم تعديل أو نقل أي بيانات.
     """
     sb = get_client()
     page_size = 1000
@@ -2939,29 +2939,10 @@ def _weight_log_light_entries(include_deleted=False):
         return query.order('logged_at', desc=True)
 
     entries = fetch_all(metadata_query)
-
-    try:
-        def photo_ids_query():
-            query = (
-                sb.table('weight_log_entries').select('id')
-                .not_.is_('photo_base64', 'null')
-            )
-            if not include_deleted:
-                query = query.eq('deleted', False)
-            return query.order('id')
-
-        photo_ids = {
-            str(row.get('id')) for row in fetch_all(photo_ids_query)
-            if row.get('id') is not None
-        }
-        for row in entries:
-            row['has_photo'] = str(row.get('id')) in photo_ids
-    except Exception:
-        # لو إصدار PostgREST قديم ولم يدعم فلتر not.is، لا نمنع الوصول
-        # للصور: نظهر زر الصورة، ونقطة الصورة نفسها تحسم وجودها عند الطلب.
-        app.logger.exception('weight-log photo metadata lookup failed')
-        for row in entries:
-            row['has_photo'] = True
+    for row in entries:
+        # نتجنب تمامًا لمس عمود Base64 البطيء أثناء تحميل قائمة الأيام.
+        # الواجهة تتعامل بهدوء مع 404 لو كان السجل القديم بلا صورة.
+        row['has_photo'] = True
 
     return entries
 
