@@ -474,9 +474,11 @@ def _compare_by_order_dates(order_items, invoice_items):
     من الحساب ويُعاد عددها للواجهة كتوضيح للمستخدم.
     """
     order_dates = sorted({_date_text(item.get('date')) for item in order_items if _date_text(item.get('date'))})
+    invoice_dates = sorted({_date_text(item.get('date')) for item in invoice_items if _date_text(item.get('date'))})
     if not order_dates:
         rows, stats = _compare(order_items, invoice_items)
-        return rows, stats, {'ignored_invoice_items': 0, 'included_invoice_items': len(invoice_items)}
+        return rows, stats, {'ignored_invoice_items': 0, 'included_invoice_items': len(invoice_items),
+                             'order_dates': [], 'invoice_dates': invoice_dates}
 
     rows = []
     included_invoice_items = 0
@@ -506,6 +508,7 @@ def _compare_by_order_dates(order_items, invoice_items):
         'ignored_invoice_items': max(0, len(invoice_items) - included_invoice_items),
         'included_invoice_items': included_invoice_items,
         'order_dates': order_dates,
+        'invoice_dates': invoice_dates,
     }
 
 
@@ -558,6 +561,13 @@ def preview_comparison():
     if not invoices:
         return jsonify({'error': 'لم يتم العثور على بنود فاتورة صالحة', 'details': errors}), 400
     rows, stats, scope = _compare_by_order_dates(orders, invoices)
+    if scope.get('order_dates') and not scope.get('included_invoice_items'):
+        order_days = '، '.join(scope.get('order_dates') or [])
+        invoice_days = '، '.join(scope.get('invoice_dates') or []) or 'غير محدد داخل الملف'
+        return jsonify({
+            'error': 'تاريخ الأوردر لا يطابق أي تاريخ داخل ملف الفاتورة.',
+            'details': [f'تاريخ الأوردر: {order_days}', f'تواريخ الفاتورة: {invoice_days}'],
+        }), 400
     if scope.get('ignored_invoice_items'):
         errors.append(
             f"تم تجاهل {scope['ignored_invoice_items']} بند فاتورة خارج تاريخ أو فترة الأوردر المحددة."
