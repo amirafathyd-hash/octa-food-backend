@@ -3606,6 +3606,74 @@ def weight_log_items_reorder():
 
 
 # ============================================================
+
+
+@app.route('/api/weight-log/bulk-date', methods=['PUT'])
+def weight_log_bulk_date():
+    """تغيير تاريخ جميع تسجيلات يوم معيّن دفعة واحدة — أدمن بس.
+    Body JSON: { "from_date": "YYYY-MM-DD", "to_date": "YYYY-MM-DD" }
+    بترجع: { "updated": <عدد التسجيلات اللي اتحدثت> }
+    """
+    _, err = _require_auth()
+    if err:
+        return err
+
+    payload = request.get_json(silent=True) or {}
+    from_date = (payload.get('from_date') or '').strip()
+    to_date   = (payload.get('to_date')   or '').strip()
+
+    if not from_date or not to_date:
+        return jsonify({'error': 'from_date و to_date مطلوبين'}), 400
+    if from_date == to_date:
+        return jsonify({'updated': 0})
+
+    try:
+        from datetime import date as _date
+        from_d = _date.fromisoformat(from_date)
+        to_d   = _date.fromisoformat(to_date)
+    except ValueError:
+        return jsonify({'error': 'صيغة التاريخ غير صحيحة (YYYY-MM-DD)'}), 400
+
+    # نطاق اليوم المصدر بتوقيت السعودية (UTC+3 ثابت بدون توقيت صيفي)
+    # بداية اليوم KSA = منتصف الليل KSA = الساعة 21:00 اليوم السابق بـ UTC
+    from_start_utc = (
+        datetime(from_d.year, from_d.month, from_d.day, 0, 0, 0, tzinfo=timezone.utc)
+        - timedelta(hours=3)
+    )
+    from_end_utc = from_start_utc + timedelta(days=1)
+    delta = timedelta(days=(to_d - from_d).days)
+
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('weight_log_entries')
+            .select('id, logged_at')
+            .gte('logged_at', from_start_utc.isoformat())
+            .lt('logged_at', from_end_utc.isoformat())
+        )
+    except Exception as e:
+        return jsonify({'error': f'تعذر جلب التسجيلات: {e}'}), 400
+
+    rows = res.data or []
+    if not rows:
+        return jsonify({'updated': 0})
+
+    updated = 0
+    for row in rows:
+        try:
+            old_dt = datetime.fromisoformat(row['logged_at'].replace('Z', '+00:00'))
+            new_dt = old_dt + delta
+            execute_with_retry(
+                sb.table('weight_log_entries')
+                .update({'logged_at': new_dt.isoformat()})
+                .eq('id', row['id'])
+            )
+            updated += 1
+        except Exception:
+            pass
+
+    return jsonify({'updated': updated})
+
 # مخزون الخضار اليومي للأقسام (Veg Inventory) — لينك ثابت للعامل من غير
 # لوجين، نموذج واحد لكل يوم قابل للتحديث طول اليوم (زي شيت الصوص بالظبط)
 # ============================================================
