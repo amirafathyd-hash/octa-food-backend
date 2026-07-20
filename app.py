@@ -3065,6 +3065,57 @@ def weight_log_add():
     return jsonify({'ok': True, 'id': new_row.get('id')})
 
 
+@app.route('/api/weight-log/admin-entry', methods=['POST'])
+def weight_log_admin_entry():
+    """إدخال إداري مستقل للموازين بتاريخ يختاره الأدمن.
+    لا يغيّر رابط العامل أو طريقة تسجيله؛ فقط يضيف سجلاً عادياً لنفس الجدول
+    بحيث يظهر تلقائياً في الداش بورد والأرشيف حسب تاريخ التصوير المختار.
+    """
+    _, err = _require_auth()
+    if err:
+        return err
+
+    item_name = (request.form.get('item_name') or '').strip()
+    weight_raw = (request.form.get('weight') or '').strip()
+    entry_date = (request.form.get('entry_date') or '').strip()
+    entry_time = (request.form.get('entry_time') or '12:00').strip()
+    if not item_name:
+        return jsonify({'error': 'اكتب اسم الصنف'}), 400
+    try:
+        weight_val = float(weight_raw)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'الوزن لازم يكون رقم'}), 400
+    try:
+        # التاريخ والوقت يدخلان بتوقيت السعودية (+03:00) ثم يحفظان UTC مثل باقي السجل.
+        local_dt = datetime.strptime(f'{entry_date} {entry_time}', '%Y-%m-%d %H:%M')
+        logged_at = local_dt.replace(tzinfo=timezone(timedelta(hours=3))).astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return jsonify({'error': 'اختر تاريخاً ووقتاً صحيحين'}), 400
+
+    photo_b64 = None
+    photo_file = request.files.get('photo')
+    if photo_file and photo_file.filename:
+        photo_bytes = photo_file.read()
+        if len(photo_bytes) > 6 * 1024 * 1024:
+            return jsonify({'error': 'الصورة كبيرة جدًا (أكبر من 6 ميجا)'}), 400
+        mime = photo_file.mimetype or 'image/jpeg'
+        photo_b64 = f'data:{mime};base64,' + base64.b64encode(photo_bytes).decode('ascii')
+
+    row = {
+        'item_name': item_name,
+        'weight': weight_val,
+        'photo_base64': photo_b64,
+        'logged_at': logged_at,
+        'deleted': False,
+    }
+    try:
+        res = execute_with_retry(get_client().table('weight_log_entries').insert(row))
+        new_row = (res.data or [{}])[0]
+    except Exception as exc:
+        return jsonify({'error': f'تعذر الحفظ: {exc}'}), 400
+    return jsonify({'ok': True, 'id': new_row.get('id'), 'logged_at': logged_at})
+
+
 @app.route('/api/weight-log/mine', methods=['GET'])
 def weight_log_mine():
     """للعامل بس - بترجّع أصناف إنهاردة اللي هو سجّلها (بتوقيت القاهرة)،
