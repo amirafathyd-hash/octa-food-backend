@@ -1117,6 +1117,44 @@ def _enrich_legacy_sauce_receipts(receipts, sauce_logs, snapshot_logs=None):
     return enriched
 
 
+def _sauce_tracking_by_receipt(tracking_rows):
+    """يحوّل أحداث النسخ/الفتح إلى توقيتات واضحة للواجهة.
+    التخزين في upload_log حتى لا نحتاج إضافة أعمدة أو كسر سجلات الصوص القديمة.
+    """
+    result = {}
+    for row in tracking_rows or []:
+        receipt_id = str(row.get('file_name') or '').strip()
+        payload = _read_upload_log_message(row)
+        event = str(payload.get('event') or '').strip()
+        stamp = payload.get('at') or row.get('created_at') or ''
+        if not receipt_id or event not in ('sent', 'opened') or not stamp:
+            continue
+        entry = result.setdefault(receipt_id, {})
+        key = f'{event}_at'
+        # أول نسخة وأول فتح هما المطلوبان للتتبع الحقيقي.
+        if not entry.get(key) or str(stamp) < str(entry[key]):
+            entry[key] = stamp
+    return result
+
+
+def _log_sauce_tracking_event(receipt_id, event):
+    """يسجل أول حدث فقط لكل مرحلة، حتى لا يغيّر الوقت عند refresh أو نسخ متكرر."""
+    sb = get_client()
+    existing = execute_with_retry(
+        sb.table('upload_log').select('id,message')
+        .eq('file_type', 'sauce_receipt_tracking')
+        .eq('file_name', str(receipt_id)).limit(30)
+    ).data or []
+    for row in existing:
+        if _read_upload_log_message(row).get('event') == event:
+            return False
+    _log(
+        'sauce_receipt_tracking', str(receipt_id), None,
+        json.dumps({'event': event, 'at': datetime.now(timezone.utc).isoformat()}, ensure_ascii=False),
+    )
+    return True
+
+
 @app.route('/api/receipt-notifications/list', methods=['GET'])
 def receipt_notifications_list():
     _, err = _require_auth()
@@ -1160,11 +1198,21 @@ def receipt_notifications_list():
         .order('created_at', desc=True)
         .limit(1000)
     )
+    sauce_tracking_res = execute_with_retry(
+        sb.table('upload_log')
+        .select('id,file_name,message,created_at')
+        .eq('file_type', 'sauce_receipt_tracking')
+        .order('created_at', desc=False)
+        .limit(3000)
+    )
     sauce_receipts = _enrich_legacy_sauce_receipts(
         sauce_res.data or [],
         sauce_logs_res.data or [],
         sauce_snapshots_res.data or [],
     )
+    sauce_tracking = _sauce_tracking_by_receipt(sauce_tracking_res.data or [])
+    for receipt in sauce_receipts:
+        receipt['tracking'] = sauce_tracking.get(str(receipt.get('id') or ''), {})
     vegetable_receipts = _enrich_legacy_vegetable_receipts(
         veg_res.data or [],
         veg_links_res.data or [],
@@ -1850,6 +1898,35 @@ def sauce_receipt_get(receipt_id):
         'submitted_days': submitted_days,
         'created_at': receipt['created_at'],
     })
+
+
+@app.route('/api/sauce-receipt/<receipt_id>/opened', methods=['POST'])
+def sauce_receipt_opened(receipt_id):
+    """حدث عام: يتسجل مرة واحدة عند أول فتح العامل للرابط."""
+    sb = get_client()
+    found = execute_with_retry(
+        sb.table('sauce_receipts').select('id').eq('id', receipt_id).limit(1)
+    ).data or []
+    if not found:
+        return jsonify({'error': 'الرابط ده مش موجود أو انتهى'}), 404
+    _log_sauce_tracking_event(receipt_id, 'opened')
+    return jsonify({'ok': True})
+
+
+@app.route('/api/sauce-receipt/<receipt_id>/mark-sent', methods=['POST'])
+def sauce_receipt_mark_sent(receipt_id):
+    """حدث إداري: يتسجل عند نسخ الرابط لإرساله للعامل."""
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    found = execute_with_retry(
+        sb.table('sauce_receipts').select('id').eq('id', receipt_id).limit(1)
+    ).data or []
+    if not found:
+        return jsonify({'error': 'الرابط ده مش موجود أو انتهى'}), 404
+    _log_sauce_tracking_event(receipt_id, 'sent')
+    return jsonify({'ok': True})
 
 
 def _save_sauce_receipt_snapshot(receipt_id, receipt, submitted_days, submitted_at):
