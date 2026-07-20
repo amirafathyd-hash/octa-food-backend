@@ -28,7 +28,7 @@ import os
 import base64
 import secrets
 import binascii
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date as date_type
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, request, jsonify, Response
@@ -321,6 +321,67 @@ def weight_log_items_reorder():
     for index, item_id in enumerate(order):
         execute_with_retry(sb.table('weight_log_items').update({'sort_order': index}).eq('id', item_id))
     return jsonify({'ok': True})
+
+
+@weight_log_bp.route('/api/weight-log/bulk-date', methods=['PUT'])
+def weight_log_bulk_date():
+    """تغيير تاريخ كل تسجيلات يوم معين — أدمن بس.
+    Body JSON: { "from_date": "YYYY-MM-DD", "to_date": "YYYY-MM-DD" }
+    بترجع: { "updated": <عدد التسجيلات اللي اتغيرت> }
+    """
+    err = _require_admin()
+    if err:
+        return err
+
+    payload = request.get_json(silent=True) or {}
+    from_date = (payload.get('from_date') or '').strip()
+    to_date = (payload.get('to_date') or '').strip()
+
+    if not from_date or not to_date:
+        return jsonify({'error': 'from_date و to_date مطلوبين'}), 400
+    if from_date == to_date:
+        return jsonify({'updated': 0})
+
+    try:
+        from_d = date_type.fromisoformat(from_date)
+        to_d = date_type.fromisoformat(to_date)
+    except ValueError:
+        return jsonify({'error': 'صيغة التاريخ غير صحيحة (YYYY-MM-DD)'}), 400
+
+    # نطاق اليوم المصدر كـ UTC (بتوقيت آسيا/الرياض UTC+3)
+    from_start = datetime(from_d.year, from_d.month, from_d.day, 0, 0, 0, tzinfo=RIYADH_TZ)
+    from_end = datetime(from_d.year, from_d.month, from_d.day, 23, 59, 59, 999999, tzinfo=RIYADH_TZ)
+    from_start_utc = from_start.astimezone(timezone.utc).isoformat()
+    from_end_utc = from_end.astimezone(timezone.utc).isoformat()
+
+    delta = timedelta(days=(to_d - from_d).days)
+
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('weight_log_entries')
+        .select('id, logged_at')
+        .gte('logged_at', from_start_utc)
+        .lte('logged_at', from_end_utc)
+    )
+    rows = res.data or []
+    if not rows:
+        return jsonify({'updated': 0})
+
+    updated = 0
+    for row in rows:
+        try:
+            old_dt = datetime.fromisoformat(row['logged_at'].replace('Z', '+00:00'))
+            new_dt = old_dt + delta
+            execute_with_retry(
+                sb.table('weight_log_entries')
+                .update({'logged_at': new_dt.isoformat()})
+                .eq('id', row['id'])
+            )
+            updated += 1
+        except Exception:
+            pass
+
+    return jsonify({'updated': updated})
 
 
 @weight_log_bp.route('/api/weight-log/items/<int:item_id>', methods=['PUT', 'DELETE'])
