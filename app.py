@@ -3096,7 +3096,7 @@ def _weight_log_light_entries(include_deleted=False):
         return rows
 
     def metadata_query():
-        fields = 'id, item_name, weight, logged_at'
+        fields = 'id, item_name, weight, logged_at, batch_no'
         if include_deleted:
             fields += ', deleted'
         query = sb.table('weight_log_entries').select(fields)
@@ -3168,6 +3168,7 @@ def weight_log_admin_entry():
     weight_raw = (request.form.get('weight') or '').strip()
     entry_date = (request.form.get('entry_date') or '').strip()
     entry_time = (request.form.get('entry_time') or '12:00').strip()
+    batch_no = (request.form.get('batch_no') or '').strip() or None
     if not item_name:
         return jsonify({'error': 'اكتب اسم الصنف'}), 400
     try:
@@ -3196,6 +3197,7 @@ def weight_log_admin_entry():
         'photo_base64': photo_b64,
         'logged_at': logged_at,
         'deleted': False,
+        'batch_no': batch_no,
     }
     try:
         res = execute_with_retry(get_client().table('weight_log_entries').insert(row))
