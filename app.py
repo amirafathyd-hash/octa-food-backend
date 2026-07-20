@@ -1301,7 +1301,7 @@ def home_notifications():
                 'vegetables_receipt',
                 title,
                 body,
-                f'receiving-archive?type={url_type}&vegetable_log_id={row.get('id')}',
+                f"receiving-archive?type={url_type}&vegetable_log_id={row.get('id')}",
                 row.get('created_at'),
                 'success',
             )
