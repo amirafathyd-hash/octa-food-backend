@@ -1252,16 +1252,28 @@ def home_notifications():
             max_attempts=2
         )
         for row in (sauce_res.data or []):
-            day = row.get('receipt_day') or row.get('day_name') or row.get('day') or ''
-            date = row.get('receipt_date') or row.get('date') or row.get('created_at') or ''
-            body = f"{day} {date}".strip() or 'تم تسجيل استلام صوص'
+            submitted_days = row.get('submitted_days') or {}
+            if isinstance(submitted_days, list):
+                submitted_days = {}
+            completed_days = [name for name, value in submitted_days.items() if isinstance(value, dict)]
+            submitted_at = row.get('submitted_at') or ''
+            # لا نعرض إنشاء الرابط كإشعار استلام؛ الإشعار يظهر فقط بعد وصول نموذج حقيقي.
+            if not completed_days and not submitted_at:
+                continue
+            total_days = len(row.get('days') or [])
+            latest_day_time = [value.get('submitted_at') for value in submitted_days.values()
+                               if isinstance(value, dict) and value.get('submitted_at')]
+            event_time = max(latest_day_time) if latest_day_time else submitted_at or row.get('created_at')
+            is_complete = total_days > 0 and len(completed_days) >= total_days
+            title = 'تم استلام الصوص بالكامل' if is_complete else 'تم استلام صوص جزئي'
+            body = f"تم إرسال نموذج {len(completed_days)} من {total_days or len(completed_days)} يوم"
             push(
-                f"sauce-{row.get('id')}",
+                f"sauce-{row.get('id')}-{event_time}",
                 'sauce_receipt',
-                'استلام الصوص',
+                title,
                 body,
-                'receiving-archive?type=sauce',
-                row.get('created_at'),
+                f"receiving-archive?type=sauce&receipt_id={row.get('id')}",
+                event_time,
                 'success',
             )
     except Exception as exc:
@@ -1289,7 +1301,7 @@ def home_notifications():
                 'vegetables_receipt',
                 title,
                 body,
-                f'receiving-archive?type={url_type}',
+                f'receiving-archive?type={url_type}&vegetable_log_id={row.get('id')}',
                 row.get('created_at'),
                 'success',
             )
