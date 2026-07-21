@@ -39,7 +39,12 @@ from tokyo_ordering import (
 )
 from tokyo_production_reports import build_tokyo_day_package
 from decision_station import process_subscribers_invoice
-from day_operations import process_day_operations
+from day_operations import (
+    get_day_operations_archive_path,
+    list_day_operations_archives,
+    process_day_operations,
+    save_day_operations_archive,
+)
 from dessert_ordering import (
     export_dessert_cost_report_pdf_with_edits,
     export_dessert_cost_report_with_edits,
@@ -667,6 +672,42 @@ def day_operations_run():
     response.headers['X-Day-Operations-Report'] = json.dumps(report, ensure_ascii=True)
     response.headers['Access-Control-Expose-Headers'] = 'X-Day-Operations-Report, Content-Disposition'
     return response
+
+
+@app.route('/api/day-operations/archive', methods=['GET'])
+def day_operations_archive_list():
+    try:
+        return jsonify({'archives': list_day_operations_archives()})
+    except Exception as exc:
+        app.logger.exception('day_operations_archive_list failed')
+        return jsonify({'error': f'تعذر تحميل أرشيف التشغيل: {exc}'}), 500
+
+
+@app.route('/api/day-operations/archive', methods=['POST'])
+def day_operations_archive_save():
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'ارفع فاتورة الكمية للمشتركين باسم file'}), 400
+    day_label = request.form.get('day_label') or None
+    try:
+        report = save_day_operations_archive(f, day_label_override=day_label)
+        return jsonify({'ok': True, 'archive': report})
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('day_operations_archive_save failed')
+        return jsonify({'error': f'تعذر حفظ تشغيل اليوم: {exc}'}), 500
+
+
+@app.route('/api/day-operations/archive/<archive_id>/download', methods=['GET'])
+def day_operations_archive_download(archive_id):
+    try:
+        path = get_day_operations_archive_path(archive_id)
+    except FileNotFoundError:
+        return jsonify({'error': 'الأرشيف غير موجود'}), 404
+    except Exception as exc:
+        return jsonify({'error': f'تعذر فتح الأرشيف: {exc}'}), 500
+    return send_file(path, as_attachment=True, download_name=f'Day_Operations_Archive_{archive_id}.zip', mimetype='application/zip')
 
 
 @app.route('/api/dessert-ordering/update', methods=['POST'])

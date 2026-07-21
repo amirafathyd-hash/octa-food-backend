@@ -1,6 +1,9 @@
 import io
 import json
+import os
+import re
 import tempfile
+import uuid
 import zipfile
 from collections import OrderedDict, defaultdict
 from datetime import datetime
@@ -15,6 +18,11 @@ from decision_station import (
     load_lookup,
     read_subscribers_invoice,
 )
+from tokyo_ordering import merge_day_into_template, read_day_file_payload
+
+
+TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
+ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), 'data', 'day_operations_archive')
 
 
 PACKAGE_ORDER = ['تضخيم', 'تكميم لايت', 'جيم', 'سمارت دايت', 'غذاء العمل']
@@ -28,6 +36,45 @@ WORKER_LINKS = [
     ('العمليات اللايف', 'live-operations.html', 'متابعة التشغيل الحي'),
     ('سجل الموازين', 'weight-log-dashboard.html', 'أداة ثابتة منفصلة عن تشغيل اليوم'),
 ]
+
+
+def _static_worker_links():
+    return [
+        {
+            'title': title,
+            'url': href,
+            'description': desc,
+            'worker_name': 'تشغيل النظام',
+            'username': '',
+            'source': 'system',
+        }
+        for title, href, desc in WORKER_LINKS
+    ]
+
+
+def _load_worker_links():
+    links = _static_worker_links()
+    try:
+        from db import execute_with_retry, get_client
+        sb = get_client()
+        res = execute_with_retry(
+            sb.table('worker_link_assignments')
+            .select('worker_name, username, task_title, target_url, active, created_at')
+            .eq('active', True)
+            .order('created_at', desc=True)
+        )
+        for row in res.data or []:
+            links.append({
+                'title': row.get('task_title') or 'مهمة عامل',
+                'url': row.get('target_url') or '',
+                'description': 'رابط عامل نشط',
+                'worker_name': row.get('worker_name') or '',
+                'username': row.get('username') or '',
+                'source': 'worker',
+            })
+    except Exception:
+        pass
+    return links
 
 
 def _num(value):
@@ -132,7 +179,7 @@ def _append_rows(ws, headers, rows):
         ws.append(row)
 
 
-def _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_order, report):
+def _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_order, report, worker_links):
     package_totals, protein_totals, station_totals = _summaries(dont_use_rows)
     wb = Workbook()
     wb.remove(wb.active)
@@ -190,7 +237,17 @@ def _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_ord
     _style_sheet(ws)
 
     ws = wb.create_sheet('Worker Links')
-    _append_rows(ws, ['الوجهة', 'الرابط', 'الغرض'], WORKER_LINKS)
+    _append_rows(ws, ['العامل / القسم', 'الحساب', 'المهمة / الوجهة', 'الرابط', 'الوصف', 'المصدر'], [
+        [
+            link.get('worker_name'),
+            link.get('username'),
+            link.get('title'),
+            link.get('url'),
+            link.get('description'),
+            'رابط عامل' if link.get('source') == 'worker' else 'رابط نظام',
+        ]
+        for link in worker_links
+    ])
     _style_sheet(ws)
 
     inferred = (report.get('inferred_items') or [])
@@ -215,10 +272,106 @@ def _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_ord
     }
 
 
-def _worker_links_html(day_label):
+def _build_worker_links_workbook(day_label, worker_links):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'روابط العاملين'
+    _append_rows(ws, ['العامل / القسم', 'الحساب', 'المهمة / الوجهة', 'الرابط', 'الوصف', 'المصدر'], [
+        [
+            link.get('worker_name'),
+            link.get('username'),
+            link.get('title'),
+            link.get('url'),
+            link.get('description'),
+            'رابط عامل' if link.get('source') == 'worker' else 'رابط نظام',
+        ]
+        for link in worker_links
+    ])
+    _style_sheet(ws)
+
+    info = wb.create_sheet('معلومات')
+    _append_rows(info, ['البند', 'القيمة'], [
+        ['اليوم', day_label],
+        ['عدد الروابط', len(worker_links)],
+        ['ملاحظة', 'يتم إضافة روابط العاملين النشطة من قاعدة البيانات إذا كان الاتصال متاحا، مع روابط التشغيل الأساسية.'],
+    ])
+    _style_sheet(info)
+    return wb
+
+
+def _build_station_outputs_workbook(day_label, dont_use_rows):
+    grouped = OrderedDict()
+    station_order = ['breakfast', 'main_kitchen', 'salads', 'dessert', 'addons', 'unclassified']
+    for key in station_order:
+        grouped[key] = OrderedDict()
+
+    for row in dont_use_rows:
+        station = _station_key(row.get('التصنيف') or '')
+        protein = row.get('Protein') or row.get('الاسم الإنجليزي') or 'غير محدد'
+        side = row.get('Side') or '-'
+        pkg = row.get('Final_Package') or 'غير محدد'
+        key = (protein, side, pkg)
+        grouped.setdefault(station, OrderedDict())
+        bucket = grouped[station].setdefault(key, {
+            'protein': protein,
+            'side': side,
+            'package': pkg,
+            'category': row.get('التصنيف') or '',
+            'count': 0.0,
+            'grams': 0.0,
+            'source_rows': 0,
+        })
+        bucket['count'] += _num(row.get('Final_Count'))
+        bucket['grams'] += _num(row.get('Grams'))
+        bucket['source_rows'] += 1
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    for station in station_order:
+        rows = list(grouped.get(station, {}).values())
+        ws = wb.create_sheet(_station_title(station))
+        _append_rows(ws, ['الصنف / البروتين', 'الصوص / الجانب', 'الباقة النهائية', 'التصنيف', 'العدد', 'الجرام', 'عدد صفوف المصدر'], [
+            [
+                item['protein'],
+                item['side'],
+                item['package'],
+                item['category'],
+                item['count'],
+                item['grams'],
+                item['source_rows'],
+            ]
+            for item in rows
+        ])
+        _style_sheet(ws)
+
+    ws = wb.create_sheet('الصوصات')
+    main_rows = [
+        item
+        for item in grouped.get('main_kitchen', {}).values()
+        if item['count'] or item['grams']
+    ]
+    _append_rows(ws, ['وجبة مرتبطة بالصوص', 'الجانب', 'الباقة النهائية', 'عدد الوجبات', 'ملاحظة'], [
+        [item['protein'], item['side'], item['package'], item['count'], 'يحتاج ربط وصفة الصوص من صفحة الصوصات لو مطلوب جرامات صوص دقيقة']
+        for item in main_rows
+    ])
+    _style_sheet(ws)
+
+    ws = wb.create_sheet('ملاحظات')
+    _append_rows(ws, ['البند', 'التفاصيل'], [
+        ['اليوم', day_label],
+        ['مصدر الملف', 'فاتورة المشتركين فقط'],
+        ['Weekly Purchasing', 'يحتاج ملفات/مصادر المشتريات الأصلية، لذلك لم يتم توليد ملف وهمي من فاتورة المشتركين'],
+        ['استخراج البروتين والصوصات', 'تم تجهيز قائمة تشغيل من الفاتورة، أما الجرامات الدقيقة للصوص تعتمد على وصفات/قوالب الصوص الموجودة في صفحة المحطة'],
+        ['Tokyo Production', 'لوحة توكيو تعتمد على ملف توكيو الرئيسي وفحص الماكرو، لذلك تظل كرابط تشغيل منفصل'],
+    ])
+    _style_sheet(ws)
+    return wb
+
+
+def _worker_links_html(day_label, worker_links):
     rows = '\n'.join(
-        f'<a class="link" href="{href}"><b>{title}</b><span>{desc}</span></a>'
-        for title, href, desc in WORKER_LINKS
+        f'<a class="link" href="{link.get("url") or "#"}"><b>{link.get("title") or ""}</b><span>{link.get("worker_name") or "تشغيل النظام"} · {link.get("description") or ""}</span></a>'
+        for link in worker_links
     )
     return f"""<!doctype html>
 <html lang="ar" dir="rtl">
@@ -237,6 +390,7 @@ body{{margin:0;background:#17100b;color:#fff3df;font-family:Tahoma,Arial,sans-se
 
 def process_day_operations(file_storage, day_label_override=None):
     lookup = load_lookup()
+    worker_links = _load_worker_links()
     rows, detected_day = read_subscribers_invoice(file_storage)
     if not rows:
         raise ValueError('الملف المرفوع فاضي أو مالوش صفوف تشغيل')
@@ -252,7 +406,7 @@ def process_day_operations(file_storage, day_label_override=None):
         day_label, rows, dont_use_rows, pivot_rows, package_order, lookup,
         out_path=tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False).name,
     )
-    ops_wb, ops_summary = _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_order, report)
+    ops_wb, ops_summary = _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_order, report, worker_links)
 
     ops_buf = io.BytesIO()
     ops_wb.save(ops_buf)
@@ -262,20 +416,127 @@ def process_day_operations(file_storage, day_label_override=None):
         **report,
         'generated_at': datetime.now().isoformat(timespec='seconds'),
         'files': [
-            f'01_Octa_Food_Decision_{day_label}.xlsx',
-            f'02_Operations_Master_{day_label}.xlsx',
-            f'03_Worker_Links_{day_label}.html',
-            'manifest.json',
+            f'ملف اتخاذ القرار - {day_label}.xlsx',
+            f'ملخص تشغيل اليوم - {day_label}.xlsx',
+            f'مخرجات محطات التجهيز - {day_label}.xlsx',
+            f'قائمة روابط العاملين - {day_label}.xlsx',
+            f'روابط التشغيل - {day_label}.html',
         ],
         'operations': ops_summary,
+        'worker_links_count': len(worker_links),
     }
+
+    station_wb = _build_station_outputs_workbook(day_label, dont_use_rows)
+    station_buf = io.BytesIO()
+    station_wb.save(station_buf)
+    station_buf.seek(0)
+
+    links_wb = _build_worker_links_workbook(day_label, worker_links)
+    links_buf = io.BytesIO()
+    links_wb.save(links_buf)
+    links_buf.seek(0)
+
+    tokyo_path = None
+    tokyo_report = None
+    tokyo_error = None
+    if os.path.exists(TOKYO_TEMPLATE_PATH):
+        try:
+            file_storage.seek(0)
+            tokyo_day_no, tokyo_meals, tokyo_input_report = read_day_file_payload(file_storage)
+            tokyo_path, tokyo_report = merge_day_into_template(
+                TOKYO_TEMPLATE_PATH,
+                tokyo_day_no,
+                tokyo_meals,
+                out_path=tempfile.NamedTemporaryFile(suffix='.xlsm', delete=False).name,
+            )
+            tokyo_report['input_report'] = tokyo_input_report
+        except Exception as exc:
+            tokyo_error = str(exc)
+        finally:
+            file_storage.seek(0)
+    else:
+        tokyo_error = 'ملف قالب توكيو غير موجود على السيرفر'
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         with open(decision_path, 'rb') as fh:
-            zf.writestr(f'01_Octa_Food_Decision_{day_label}.xlsx', fh.read())
-        zf.writestr(f'02_Operations_Master_{day_label}.xlsx', ops_buf.getvalue())
-        zf.writestr(f'03_Worker_Links_{day_label}.html', _worker_links_html(day_label))
-        zf.writestr('manifest.json', json.dumps(full_report, ensure_ascii=False, indent=2))
+            zf.writestr(f'ملف اتخاذ القرار - {day_label}.xlsx', fh.read())
+        zf.writestr(f'ملخص تشغيل اليوم - {day_label}.xlsx', ops_buf.getvalue())
+        zf.writestr(f'مخرجات محطات التجهيز - {day_label}.xlsx', station_buf.getvalue())
+        if tokyo_path:
+            with open(tokyo_path, 'rb') as fh:
+                zf.writestr(f'شيت توكيو المحدث - {day_label}.xlsm', fh.read())
+        zf.writestr(f'قائمة روابط العاملين - {day_label}.xlsx', links_buf.getvalue())
+        zf.writestr(f'روابط التشغيل - {day_label}.html', _worker_links_html(day_label, worker_links))
+    if tokyo_path:
+        full_report['files'].insert(3, f'شيت توكيو المحدث - {day_label}.xlsm')
+    full_report['tokyo'] = tokyo_report or {'error': tokyo_error}
     zip_buf.seek(0)
     return zip_buf, full_report
+
+
+def _archive_id(day_label):
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    safe_day = re.sub(r'[^\w\u0600-\u06FF-]+', '-', str(day_label or 'day')).strip('-')[:40]
+    return f'{stamp}-{safe_day}-{uuid.uuid4().hex[:6]}'
+
+
+def _ensure_archive_dir():
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
+    return ARCHIVE_DIR
+
+
+def save_day_operations_archive(file_storage, day_label_override=None):
+    zip_buf, report = process_day_operations(file_storage, day_label_override=day_label_override)
+    archive_id = _archive_id(report.get('day_label'))
+    archive_dir = _ensure_archive_dir()
+    zip_name = f'{archive_id}.zip'
+    zip_path = os.path.join(archive_dir, zip_name)
+    report = {
+        **report,
+        'archive_id': archive_id,
+        'saved_at': datetime.now().isoformat(timespec='seconds'),
+        'zip_name': zip_name,
+    }
+    with open(zip_path, 'wb') as fh:
+        fh.write(zip_buf.getvalue())
+    with open(os.path.join(archive_dir, f'{archive_id}.json'), 'w', encoding='utf-8') as fh:
+        json.dump(report, fh, ensure_ascii=False, indent=2)
+    return report
+
+
+def list_day_operations_archives():
+    archive_dir = _ensure_archive_dir()
+    items = []
+    for name in os.listdir(archive_dir):
+        if not name.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(archive_dir, name), encoding='utf-8') as fh:
+                report = json.load(fh)
+        except Exception:
+            continue
+        archive_id = report.get('archive_id') or name[:-5]
+        zip_path = os.path.join(archive_dir, report.get('zip_name') or f'{archive_id}.zip')
+        items.append({
+            'archive_id': archive_id,
+            'day_label': report.get('day_label'),
+            'saved_at': report.get('saved_at') or report.get('generated_at'),
+            'source_rows': report.get('source_rows'),
+            'computed_rows': report.get('computed_rows'),
+            'row_labels': report.get('row_labels'),
+            'files': report.get('files') or [],
+            'worker_links_count': report.get('worker_links_count') or 0,
+            'tokyo': report.get('tokyo') or {},
+            'size': os.path.getsize(zip_path) if os.path.exists(zip_path) else 0,
+        })
+    items.sort(key=lambda item: item.get('saved_at') or '', reverse=True)
+    return items
+
+
+def get_day_operations_archive_path(archive_id):
+    safe = re.sub(r'[^A-Za-z0-9_\-\u0600-\u06FF]+', '', str(archive_id or ''))
+    path = os.path.join(_ensure_archive_dir(), f'{safe}.zip')
+    if not safe or not os.path.exists(path):
+        raise FileNotFoundError('الأرشيف غير موجود')
+    return path

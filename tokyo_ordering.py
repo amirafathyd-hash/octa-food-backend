@@ -99,6 +99,54 @@ RAW_TOKYO_COMPONENT_MAP = {
     'bbq chicken sandwich in ciabatta bread': [
         ('BBQ Chicken', 'count'),
     ],
+    'creamy pink chicken with mexican rice': [
+        ('Pink Chicken', 'protein'),
+    ],
+    'creamy pink chicken with sauteed vegetables': [
+        ('Pink Chicken', 'protein'),
+        ('Oven Vegetables (6)', 'side'),
+    ],
+    'ginger chicken with white rice': [
+        ('Ginger Chicken', 'protein'),
+    ],
+    'ginger chicken with sauteed vegetables': [
+        ('Ginger Chicken', 'protein'),
+        ('Oven Vegetables (6)', 'side'),
+    ],
+    'french meat ball with spaghetti': [
+        ('French Meatball', 'protein'),
+        ('Spaghetti pasta (3)', 'side'),
+    ],
+    'french meatballs with sauteed vegetables': [
+        ('French Meatball', 'protein'),
+        ('Oven Vegetables (6)', 'side'),
+    ],
+    'singapourian ckicken with vegetables rice': [
+        ('Singapore Chicken', 'protein'),
+    ],
+    'singaporean chicken with sauteed vegetables': [
+        ('Singapore Chicken', 'protein'),
+        ('Oven Vegetables (6)', 'side'),
+    ],
+    'fish with dill and lemon with sayadiya rice': [
+        ('Fish with Shabat and Lemon', 'protein'),
+    ],
+    'fish with dill and lemon with sauteed vegetables': [
+        ('Fish with Shabat and Lemon', 'protein'),
+        ('Oven Vegetables (6)', 'side'),
+    ],
+    'chicken molokheya with white rice': [
+        ('Chicken Molokeya', 'protein'),
+    ],
+    'meat kebab sandwich': [
+        ('Beef Kebab Sandwich', 'count'),
+    ],
+    'chicken saleeg': [
+        ('Chicken Saleeq (6)', 'protein'),
+    ],
+    'lamb kabli rice': [
+        ('Beef Kabli', 'protein'),
+    ],
 }
 
 RAW_REQUIRED_HEADERS = {
