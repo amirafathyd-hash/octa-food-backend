@@ -23,9 +23,34 @@ from tokyo_ordering import merge_day_into_template, read_day_file_payload
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 ARCHIVE_DIR = os.path.join(os.path.dirname(__file__), 'data', 'day_operations_archive')
+DAY_OPS_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), 'data', 'day_ops_templates')
+DAY_OPS_TEMPLATES = {
+    'breakfast': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Tokyo_Breakfast.xlsm'),
+    'dessert': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Tokyo_Dessert_Ordering.xlsm'),
+    'tokyo': os.path.join(DAY_OPS_TEMPLATE_DIR, 'tokyo_ordering_template.xlsm'),
+}
 
 
 PACKAGE_ORDER = ['تضخيم', 'تكميم لايت', 'جيم', 'سمارت دايت', 'غذاء العمل']
+DAY_LABEL_TO_NO = {
+    'السبت': 1,
+    'الأحد': 2,
+    'الاحد': 2,
+    'الاثنين': 3,
+    'الثلاثاء': 4,
+    'الأربعاء': 5,
+    'الاربعاء': 5,
+    'الخميس': 6,
+    'الجمعة': 7,
+}
+
+DAY_OPS_NAME_ALIASES = {
+    'areeka': 'Areekah',
+    'club sandwich with chicken': 'Chicken Club Sandwich',
+    'club sandwich': 'Club Sandwich',
+    'saffron cake': 'Saffron Cake',
+    'orange cake': 'Orange Cake',
+}
 
 WORKER_LINKS = [
     ('مركز تشغيل اليوم', 'day-operations.html', 'رفع واحد وتشغيل مخرجات اليوم'),
@@ -50,6 +75,20 @@ def _static_worker_links():
         }
         for title, href, desc in WORKER_LINKS
     ]
+
+
+def _public_worker_links(worker_links):
+    public_links = []
+    for link in worker_links:
+        public_links.append({
+            'title': link.get('title') or '',
+            'url': link.get('url') or '',
+            'description': link.get('description') or '',
+            'worker_name': link.get('worker_name') or 'تشغيل النظام',
+            'username': link.get('username') or '',
+            'source': link.get('source') or 'system',
+        })
+    return public_links
 
 
 def _load_worker_links():
@@ -82,6 +121,10 @@ def _num(value):
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _norm_name(value):
+    return re.sub(r'\s+', ' ', str(value or '').replace('\u00a0', ' ')).strip().lower()
 
 
 def _clean_sheet_title(value, fallback='Sheet'):
@@ -171,6 +214,188 @@ def _summaries(dont_use_rows):
         station_totals[station]['items'].add(protein)
         station_totals[station]['rows'] += 1
     return package_totals, protein_totals, station_totals
+
+
+def _day_no(day_label):
+    return DAY_LABEL_TO_NO.get(str(day_label or '').strip()) or 1
+
+
+def _counts_by_station(dont_use_rows):
+    counts = {'breakfast': defaultdict(float), 'dessert': defaultdict(float)}
+    for row in dont_use_rows:
+        category = str(row.get('التصنيف') or '')
+        protein = row.get('Protein') or row.get('الاسم الإنجليزي') or ''
+        if not protein:
+            continue
+        count = _num(row.get('Final_Count'))
+        if count <= 0:
+            continue
+        if 'فطور' in category:
+            counts['breakfast'][str(protein).strip()] += count
+        elif 'حلى' in category or 'حلويات' in category:
+            counts['dessert'][str(protein).strip()] += count
+    return counts
+
+
+def _match_template_sheets(template_path, counts):
+    from openpyxl import load_workbook
+
+    if not os.path.exists(template_path) or not counts:
+        return [], sorted(counts)
+    wb = load_workbook(template_path, read_only=True, data_only=True, keep_vba=True)
+    try:
+        sheet_by_norm = {_norm_name(name): name for name in wb.sheetnames if name != 'Ordering'}
+    finally:
+        wb.close()
+    edits = []
+    unmatched = []
+    for name, count in counts.items():
+        wanted = DAY_OPS_NAME_ALIASES.get(_norm_name(name), name)
+        sheet = sheet_by_norm.get(_norm_name(wanted))
+        if not sheet:
+            unmatched.append(name)
+            continue
+        edits.append({'sheet': sheet, 'address': 'V1', 'value': count})
+    return edits, unmatched
+
+
+def _match_dessert_ordering_edits(template_path, counts):
+    from openpyxl import load_workbook
+
+    if not os.path.exists(template_path) or not counts:
+        return [], sorted(counts)
+    wb = load_workbook(template_path, read_only=True, data_only=True, keep_vba=True)
+    try:
+        ws = wb['Ordering']
+        rows_by_norm = {}
+        for row in range(3, ws.max_row + 1):
+            sheet_name = ws[f'AA{row}'].value
+            meal_name = ws[f'AF{row}'].value
+            for value in (sheet_name, meal_name):
+                key = _norm_name(value)
+                if key:
+                    rows_by_norm[key] = row
+    finally:
+        wb.close()
+    edits = []
+    unmatched = []
+    for name, count in counts.items():
+        wanted = DAY_OPS_NAME_ALIASES.get(_norm_name(name), name)
+        row = rows_by_norm.get(_norm_name(wanted))
+        if not row:
+            unmatched.append(name)
+            continue
+        edits.append({'sheet': 'Ordering', 'address': f'AG{row}', 'value': count})
+    return edits, unmatched
+
+
+def _export_visible_sheet_pdf(workbook_path, sheet_name='Ordering'):
+    import shutil
+    import subprocess
+    from openpyxl import load_workbook
+
+    wb = load_workbook(workbook_path)
+    try:
+        if sheet_name not in wb.sheetnames:
+            raise ValueError(f'الشيت {sheet_name} غير موجود في ملف المحطة')
+        for name in wb.sheetnames:
+            ws = wb[name]
+            ws.sheet_state = 'visible' if name == sheet_name else 'hidden'
+        ws = wb[sheet_name]
+        ws.print_area = f'A1:D{ws.max_row}'
+        ws.page_setup.orientation = 'portrait'
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_margins.left = 0.2
+        ws.page_margins.right = 0.2
+        ws.page_margins.top = 0.35
+        ws.page_margins.bottom = 0.35
+        out_xlsx = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False).name
+        wb.save(out_xlsx)
+    finally:
+        wb.close()
+
+    out_dir = tempfile.mkdtemp(prefix='day_ops_pdf_')
+    profile_dir = tempfile.mkdtemp(prefix='day_ops_lo_profile_')
+    soffice = os.environ.get('SOFFICE_BIN') or shutil.which('soffice') or 'soffice'
+    proc = subprocess.run([
+        soffice,
+        f'-env:UserInstallation=file://{profile_dir}',
+        '--headless',
+        '--convert-to',
+        'pdf',
+        '--outdir',
+        out_dir,
+        out_xlsx,
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or 'LibreOffice PDF export failed').strip())
+    return os.path.join(out_dir, os.path.splitext(os.path.basename(out_xlsx))[0] + '.pdf')
+
+
+def _generate_station_pdfs(day_label, dont_use_rows):
+    outputs = []
+    reports = []
+    counts = _counts_by_station(dont_use_rows)
+    day_no = _day_no(day_label)
+
+    breakfast_template = DAY_OPS_TEMPLATES['breakfast']
+    breakfast_edits, breakfast_unmatched = _match_template_sheets(breakfast_template, counts['breakfast'])
+    if breakfast_edits:
+        try:
+            from breakfast_ordering import export_breakfast_excel_with_edits
+            xlsx_path, report = export_breakfast_excel_with_edits(
+                breakfast_edits,
+                template_path=breakfast_template,
+            )
+            pdf_path = _export_visible_sheet_pdf(xlsx_path, 'Ordering')
+            outputs.append((f'Day{day_no}_Breakfast.pdf', pdf_path))
+            reports.append({
+                'station': 'breakfast',
+                'matched_count': len(breakfast_edits),
+                'unmatched': breakfast_unmatched,
+                **(report or {}),
+            })
+        except Exception as exc:
+            reports.append({
+                'station': 'breakfast',
+                'matched_count': len(breakfast_edits),
+                'unmatched': breakfast_unmatched,
+                'error': str(exc),
+            })
+    elif counts['breakfast']:
+        reports.append({'station': 'breakfast', 'matched_count': 0, 'unmatched': breakfast_unmatched})
+
+    dessert_template = DAY_OPS_TEMPLATES['dessert']
+    dessert_edits, dessert_unmatched = _match_dessert_ordering_edits(dessert_template, counts['dessert'])
+    if dessert_edits:
+        try:
+            from dessert_ordering import export_dessert_excel_with_edits
+            xlsx_path, report = export_dessert_excel_with_edits(
+                dessert_edits,
+                template_path=dessert_template,
+            )
+            pdf_path = _export_visible_sheet_pdf(xlsx_path, 'Ordering')
+            outputs.append((f'Day{day_no}_Dessert.pdf', pdf_path))
+            reports.append({
+                'station': 'dessert',
+                'matched_count': len(dessert_edits),
+                'unmatched': dessert_unmatched,
+                **(report or {}),
+            })
+        except Exception as exc:
+            reports.append({
+                'station': 'dessert',
+                'matched_count': len(dessert_edits),
+                'unmatched': dessert_unmatched,
+                'error': str(exc),
+            })
+    elif counts['dessert']:
+        reports.append({'station': 'dessert', 'matched_count': 0, 'unmatched': dessert_unmatched})
+
+    return outputs, reports
 
 
 def _append_rows(ws, headers, rows):
@@ -418,33 +643,37 @@ def process_day_operations(file_storage, day_label_override=None):
         'files': [
             f'ملف اتخاذ القرار - {day_label}.xlsx',
             f'ملخص تشغيل اليوم - {day_label}.xlsx',
-            f'مخرجات محطات التجهيز - {day_label}.xlsx',
-            f'قائمة روابط العاملين - {day_label}.xlsx',
-            f'روابط التشغيل - {day_label}.html',
+            f'مخرجات تشغيل أولية حسب فاتورة المشتركين - {day_label}.xlsx',
         ],
         'operations': ops_summary,
         'worker_links_count': len(worker_links),
+        'worker_links': _public_worker_links(worker_links),
+        'station_outputs_note': (
+            'مخرجات المحطات الدقيقة مثل Breakfast وDesserts وHot Section وRice وSauce '
+            'تعتمد على قوالب المحطات الأصلية/ملف توكيو ووصفات اليوم. الملف الحالي '
+            'يعرض تجميع تشغيل أولي من فاتورة المشتركين فقط إلى أن يتم ربط نفس قوالب المحطات.'
+        ),
     }
 
     station_wb = _build_station_outputs_workbook(day_label, dont_use_rows)
     station_buf = io.BytesIO()
     station_wb.save(station_buf)
     station_buf.seek(0)
-
-    links_wb = _build_worker_links_workbook(day_label, worker_links)
-    links_buf = io.BytesIO()
-    links_wb.save(links_buf)
-    links_buf.seek(0)
+    station_pdf_outputs, station_pdf_reports = _generate_station_pdfs(day_label, dont_use_rows)
+    full_report['station_pdfs'] = station_pdf_reports
+    for filename, _path in station_pdf_outputs:
+        full_report['files'].append(filename)
 
     tokyo_path = None
     tokyo_report = None
     tokyo_error = None
-    if os.path.exists(TOKYO_TEMPLATE_PATH):
+    tokyo_template_path = DAY_OPS_TEMPLATES['tokyo'] if os.path.exists(DAY_OPS_TEMPLATES['tokyo']) else TOKYO_TEMPLATE_PATH
+    if os.path.exists(tokyo_template_path):
         try:
             file_storage.seek(0)
             tokyo_day_no, tokyo_meals, tokyo_input_report = read_day_file_payload(file_storage)
             tokyo_path, tokyo_report = merge_day_into_template(
-                TOKYO_TEMPLATE_PATH,
+                tokyo_template_path,
                 tokyo_day_no,
                 tokyo_meals,
                 out_path=tempfile.NamedTemporaryFile(suffix='.xlsm', delete=False).name,
@@ -462,12 +691,13 @@ def process_day_operations(file_storage, day_label_override=None):
         with open(decision_path, 'rb') as fh:
             zf.writestr(f'ملف اتخاذ القرار - {day_label}.xlsx', fh.read())
         zf.writestr(f'ملخص تشغيل اليوم - {day_label}.xlsx', ops_buf.getvalue())
-        zf.writestr(f'مخرجات محطات التجهيز - {day_label}.xlsx', station_buf.getvalue())
+        zf.writestr(f'مخرجات تشغيل أولية حسب فاتورة المشتركين - {day_label}.xlsx', station_buf.getvalue())
+        for filename, path in station_pdf_outputs:
+            with open(path, 'rb') as fh:
+                zf.writestr(filename, fh.read())
         if tokyo_path:
             with open(tokyo_path, 'rb') as fh:
                 zf.writestr(f'شيت توكيو المحدث - {day_label}.xlsm', fh.read())
-        zf.writestr(f'قائمة روابط العاملين - {day_label}.xlsx', links_buf.getvalue())
-        zf.writestr(f'روابط التشغيل - {day_label}.html', _worker_links_html(day_label, worker_links))
     if tokyo_path:
         full_report['files'].insert(3, f'شيت توكيو المحدث - {day_label}.xlsm')
     full_report['tokyo'] = tokyo_report or {'error': tokyo_error}
