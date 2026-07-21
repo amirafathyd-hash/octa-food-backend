@@ -38,6 +38,7 @@ from tokyo_ordering import (
     merge_day_into_template,
 )
 from tokyo_production_reports import build_tokyo_day_package
+from decision_station import process_subscribers_invoice
 from dessert_ordering import (
     export_dessert_cost_report_pdf_with_edits,
     export_dessert_cost_report_with_edits,
@@ -609,6 +610,36 @@ def tokyo_production_replace_template():
     except Exception as exc:
         app.logger.exception('tokyo_production_replace_template failed')
         return jsonify({'error': f'تعذّر تحديث ملف توكيو الرئيسي: {exc}'}), 500
+
+
+@app.route('/api/decision-station/process', methods=['POST'])
+def decision_station_process():
+    """محطة التنقية من التقارير إلى اتخاذ القرار: بترفع فاتورة الكمية
+    الخام للمشتركين (شيت فيه عمود لكل صنف/باقة/كمية)، والسيستم بيطلعلك
+    ملف كامل بنفس شكل ملف اليوم الجاهز (Export / Don't Use just refresh /
+    Update / Packages) - بنفس الحساب اللي كان بيتعمل يدوي في الإكسل، من
+    غير ما تلمس حاجة."""
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'ارفع فاتورة الكمية للمشتركين باسم file'}), 400
+
+    day_label = request.form.get('day_label') or None
+
+    try:
+        out_path, report = process_subscribers_invoice(f, day_label_override=day_label)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('decision_station_process failed')
+        return jsonify({'error': f'تعذّر إنشاء ملف محطة التنقية: {exc}'}), 500
+
+    response = send_file(
+        out_path, as_attachment=True,
+        download_name=f"Octa_Food_Decision_{report['day_label']}.xlsx",
+    )
+    response.headers['X-Decision-Report'] = json.dumps(report, ensure_ascii=True)
+    response.headers['Access-Control-Expose-Headers'] = 'X-Decision-Report, Content-Disposition'
+    return response
 
 
 @app.route('/api/dessert-ordering/update', methods=['POST'])
