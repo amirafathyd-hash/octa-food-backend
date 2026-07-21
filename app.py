@@ -39,6 +39,7 @@ from tokyo_ordering import (
 )
 from tokyo_production_reports import build_tokyo_day_package
 from decision_station import process_subscribers_invoice
+from day_operations import process_day_operations
 from dessert_ordering import (
     export_dessert_cost_report_pdf_with_edits,
     export_dessert_cost_report_with_edits,
@@ -103,7 +104,7 @@ def _ensure_cors_headers(response):
         response.headers.setdefault('Access-Control-Allow-Origin', origin)
         response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token, X-Invoice-Receipt-Token')
         response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        response.headers.setdefault('Access-Control-Expose-Headers', 'X-Match-Report')
+        response.headers.setdefault('Access-Control-Expose-Headers', 'X-Match-Report, X-Decision-Report, X-Day-Operations-Report, Content-Disposition')
     return response
 
 
@@ -639,6 +640,32 @@ def decision_station_process():
     )
     response.headers['X-Decision-Report'] = json.dumps(report, ensure_ascii=True)
     response.headers['Access-Control-Expose-Headers'] = 'X-Decision-Report, Content-Disposition'
+    return response
+
+
+@app.route('/api/day-operations/run', methods=['POST'])
+def day_operations_run():
+    """مركز تشغيل اليوم: رفع فاتورة المشتركين مرة واحدة وإخراج حزمة تشغيل كاملة."""
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'ارفع فاتورة الكمية للمشتركين باسم file'}), 400
+    day_label = request.form.get('day_label') or None
+    try:
+        zip_buf, report = process_day_operations(f, day_label_override=day_label)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('day_operations_run failed')
+        return jsonify({'error': f'تعذر تشغيل مركز اليوم: {exc}'}), 500
+
+    response = send_file(
+        zip_buf,
+        as_attachment=True,
+        download_name=f"Octa_Food_Day_Operations_{report['day_label']}.zip",
+        mimetype='application/zip',
+    )
+    response.headers['X-Day-Operations-Report'] = json.dumps(report, ensure_ascii=True)
+    response.headers['Access-Control-Expose-Headers'] = 'X-Day-Operations-Report, Content-Disposition'
     return response
 
 
