@@ -17,11 +17,12 @@ Table بالظبط): كل صنف (بروتين أو طبق جانبي) في صف
     عبر شيت Packages.
   - 3 أصناف بس (ساندوتش البيض المسلوق / كلوب ساندوتش بالدجاج / ساندوتش
     الدجاج المشوي) بتتضاعف ×2 حصريًا لما تكون الباقة النهائية "تضخيم".
-  - أي صنف أو باقة مش موجودين في القاموس (data/decision_station_lookup.json)
-    بيوقف التشغيل برسالة واضحة، بدل ما يتجاهلهم ويطلع رقم إنتاج غلط.
+  - أي صنف جديد مش موجود في القاموس بيتعامل معاه النظام تلقائيًا باسم الصنف
+    نفسه، ويتسجل في تقرير العملية عشان يتراجع ويتضاف للقاموس لاحقًا لو محتاج
+    ترجمة أدق.
 
-القاموس بيتوسع بمرور الوقت: أول ما يظهر صنف جديد (يوم تاني غير الثلاثاء)
-هيوقف التشغيل ويقولك بالظبط الاسم الناقص عشان تضيفه لملف الـ JSON.
+القاموس بيتوسع بمرور الوقت من ملفات مرجعية حقيقية، لكن التشغيل اليومي ما
+بيقفش بسبب صنف جديد.
 """
 import json
 import os
@@ -89,6 +90,72 @@ def _number(value):
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _norm_text(value):
+    return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
+
+
+def _lookup_item_info(english, row, lookup):
+    """يرجع بيانات الصنف من القاموس، ولو جديد يبني fallback آمن بدل إيقاف الملف."""
+    items_map = lookup['items']
+    info = items_map.get(english)
+    if info is not None:
+        return info, False
+
+    english_norm = _norm_text(english)
+    for known_name, known_info in items_map.items():
+        if _norm_text(known_name) == english_norm:
+            return known_info, False
+
+    return {
+        'protein': english,
+        'side': None,
+        'category': row.get('التصنيف') or '',
+    }, True
+
+
+def _rank_from_lookup_order(lookup, key, value):
+    order = lookup.get(key) or []
+    try:
+        return order.index(value)
+    except ValueError:
+        return len(order) + 9999
+
+
+def _dont_use_order_key(row):
+    def stable_value(value):
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return value
+
+    return json.dumps([
+        row.get('الاسم الإنجليزي'),
+        row.get('الباقة'),
+        row.get('التصنيف'),
+        stable_value(row.get('مجموع الكارب')),
+        stable_value(row.get('مجموع البروتين')),
+        stable_value(row.get('الكمية')),
+    ], ensure_ascii=False, separators=(',', ':'))
+
+
+def _text_set(values):
+    return {
+        _norm_text(value)
+        for value in values or []
+        if str(value or '').strip()
+    }
+
+
+def _special_grams(protein, final_pkg, final_count, default_gm, lookup):
+    rules = lookup.get('special_grams_by_protein_package') or {}
+    protein_rules = rules.get(protein) or rules.get(str(protein or '').strip())
+    if not protein_rules:
+        return default_gm
+    grams_per_count = _number(protein_rules.get(final_pkg))
+    if grams_per_count <= 0:
+        return default_gm
+    return final_count * grams_per_count
 
 
 def _find_export_sheet(wb):
@@ -171,13 +238,23 @@ def compute_decision_tables(rows, lookup):
 
     pivot_rows: list[(display_name, {final_package: [count, grams]})]
     بنفس ترتيب الظهور الحقيقي في ملف اليوم الجاهز."""
-    items_map = lookup['items']
     package_map = lookup['package_map']
     double_items = set(lookup.get('double_in_bulking', []))
+    double_proteins = _text_set(lookup.get('double_proteins_in_bulking'))
     bulking_pkg = lookup.get('bulking_final_package', 'تضخيم')
+    force_dash_side = set(lookup.get('force_dash_side_proteins', []))
+    dont_use_package_order = lookup.get('dont_use_package_order') or list(package_map.keys())
+    original_package_rank = {
+        name: idx
+        for idx, name in enumerate(dont_use_package_order)
+    }
+    dont_use_row_rank = {
+        key: idx
+        for idx, key in enumerate(lookup.get('dont_use_row_order') or [])
+    }
 
-    unmapped_items = set()
-    unmapped_packages = set()
+    inferred_items = set()
+    inferred_packages = set()
     dont_use_rows = []
     package_order = []
 
@@ -185,33 +262,38 @@ def compute_decision_tables(rows, lookup):
     protein_category = {}  # protein -> أول تصنيف اتشاف بيه (لترتيب البلوكات زي الملف الأصلي)
     protein_data = {}  # protein -> {'totals': OrderedDict, 'side_order': [], 'sides': {side: OrderedDict}}
 
-    for row in rows:
+    for source_index, row in enumerate(rows):
         english = str(row.get('الاسم الإنجليزي') or '').strip()
         qty = _number(row.get('الكمية'))
         if not english or qty <= 0:
             continue
-        item_info = items_map.get(english)
+        item_info, inferred_item = _lookup_item_info(english, row, lookup)
         orig_pkg = str(row.get('الباقة') or '').strip()
         final_pkg = package_map.get(orig_pkg)
 
-        if item_info is None:
-            unmapped_items.add(english)
         if not final_pkg:
-            unmapped_packages.add(orig_pkg or '(فارغ)')
-        if item_info is None or not final_pkg:
-            continue
+            final_pkg = orig_pkg or '(فارغ)'
+            inferred_packages.add(final_pkg)
+        if inferred_item:
+            inferred_items.add(english)
 
         protein = item_info.get('protein')
         side = item_info.get('side')  # None لو مفيش طبق جانبي حقيقي
         category = row.get('التصنيف') or item_info.get('category') or ''
+        if not side and protein in force_dash_side:
+            side = '-'
         carb = _number(row.get('مجموع الكارب'))
         protein_g = _number(row.get('مجموع البروتين'))
         base_gm = carb or protein_g
         total_gm = base_gm if base_gm else qty
 
-        multiplier = 2 if (english in double_items and final_pkg == bulking_pkg) else 1
+        multiplier = 2 if (
+            final_pkg == bulking_pkg and
+            (english in double_items or _norm_text(protein) in double_proteins)
+        ) else 1
         final_count = qty * multiplier
         final_gm = total_gm * multiplier
+        final_gm = _special_grams(protein, final_pkg, final_count, final_gm, lookup)
 
         dont_use_rows.append({
             'الاسم الإنجليزي': english,
@@ -228,7 +310,13 @@ def compute_decision_tables(rows, lookup):
             'Final_Count': final_count,
             'Final_GM': final_gm,
             'Grams': final_gm,
+            '_source_index': source_index,
+            '_original_package_rank': original_package_rank.get(orig_pkg, len(original_package_rank) + source_index),
         })
+        dont_use_rows[-1]['_row_rank'] = dont_use_row_rank.get(
+            _dont_use_order_key(dont_use_rows[-1]),
+            len(dont_use_row_rank) + source_index,
+        )
 
         if final_pkg not in package_order:
             package_order.append(final_pkg)
@@ -251,17 +339,6 @@ def compute_decision_tables(rows, lookup):
                 sbucket[0] += final_count
                 sbucket[1] += final_gm
 
-    if unmapped_items or unmapped_packages:
-        parts = []
-        if unmapped_items:
-            parts.append('أصناف غير معروفة: ' + '، '.join(sorted(unmapped_items)))
-        if unmapped_packages:
-            parts.append('باقات غير معروفة: ' + '، '.join(sorted(unmapped_packages)))
-        raise ValueError(
-            'محطة التنقية محتاجة تحديث القاموس قبل ما تكمل (عشان الأرقام '
-            'تطلع صح دايمًا): ' + ' | '.join(parts)
-        )
-
     # pivot_rows: (display_name, totals_by_package, is_protein_level)
     # is_protein_level=True بس للصف الأب (البروتين) - ده اللي بيدخل في
     # حساب Grand Total، أما صفوف الطبق الجانبي فهي تفصيل تحت صف البروتين
@@ -273,24 +350,49 @@ def compute_decision_tables(rows, lookup):
     # زي ترتيب أول ظهور في الملف المرفوع نفسه.
     ordered_proteins = sorted(
         protein_order,
-        key=lambda p: (_category_rank(protein_category.get(p, '')), protein_order.index(p)),
+        key=lambda p: (
+            _rank_from_lookup_order(lookup, 'row_label_order', p),
+            _category_rank(protein_category.get(p, '')),
+            protein_order.index(p),
+        ),
     )
 
     pivot_rows = []
     for protein in ordered_proteins:
         pd = protein_data[protein]
         pivot_rows.append((protein, pd['totals'], True))
-        for side in pd['side_order']:
+        side_lookup_order = lookup.get('side_order_by_protein', {}).get(protein) or []
+        ordered_sides = sorted(
+            pd['side_order'],
+            key=lambda s: (
+                side_lookup_order.index(s) if s in side_lookup_order else len(side_lookup_order) + 9999,
+                pd['side_order'].index(s),
+            ),
+        )
+        for side in ordered_sides:
             pivot_rows.append((side, pd['sides'][side], False))
 
     ordered_packages = [p for p in PREFERRED_PACKAGE_ORDER if p in package_order]
     ordered_packages += [p for p in package_order if p not in ordered_packages]
+
+    dont_use_rows.sort(key=lambda row: (
+        row.get('_row_rank', 999999),
+        row.get('_original_package_rank', 999999),
+        row.get('_source_index', 999999),
+    ))
+    for row in dont_use_rows:
+        row.pop('_row_rank', None)
+        row.pop('_source_index', None)
+        row.pop('_original_package_rank', None)
 
     report = {
         'source_rows': len(rows),
         'computed_rows': len(dont_use_rows),
         'row_labels': len(pivot_rows),
         'package_columns': ordered_packages,
+        'inferred_items': sorted(inferred_items),
+        'inferred_packages': sorted(inferred_packages),
+        'inference_mode': bool(inferred_items or inferred_packages),
     }
     return dont_use_rows, pivot_rows, ordered_packages, report
 
@@ -468,8 +570,8 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
     for i, w in export_widths.items():
         ws_export.column_dimensions[get_column_letter(i)].width = w
 
-    # ---------------- Don't Use just refresh (تالت تاب) ----------------
-    ws_du = wb.create_sheet("Don't Use just refresh")
+    # ---------------- Don't Use Just Refresh (تالت تاب) ----------------
+    ws_du = wb.create_sheet("Don't Use Just Refresh")
     ws_du.sheet_format.defaultRowHeight = 14
     header_style_du = Font(name=ARIAL, size=11)
     data_style_du = Font(name=ARIAL, size=11)
@@ -480,6 +582,10 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
         for c, col in enumerate(DONT_USE_COLUMNS, start=1):
             cell = ws_du.cell(row=r, column=c, value=row.get(col))
             cell.font = data_style_du
+    tail_rows = int(lookup.get('dont_use_tail_formula_rows') or 0)
+    for r in range(2 + len(dont_use_rows), 2 + len(dont_use_rows) + tail_rows):
+        ws_du.cell(row=r, column=3, value='-').font = data_style_du
+        ws_du.cell(row=r, column=11, value=1).font = data_style_du
     du_widths = {1: 40.75, 2: 24.5, 3: 16.33, 4: 17.58, 5: 23.58, 6: 9.5, 7: 10.58,
                  8: 4.25, 9: 11.0, 10: 15.25, 11: 10.33, 12: 13.0, 13: 10.66, 14: 8.5}
     for i, w in du_widths.items():
@@ -495,7 +601,7 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
         cell = ws_pkg.cell(row=1, column=i, value=col)
         cell.font = pkg_header_font
         cell.fill = pkg_header_fill
-    for r, (orig, final) in enumerate(sorted(lookup['package_map'].items()), start=2):
+    for r, (orig, final) in enumerate(lookup['package_map'].items(), start=2):
         ws_pkg.cell(row=r, column=1, value=orig).font = Font(name=ARIAL, size=11)
         ws_pkg.cell(row=r, column=2, value=final).font = Font(name=ARIAL, size=11)
     ws_pkg.column_dimensions['A'].width = 17.66
