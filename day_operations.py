@@ -53,13 +53,9 @@ DAY_OPS_NAME_ALIASES = {
 }
 
 WORKER_LINKS = [
-    ('مركز تشغيل اليوم', 'day-operations.html', 'رفع واحد وتشغيل مخرجات اليوم'),
-    ('محطة القرار', 'decision-station.html', 'ملف Update و Packages و Dont Use'),
-    ('محطات التجهيز', 'ordering-stations.html', 'الأرز والفطار والسلطات والحلى والصوص'),
-    ('Tokyo Production Master', 'tokyo-production-dashboard.html', 'إدارة إنتاج توكيو وتقارير المحطات'),
-    ('روابط العاملين', 'worker-links-dashboard.html', 'إنشاء وتحديث روابط المهام للعاملين'),
-    ('العمليات اللايف', 'live-operations.html', 'متابعة التشغيل الحي'),
-    ('سجل الموازين', 'weight-log-dashboard.html', 'أداة ثابتة منفصلة عن تشغيل اليوم'),
+    ('رابط الخضار الساخن', 'veg-hot.html', 'استلام خضار القسم الساخن'),
+    ('رابط السلطة', 'veg-salad.html', 'استلام خضار قسم السلطة'),
+    ('رابط الصوص', 'sauce-receipt.html', 'استلام الصوص'),
 ]
 
 
@@ -337,6 +333,7 @@ def _export_visible_sheet_pdf(workbook_path, sheet_name='Ordering'):
 
 def _generate_station_pdfs(day_label, dont_use_rows):
     outputs = []
+    image_sources = []
     reports = []
     counts = _counts_by_station(dont_use_rows)
     day_no = _day_no(day_label)
@@ -352,6 +349,7 @@ def _generate_station_pdfs(day_label, dont_use_rows):
             )
             pdf_path = _export_visible_sheet_pdf(xlsx_path, 'Ordering')
             outputs.append((f'Day{day_no}_Breakfast.pdf', pdf_path))
+            image_sources.append(('Breakfast', xlsx_path))
             reports.append({
                 'station': 'breakfast',
                 'matched_count': len(breakfast_edits),
@@ -379,6 +377,7 @@ def _generate_station_pdfs(day_label, dont_use_rows):
             )
             pdf_path = _export_visible_sheet_pdf(xlsx_path, 'Ordering')
             outputs.append((f'Day{day_no}_Dessert.pdf', pdf_path))
+            image_sources.append(('Dessert', xlsx_path))
             reports.append({
                 'station': 'dessert',
                 'matched_count': len(dessert_edits),
@@ -395,7 +394,7 @@ def _generate_station_pdfs(day_label, dont_use_rows):
     elif counts['dessert']:
         reports.append({'station': 'dessert', 'matched_count': 0, 'unmatched': dessert_unmatched})
 
-    return outputs, reports
+    return outputs, image_sources, reports
 
 
 def _append_rows(ws, headers, rows):
@@ -659,10 +658,12 @@ def process_day_operations(file_storage, day_label_override=None):
     station_buf = io.BytesIO()
     station_wb.save(station_buf)
     station_buf.seek(0)
-    station_pdf_outputs, station_pdf_reports = _generate_station_pdfs(day_label, dont_use_rows)
+    station_pdf_outputs, station_image_sources, station_pdf_reports = _generate_station_pdfs(day_label, dont_use_rows)
     full_report['station_pdfs'] = station_pdf_reports
     for filename, _path in station_pdf_outputs:
-        full_report['files'].append(filename)
+        full_report['files'].append(f'pdf/{filename}')
+    if station_image_sources:
+        full_report['files'].append('images/صور المحطات بصيغة PNG')
 
     tokyo_path = None
     tokyo_report = None
@@ -694,7 +695,22 @@ def process_day_operations(file_storage, day_label_override=None):
         zf.writestr(f'مخرجات تشغيل أولية حسب فاتورة المشتركين - {day_label}.xlsx', station_buf.getvalue())
         for filename, path in station_pdf_outputs:
             with open(path, 'rb') as fh:
-                zf.writestr(filename, fh.read())
+                zf.writestr(f'pdf/{filename}', fh.read())
+        if station_image_sources:
+            try:
+                from xlsx_to_images import add_workbook_images_to_zip
+                image_date = datetime.now().strftime('%Y-%m-%d')
+                for prefix, xlsx_path in station_image_sources:
+                    add_workbook_images_to_zip(
+                        zf,
+                        xlsx_path,
+                        image_date,
+                        folder='images',
+                        prefix=f'{prefix}_',
+                        day_num_override=_day_no(day_label),
+                    )
+            except Exception as exc:
+                zf.writestr('images/تعذر_توليد_الصور.txt', f'تعذر توليد صور المحطات: {exc}')
         if tokyo_path:
             with open(tokyo_path, 'rb') as fh:
                 zf.writestr(f'شيت توكيو المحدث - {day_label}.xlsm', fh.read())
