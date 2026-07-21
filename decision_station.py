@@ -32,6 +32,7 @@ from datetime import datetime
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side as BorderSide
+from openpyxl.styles.colors import Color
 from openpyxl.utils import get_column_letter
 
 LOOKUP_PATH = os.path.join(os.path.dirname(__file__), 'data', 'decision_station_lookup.json')
@@ -330,49 +331,32 @@ def _category_fill(category, lookup):
 
 def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
                            package_order, lookup, out_path=None):
+    """بتبني الملف بنفس ترتيب التابات ونفس الخطوط ونفس عرض الأعمدة ونفس
+    الزوم ونفس تجميد الصفوف الموجودين في ملف اليوم الجاهز الأصلي بالظبط
+    (اتقاسوا خلية خلية من ملف الثلاثاء المرجعي) - الحاجة الوحيدة اللي
+    بتتغيّر هي القيم نفسها."""
     wb = Workbook()
+    wb.remove(wb.active)  # هنعمل الشيتات بالترتيب الصح بدل الافتراضي
 
-    # ---------------- Export ----------------
-    ws_export = wb.active
-    ws_export.title = 'Export'
-    _plain_header_row(ws_export, EXPORT_COLUMNS)
-    for r, row in enumerate(export_rows, start=2):
-        for c, col in enumerate(EXPORT_COLUMNS, start=1):
-            ws_export.cell(row=r, column=c, value=row.get(col))
-    widths = [6, 32, 30, 26, 10, 16, 34, 12, 12, 9]
-    for i, w in enumerate(widths, start=1):
-        ws_export.column_dimensions[get_column_letter(i)].width = w
+    ARIAL = 'Arial'
+    TIMES = 'Times New Roman'
 
-    # ---------------- Don't Use just refresh ----------------
-    ws_du = wb.create_sheet("Don't Use just refresh")
-    _plain_header_row(ws_du, DONT_USE_COLUMNS)
-    for r, row in enumerate(dont_use_rows, start=2):
-        for c, col in enumerate(DONT_USE_COLUMNS, start=1):
-            ws_du.cell(row=r, column=c, value=row.get(col))
-    du_widths = [40, 24, 16, 18, 24, 12, 12, 9, 10, 14, 10, 12, 10, 9]
-    for i, w in enumerate(du_widths, start=1):
-        ws_du.column_dimensions[get_column_letter(i)].width = w
-
-    # ---------------- Packages ----------------
-    ws_pkg = wb.create_sheet('Packages')
-    header_fill = PatternFill(patternType='solid', fgColor='FFB7C6E8')
-    for i, col in enumerate(['Original_Package', 'Final_Package'], start=1):
-        cell = ws_pkg.cell(row=1, column=i, value=col)
-        cell.font = Font(bold=True, size=11)
-    for r, (orig, final) in enumerate(sorted(lookup['package_map'].items()), start=2):
-        ws_pkg.cell(row=r, column=1, value=orig)
-        ws_pkg.cell(row=r, column=2, value=final)
-    ws_pkg.column_dimensions['A'].width = 30
-    ws_pkg.column_dimensions['B'].width = 26
-
-    # ---------------- Update (نفس شكل الـ Pivot تمامًا، بس قيم ثابتة) ----------------
+    # ---------------- Update (أول تاب في الملف الأصلي - نفس الترتيب) ----------------
     ws_up = wb.create_sheet('Update')
-    header_font = Font(bold=True, size=18)
-    plain_font = Font(bold=False, size=18)
+    ws_up.sheet_view.showGridLines = False
+    ws_up.sheet_view.zoomScale = 40
+    ws_up.freeze_panes = 'B1'
+    ws_up.sheet_format.defaultRowHeight = 23
+    ws_up.row_dimensions[6].height = 25.25
+    ws_up.row_dimensions[7].height = 14.5
+    ws_up.row_dimensions[8].height = 36.75
+
+    header_font = Font(name=TIMES, bold=True, size=18)
+    plain_font = Font(name=TIMES, bold=False, size=18)
     center = Alignment(horizontal='center', vertical='center')
 
     a6 = ws_up.cell(row=6, column=1, value=day_label or '')
-    a6.font = Font(bold=True, size=18)
+    a6.font = header_font
     a6.fill = PatternFill(patternType='solid', fgColor='FFFFFF00')
     a6.alignment = center
 
@@ -457,9 +441,68 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
     tc.alignment = center
     tg.alignment = center
 
-    ws_up.column_dimensions['A'].width = 44
-    for i in range(2, total_gm_col + 1):
+    # نفس عرض أعمدة ملف الثلاثاء المرجعي بالظبط (5 تصنيفات = نفس العدد
+    # المعتاد كل يوم)؛ أي عمود زيادة (تصنيف بوفيه نادر مثلاً) ياخد عرض
+    # قريب منطقي بدل ما يفضل بعرض افتراضي ضيق.
+    up_widths = [44, 31.58, 9.91, 11.33, 9.91, 9.25, 10.08, 13.41, 9.91, 11.75, 9.91, 16.75, 17.58]
+    for i, w in enumerate(up_widths, start=1):
+        ws_up.column_dimensions[get_column_letter(i)].width = w
+    for i in range(len(up_widths) + 1, total_gm_col + 1):
         ws_up.column_dimensions[get_column_letter(i)].width = 11
+
+    # ---------------- Export (تاني تاب في الملف الأصلي) ----------------
+    ws_export = wb.create_sheet('Export')
+    ws_export.sheet_view.zoomScale = 90
+    ws_export.sheet_format.defaultRowHeight = 14
+    header_style_export = Font(name=ARIAL, size=11)
+    data_style_export = Font(name=ARIAL, size=12)
+    for i, col in enumerate(EXPORT_COLUMNS, start=1):
+        cell = ws_export.cell(row=1, column=i, value=col)
+        cell.font = header_style_export
+    for r, row in enumerate(export_rows, start=2):
+        ws_export.row_dimensions[r].height = 15.5
+        for c, col in enumerate(EXPORT_COLUMNS, start=1):
+            cell = ws_export.cell(row=r, column=c, value=row.get(col))
+            cell.font = data_style_export
+    export_widths = {2: 13.5, 3: 30.0, 4: 27.83, 5: 8.33, 6: 9.0, 8: 13.16, 9: 13.33}
+    for i, w in export_widths.items():
+        ws_export.column_dimensions[get_column_letter(i)].width = w
+
+    # ---------------- Don't Use just refresh (تالت تاب) ----------------
+    ws_du = wb.create_sheet("Don't Use just refresh")
+    ws_du.sheet_format.defaultRowHeight = 14
+    header_style_du = Font(name=ARIAL, size=11)
+    data_style_du = Font(name=ARIAL, size=11)
+    for i, col in enumerate(DONT_USE_COLUMNS, start=1):
+        cell = ws_du.cell(row=1, column=i, value=col)
+        cell.font = header_style_du
+    for r, row in enumerate(dont_use_rows, start=2):
+        for c, col in enumerate(DONT_USE_COLUMNS, start=1):
+            cell = ws_du.cell(row=r, column=c, value=row.get(col))
+            cell.font = data_style_du
+    du_widths = {1: 40.75, 2: 24.5, 3: 16.33, 4: 17.58, 5: 23.58, 6: 9.5, 7: 10.58,
+                 8: 4.25, 9: 11.0, 10: 15.25, 11: 10.33, 12: 13.0, 13: 10.66, 14: 8.5}
+    for i, w in du_widths.items():
+        ws_du.column_dimensions[get_column_letter(i)].width = w
+
+    # ---------------- Packages (رابع تاب) ----------------
+    ws_pkg = wb.create_sheet('Packages')
+    ws_pkg.sheet_view.zoomScale = 160
+    ws_pkg.sheet_format.defaultRowHeight = 14
+    pkg_header_font = Font(name=ARIAL, bold=True, size=11)
+    pkg_header_fill = PatternFill(patternType='solid', fgColor=Color(theme=4, tint=0))
+    for i, col in enumerate(['Original_Package', 'Final_Package'], start=1):
+        cell = ws_pkg.cell(row=1, column=i, value=col)
+        cell.font = pkg_header_font
+        cell.fill = pkg_header_fill
+    for r, (orig, final) in enumerate(sorted(lookup['package_map'].items()), start=2):
+        ws_pkg.cell(row=r, column=1, value=orig).font = Font(name=ARIAL, size=11)
+        ws_pkg.cell(row=r, column=2, value=final).font = Font(name=ARIAL, size=11)
+    ws_pkg.column_dimensions['A'].width = 17.66
+    ws_pkg.column_dimensions['B'].width = 15.16
+    ws_pkg.column_dimensions['M'].width = 25.5
+
+    wb.active = 0  # التاب اللي بيفتح بيه الملف = Update، زي الأصلي بالظبط
 
     if out_path is None:
         out_path = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False).name
