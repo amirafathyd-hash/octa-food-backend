@@ -1236,22 +1236,47 @@ def _sauce_tracking_by_receipt(tracking_rows):
     return result
 
 
-def _log_sauce_tracking_event(receipt_id, event):
+def _tracking_by_receipt(tracking_rows, allowed_events=('sent', 'opened')):
+    result = {}
+    allowed = set(allowed_events)
+    for row in tracking_rows or []:
+        receipt_id = str(row.get('file_name') or '').strip()
+        payload = _read_upload_log_message(row)
+        event = str(payload.get('event') or '').strip()
+        stamp = payload.get('at') or row.get('created_at') or ''
+        if not receipt_id or event not in allowed or not stamp:
+            continue
+        entry = result.setdefault(receipt_id, {})
+        key = f'{event}_at'
+        if not entry.get(key) or str(stamp) < str(entry[key]):
+            entry[key] = stamp
+    return result
+
+
+def _log_receipt_tracking_event(file_type, receipt_id, event):
     """يسجل أول حدث فقط لكل مرحلة، حتى لا يغيّر الوقت عند refresh أو نسخ متكرر."""
     sb = get_client()
     existing = execute_with_retry(
         sb.table('upload_log').select('id,message')
-        .eq('file_type', 'sauce_receipt_tracking')
+        .eq('file_type', file_type)
         .eq('file_name', str(receipt_id)).limit(30)
     ).data or []
     for row in existing:
         if _read_upload_log_message(row).get('event') == event:
             return False
     _log(
-        'sauce_receipt_tracking', str(receipt_id), None,
+        file_type, str(receipt_id), None,
         json.dumps({'event': event, 'at': datetime.now(timezone.utc).isoformat()}, ensure_ascii=False),
     )
     return True
+
+
+def _log_sauce_tracking_event(receipt_id, event):
+    return _log_receipt_tracking_event('sauce_receipt_tracking', receipt_id, event)
+
+
+def _log_vegetables_tracking_event(receipt_id, event):
+    return _log_receipt_tracking_event('vegetables_receipt_tracking', receipt_id, event)
 
 
 @app.route('/api/receipt-notifications/list', methods=['GET'])
@@ -1304,6 +1329,13 @@ def receipt_notifications_list():
         .order('created_at', desc=False)
         .limit(3000)
     )
+    vegetable_tracking_res = execute_with_retry(
+        sb.table('upload_log')
+        .select('id,file_name,message,created_at')
+        .eq('file_type', 'vegetables_receipt_tracking')
+        .order('created_at', desc=False)
+        .limit(3000)
+    )
     sauce_receipts = _enrich_legacy_sauce_receipts(
         sauce_res.data or [],
         sauce_logs_res.data or [],
@@ -1317,10 +1349,19 @@ def receipt_notifications_list():
         veg_links_res.data or [],
         worker_links_res.data or [],
     )
+    vegetable_tracking = _tracking_by_receipt(vegetable_tracking_res.data or [])
+    for row in vegetable_receipts:
+        payload = _read_upload_log_message(row)
+        receipt_id = str(payload.get('receipt_id') or '').strip()
+        row['tracking'] = vegetable_tracking.get(receipt_id, {})
+    vegetable_links = veg_links_res.data or []
+    for row in vegetable_links:
+        receipt_id = str(row.get('file_name') or '').strip()
+        row['tracking'] = vegetable_tracking.get(receipt_id, {})
     return jsonify({
         'sauce_receipts': sauce_receipts,
         'vegetable_receipts': vegetable_receipts,
-        'vegetable_links': veg_links_res.data or [],
+        'vegetable_links': vegetable_links,
         'worker_links': worker_links_res.data or [],
     })
 
@@ -5168,6 +5209,41 @@ def vegetables_receipt_get(receipt_id):
     if not payload.get('rows'):
         return jsonify({'error': 'بيانات رابط الخضروات غير مكتملة'}), 500
     return jsonify(payload)
+
+
+@app.route('/api/vegetables-receipt/<receipt_id>/opened', methods=['POST'])
+def vegetables_receipt_opened(receipt_id):
+    sb = get_client()
+    found = execute_with_retry(
+        sb.table('upload_log')
+        .select('id')
+        .eq('file_type', 'vegetables_receipt_link')
+        .eq('file_name', receipt_id)
+        .limit(1)
+    ).data or []
+    if not found:
+        return jsonify({'error': 'رابط استلام الخضروات غير موجود'}), 404
+    changed = _log_vegetables_tracking_event(receipt_id, 'opened')
+    return jsonify({'ok': True, 'first_time': changed})
+
+
+@app.route('/api/vegetables-receipt/<receipt_id>/mark-sent', methods=['POST'])
+def vegetables_receipt_mark_sent(receipt_id):
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    found = execute_with_retry(
+        sb.table('upload_log')
+        .select('id')
+        .eq('file_type', 'vegetables_receipt_link')
+        .eq('file_name', receipt_id)
+        .limit(1)
+    ).data or []
+    if not found:
+        return jsonify({'error': 'رابط استلام الخضروات غير موجود'}), 404
+    changed = _log_vegetables_tracking_event(receipt_id, 'sent')
+    return jsonify({'ok': True, 'first_time': changed})
 
 
 @app.route('/api/vegetables-receipt/email', methods=['POST'])
