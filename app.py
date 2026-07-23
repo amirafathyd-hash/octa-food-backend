@@ -38,7 +38,7 @@ from tokyo_ordering import (
     merge_day_into_template,
 )
 from tokyo_production_reports import build_tokyo_day_package
-from decision_station import process_subscribers_invoice
+from decision_station import process_subscribers_invoice, process_subscribers_invoices
 from day_operations import (
     get_day_operations_archive_path,
     list_day_operations_archives,
@@ -625,14 +625,31 @@ def decision_station_process():
     ملف كامل بنفس شكل ملف اليوم الجاهز (Export / Don't Use just refresh /
     Update / Packages) - بنفس الحساب اللي كان بيتعمل يدوي في الإكسل، من
     غير ما تلمس حاجة."""
-    f = request.files.get('file')
-    if not f:
-        return jsonify({'error': 'ارفع فاتورة الكمية للمشتركين باسم file'}), 400
+    files = request.files.getlist('files')
+    if not files:
+        legacy_file = request.files.get('file')
+        files = [legacy_file] if legacy_file else []
+    if not files:
+        return jsonify({'error': 'ارفع فاتورة كمية واحدة على الأقل'}), 400
 
     day_label = request.form.get('day_label') or None
 
     try:
-        out_path, report = process_subscribers_invoice(f, day_label_override=day_label)
+        if len(files) == 1:
+            out_path, report = process_subscribers_invoice(
+                files[0], day_label_override=day_label
+            )
+            download_name = f"Octa_Food_Decision_{report['day_label']}.xlsx"
+            mimetype = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        else:
+            if day_label:
+                return jsonify({
+                    'error': 'عند رفع أكثر من يوم، لازم يكون تاريخ كل يوم موجودًا '
+                             'في اسم ملفه بصيغة YYYY-MM-DD'
+                }), 400
+            out_path, report = process_subscribers_invoices(files)
+            download_name = f"Octa_Food_Decision_Multiple_Days_{datetime.now().strftime('%Y-%m-%d')}.zip"
+            mimetype = 'application/zip'
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     except Exception as exc:
@@ -641,7 +658,8 @@ def decision_station_process():
 
     response = send_file(
         out_path, as_attachment=True,
-        download_name=f"Octa_Food_Decision_{report['day_label']}.xlsx",
+        download_name=download_name,
+        mimetype=mimetype,
     )
     response.headers['X-Decision-Report'] = json.dumps(report, ensure_ascii=True)
     response.headers['Access-Control-Expose-Headers'] = 'X-Decision-Report, Content-Disposition'

@@ -28,6 +28,7 @@ import json
 import os
 import re
 import tempfile
+import zipfile
 from collections import OrderedDict
 from datetime import datetime
 
@@ -219,6 +220,14 @@ def _day_label_from_filename(filename):
         return None
     date_value = datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     return DAY_NAMES_BY_WEEKDAY.get(date_value.weekday())
+
+
+def _date_token_from_filename(filename):
+    """يرجع التاريخ بصيغة ثابتة لاستخدامه في اسم ملف النتيجة داخل الـ ZIP."""
+    match = re.search(r'(20\d{2})[-_/](\d{1,2})[-_/](\d{1,2})', filename or '')
+    if not match:
+        return None
+    return f'{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}'
 
 
 def compute_decision_tables(rows, lookup):
@@ -636,3 +645,66 @@ def process_subscribers_invoice(file_storage, day_label_override=None, out_path=
     )
     report['day_label'] = day_label
     return out_path, report
+
+
+def process_subscribers_invoices(file_storages, out_path=None):
+    """يعالج ملفات أيام متعددة مع عزل حساب كل يوم في Workbook مستقل.
+
+    كان دمج صفوف أكثر من يوم قبل الحساب يحوّلها كلها إلى Pivot واحد، وبالتالي
+    يغيّر أرقام اليوم الصحيح. هنا كل ملف يمر على نفس مسار اليوم الواحد بدون
+    أي مشاركة للصفوف أو المجاميع، ثم نجمع ملفات النتائج فقط داخل ZIP.
+    """
+    files = list(file_storages or [])
+    if len(files) < 2:
+        raise ValueError('معالجة الأيام المتعددة تحتاج ملفين على الأقل')
+
+    if out_path is None:
+        out_path = tempfile.NamedTemporaryFile(suffix='.zip', delete=False).name
+
+    reports = []
+    archive_names = set()
+    temporary_outputs = []
+    try:
+        with zipfile.ZipFile(out_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            for index, file_storage in enumerate(files, start=1):
+                source_name = (
+                    getattr(file_storage, 'filename', '') or
+                    os.path.basename(getattr(file_storage, 'name', '') or '') or
+                    f'day-{index}.xlsx'
+                )
+                result_path, report = process_subscribers_invoice(file_storage)
+                temporary_outputs.append(result_path)
+
+                date_token = _date_token_from_filename(source_name)
+                name_token = date_token or f'day-{index}'
+                base_name = f"Octa_Food_Decision_{name_token}_{report['day_label']}"
+                archive_name = f'{base_name}.xlsx'
+                duplicate_no = 2
+                while archive_name in archive_names:
+                    archive_name = f'{base_name}_{duplicate_no}.xlsx'
+                    duplicate_no += 1
+                archive_names.add(archive_name)
+                archive.write(result_path, archive_name)
+
+                reports.append({
+                    **report,
+                    'source_file': source_name,
+                    'output_file': archive_name,
+                })
+    except Exception:
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+        raise
+    finally:
+        for result_path in temporary_outputs:
+            try:
+                os.unlink(result_path)
+            except OSError:
+                pass
+
+    return out_path, {
+        'mode': 'multiple',
+        'file_count': len(reports),
+        'computed_rows': sum(item['computed_rows'] for item in reports),
+        'days': reports,
+    }
