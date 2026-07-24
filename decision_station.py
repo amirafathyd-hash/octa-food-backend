@@ -36,6 +36,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side as BorderSide
 from openpyxl.styles.colors import Color
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 LOOKUP_PATH = os.path.join(os.path.dirname(__file__), 'data', 'decision_station_lookup.json')
 
@@ -49,7 +50,42 @@ DAY_NAMES_BY_WEEKDAY = {
     4: 'الجمعة',   # Friday (نادرًا ما يستخدم فعليًا)
 }
 
-PREFERRED_PACKAGE_ORDER = ['تضخيم', 'تكميم لايت', 'جيم', 'سمارت دايت', 'غذاء العمل']
+PREFERRED_PACKAGE_ORDER = ['جيم', 'تكميم لايت', 'تضخيم', 'غذاء العمل', 'سمارت دايت']
+
+# ترتيب الصفوف المثبت من ملف المرجع:
+# "Octa Food Tue 21 July 2026 الثلاثاء.xlsx".
+# أي صنف جديد غير موجود هنا يضاف بعد الأصناف المعروفة بترتيب منطقي.
+REFERENCE_PROTEIN_ORDER = [
+    'ساندوتش الديك الرومي بالتوت',
+    'ساندوتش البيض المسلوق',
+    'كرواسون جبنة الفيتا والخضار',
+    'شكشوكة تركية',
+    'كلوب ساندوتش بالدجاج',
+    'ساندوتش الدجاج المشوي',
+    'ستيك دجاج',
+    'دجاج بالفطر',
+    'ستروجانوف باستا',
+    'بيف أمانسي',
+    'دجاج تكا',
+    'فاصولياء بيضاء باللحم',
+    'سمك بالسبانخ والليمون',
+    'أوكتا بوكي بول الدجاج',
+    'مقلوبة دجاج',
+    'ساندوتش الدجاج بالباربيكيو بخبز الشيباتا',
+    'سلطة الكينوا',
+    'سلطة التانغو',
+    'سلطة الفواكه',
+    'تفاح أخضر',
+    'تشيز كيك اللوتس',
+    'كيكة الجزر',
+    'كيك بالشكولاته واللوز',
+    'مكسرات مشكلة',
+]
+
+REFERENCE_SIDE_ORDER_BY_PROTEIN = {
+    'ستيك دجاج': ['خضار سوتيه', 'البطاطس المهروسة'],
+    'بيف أمانسي': ['خضار سوتيه', 'الأرز بالزعفران'],
+}
 
 RAW_REQUIRED_HEADERS = {
     '#', 'الاسم الإنجليزي', 'الاسم العربي', 'الباقة', 'التصنيف',
@@ -242,8 +278,8 @@ def compute_decision_tables(rows, lookup):
          البروتين ده بالذات - حتى لو نفس اسم الطبق الجانبي ("خضار سوتيه"
          مثلاً) ظهر تحت بروتينات تانية، هيبقى له صف منفصل لكل بروتين
          (بالظبط زي ما بيحصل في ملف الإكسل الحقيقي - راجعنا ده صف بصف).
-      3) لو الصنف مالوش طبق جانبي حقيقي (Side == '-')، مفيش صف تاني
-         بيتضاف تحته - صف البروتين نفسه كافي.
+      3) لو الصنف مالوش طبق جانبي حقيقي، بيتضاف تحته صف "-" بنفس أرقامه،
+         كما يظهر في ملف المرجع بالضبط.
 
     pivot_rows: list[(display_name, {final_package: [count, grams]})]
     بنفس ترتيب الظهور الحقيقي في ملف اليوم الجاهز."""
@@ -251,7 +287,6 @@ def compute_decision_tables(rows, lookup):
     double_items = set(lookup.get('double_in_bulking', []))
     double_proteins = _text_set(lookup.get('double_proteins_in_bulking'))
     bulking_pkg = lookup.get('bulking_final_package', 'تضخيم')
-    force_dash_side = set(lookup.get('force_dash_side_proteins', []))
     dont_use_package_order = lookup.get('dont_use_package_order') or list(package_map.keys())
     original_package_rank = {
         name: idx
@@ -287,10 +322,8 @@ def compute_decision_tables(rows, lookup):
             inferred_items.add(english)
 
         protein = item_info.get('protein')
-        side = item_info.get('side')  # None لو مفيش طبق جانبي حقيقي
+        side = item_info.get('side') or '-'
         category = row.get('التصنيف') or item_info.get('category') or ''
-        if not side and protein in force_dash_side:
-            side = '-'
         carb = _number(row.get('مجموع الكارب'))
         protein_g = _number(row.get('مجموع البروتين'))
         base_gm = carb or protein_g
@@ -307,7 +340,7 @@ def compute_decision_tables(rows, lookup):
         dont_use_rows.append({
             'الاسم الإنجليزي': english,
             'Protein': protein,
-            'Side': side or '-',
+            'Side': side,
             'الباقة': orig_pkg,
             'التصنيف': category,
             'مجموع الكارب': carb,
@@ -357,9 +390,14 @@ def compute_decision_tables(rows, lookup):
     # الرئيسية (وبنودها اللي بلو كارب)، بعدين سلطات/فواكه/إضافات، بعدين
     # حلى، وأي تصنيف تاني مش معروف يتحط في الآخر. الترتيب جوه كل بلوك
     # زي ترتيب أول ظهور في الملف المرفوع نفسه.
+    reference_protein_rank = {
+        name: idx
+        for idx, name in enumerate(REFERENCE_PROTEIN_ORDER)
+    }
     ordered_proteins = sorted(
         protein_order,
         key=lambda p: (
+            reference_protein_rank.get(p, len(reference_protein_rank) + 9999),
             _rank_from_lookup_order(lookup, 'row_label_order', p),
             _category_rank(protein_category.get(p, '')),
             protein_order.index(p),
@@ -370,7 +408,11 @@ def compute_decision_tables(rows, lookup):
     for protein in ordered_proteins:
         pd = protein_data[protein]
         pivot_rows.append((protein, pd['totals'], True))
-        side_lookup_order = lookup.get('side_order_by_protein', {}).get(protein) or []
+        side_lookup_order = (
+            REFERENCE_SIDE_ORDER_BY_PROTEIN.get(protein)
+            or lookup.get('side_order_by_protein', {}).get(protein)
+            or []
+        )
         ordered_sides = sorted(
             pd['side_order'],
             key=lambda s: (
@@ -381,7 +423,7 @@ def compute_decision_tables(rows, lookup):
         for side in ordered_sides:
             pivot_rows.append((side, pd['sides'][side], False))
 
-    ordered_packages = [p for p in PREFERRED_PACKAGE_ORDER if p in package_order]
+    ordered_packages = list(PREFERRED_PACKAGE_ORDER)
     ordered_packages += [p for p in package_order if p not in ordered_packages]
 
     dont_use_rows.sort(key=lambda row: (
@@ -471,32 +513,49 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
     a6.fill = PatternFill(patternType='solid', fgColor='FFFFFF00')
     a6.alignment = center
 
-    ws_up.cell(row=7, column=2, value='Column Labels').font = plain_font
-
     n_pkg = len(package_order)
     total_count_col = 2 + n_pkg * 2
     total_gm_col = total_count_col + 1
 
     for i, pkg in enumerate(package_order):
         col = 2 + i * 2
-        c1 = ws_up.cell(row=8, column=col, value=pkg)
-        c1.font = header_font
-        c1.alignment = center
-        ws_up.cell(row=8, column=col + 1).font = header_font
+        for header_col in (col, col + 1):
+            c1 = ws_up.cell(row=7, column=header_col, value=pkg)
+            c1.font = header_font
+            c1.alignment = center
         ws_up.cell(row=9, column=col, value='Count').font = plain_font
         ws_up.cell(row=9, column=col, value='Count').alignment = center
         ws_up.cell(row=9, column=col + 1, value='Grams').font = plain_font
         ws_up.cell(row=9, column=col + 1).alignment = center
 
-    ws_up.cell(row=8, column=total_count_col, value='Total Count').font = header_font
-    ws_up.cell(row=8, column=total_gm_col, value='Total Grams').font = header_font
+    for total_col in (total_count_col, total_gm_col):
+        cell = ws_up.cell(row=7, column=total_col, value='Grand Total')
+        cell.font = header_font
+        cell.alignment = center
     ws_up.cell(row=9, column=1, value='Row Labels').font = header_font
     ws_up.cell(row=9, column=1).alignment = center
+    total_count_header = ws_up.cell(
+        row=9, column=total_count_col, value='Grand Total (Count)'
+    )
+    total_gm_header = ws_up.cell(
+        row=9, column=total_gm_col, value='Grand Total (Grams)'
+    )
+    for cell in (total_count_header, total_gm_header):
+        cell.font = header_font
+        cell.alignment = Alignment(
+            horizontal='center', vertical='center', wrap_text=True
+        )
 
     r = 10
     grand = [0.0] * (n_pkg * 2)
+    parent_category = ''
     for name, bucket, is_protein_level in pivot_rows:
-        category = lookup.get('name_category', {}).get(name, '')
+        if is_protein_level:
+            parent_category = lookup.get('name_category', {}).get(name, '')
+        category = (
+            parent_category if not is_protein_level and name == '-'
+            else lookup.get('name_category', {}).get(name, parent_category)
+        )
         fill = _category_fill(category, lookup)
         name_cell = ws_up.cell(row=r, column=1, value=name)
         name_cell.font = header_font
@@ -507,21 +566,22 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
         for i, pkg in enumerate(package_order):
             count, gm = bucket.get(pkg, [0.0, 0.0])
             col = 2 + i * 2
-            cc = ws_up.cell(row=r, column=col, value=(count or None))
-            gc = ws_up.cell(row=r, column=col + 1, value=(gm or None))
+            cc = ws_up.cell(row=r, column=col, value=count)
+            gc = ws_up.cell(row=r, column=col + 1, value=gm)
             cc.font = header_font
             gc.font = header_font
             cc.alignment = center
             gc.alignment = center
             cc.fill = fill
             gc.fill = fill
+            gc.border = Border(right=BorderSide(style='thick', color='FF000000'))
             if is_protein_level:
                 grand[i * 2] += count
                 grand[i * 2 + 1] += gm
             row_total_count += count
             row_total_gm += gm
-        tc = ws_up.cell(row=r, column=total_count_col, value=row_total_count or None)
-        tg = ws_up.cell(row=r, column=total_gm_col, value=row_total_gm or None)
+        tc = ws_up.cell(row=r, column=total_count_col, value=row_total_count)
+        tg = ws_up.cell(row=r, column=total_gm_col, value=row_total_gm)
         tc.font = header_font
         tg.font = header_font
         tc.alignment = center
@@ -537,16 +597,17 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
     gt_total_count, gt_total_gm = 0.0, 0.0
     for i in range(n_pkg):
         col = 2 + i * 2
-        cc = ws_up.cell(row=total_row, column=col, value=grand[i * 2] or None)
-        gc = ws_up.cell(row=total_row, column=col + 1, value=grand[i * 2 + 1] or None)
+        cc = ws_up.cell(row=total_row, column=col, value=grand[i * 2])
+        gc = ws_up.cell(row=total_row, column=col + 1, value=grand[i * 2 + 1])
         cc.font = header_font
         gc.font = header_font
         cc.alignment = center
         gc.alignment = center
+        gc.border = Border(right=BorderSide(style='thick', color='FF000000'))
         gt_total_count += grand[i * 2]
         gt_total_gm += grand[i * 2 + 1]
-    tc = ws_up.cell(row=total_row, column=total_count_col, value=gt_total_count or None)
-    tg = ws_up.cell(row=total_row, column=total_gm_col, value=gt_total_gm or None)
+    tc = ws_up.cell(row=total_row, column=total_count_col, value=gt_total_count)
+    tg = ws_up.cell(row=total_row, column=total_gm_col, value=gt_total_gm)
     tc.font = header_font
     tg.font = header_font
     tc.alignment = center
@@ -578,9 +639,22 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
     export_widths = {2: 13.5, 3: 30.0, 4: 27.83, 5: 8.33, 6: 9.0, 8: 13.16, 9: 13.33}
     for i, w in export_widths.items():
         ws_export.column_dimensions[get_column_letter(i)].width = w
+    export_table_last_row = max(412, 1 + len(export_rows))
+    export_table = Table(
+        displayName='Table1',
+        ref=f'A1:J{export_table_last_row}',
+    )
+    export_table.tableStyleInfo = TableStyleInfo(
+        name='TableStyleMedium2',
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws_export.add_table(export_table)
 
     # ---------------- Don't Use Just Refresh (تالت تاب) ----------------
-    ws_du = wb.create_sheet("Don't Use Just Refresh")
+    ws_du = wb.create_sheet("Don't Use just refresh")
     ws_du.sheet_format.defaultRowHeight = 14
     header_style_du = Font(name=ARIAL, size=11)
     data_style_du = Font(name=ARIAL, size=11)
@@ -591,14 +665,26 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
         for c, col in enumerate(DONT_USE_COLUMNS, start=1):
             cell = ws_du.cell(row=r, column=c, value=row.get(col))
             cell.font = data_style_du
-    tail_rows = int(lookup.get('dont_use_tail_formula_rows') or 0)
-    for r in range(2 + len(dont_use_rows), 2 + len(dont_use_rows) + tail_rows):
+    table_last_row = max(412, 1 + len(dont_use_rows))
+    for r in range(2 + len(dont_use_rows), table_last_row + 1):
         ws_du.cell(row=r, column=3, value='-').font = data_style_du
         ws_du.cell(row=r, column=11, value=1).font = data_style_du
     du_widths = {1: 40.75, 2: 24.5, 3: 16.33, 4: 17.58, 5: 23.58, 6: 9.5, 7: 10.58,
                  8: 4.25, 9: 11.0, 10: 15.25, 11: 10.33, 12: 13.0, 13: 10.66, 14: 8.5}
     for i, w in du_widths.items():
         ws_du.column_dimensions[get_column_letter(i)].width = w
+    dont_use_table = Table(
+        displayName='Table1_1',
+        ref=f'A1:N{table_last_row}',
+    )
+    dont_use_table.tableStyleInfo = TableStyleInfo(
+        name='TableStyleMedium7',
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws_du.add_table(dont_use_table)
 
     # ---------------- Packages (رابع تاب) ----------------
     ws_pkg = wb.create_sheet('Packages')
@@ -616,6 +702,18 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
     ws_pkg.column_dimensions['A'].width = 17.66
     ws_pkg.column_dimensions['B'].width = 15.16
     ws_pkg.column_dimensions['M'].width = 25.5
+    package_table = Table(
+        displayName='tblPackageMap',
+        ref=f"A1:B{1 + len(lookup['package_map'])}",
+    )
+    package_table.tableStyleInfo = TableStyleInfo(
+        name='TableStyleMedium2',
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws_pkg.add_table(package_table)
 
     wb.active = 0  # التاب اللي بيفتح بيه الملف = Update، زي الأصلي بالظبط
 
