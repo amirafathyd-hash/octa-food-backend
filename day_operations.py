@@ -19,6 +19,7 @@ from decision_station import (
     read_subscribers_invoice,
 )
 from tokyo_ordering import merge_day_into_template, read_day_file_payload
+from tokyo_production_reports import build_tokyo_day_package
 
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
@@ -635,14 +636,20 @@ def process_day_operations(file_storage, day_label_override=None):
     ops_buf = io.BytesIO()
     ops_wb.save(ops_buf)
     ops_buf.seek(0)
+    links_wb = _build_worker_links_workbook(day_label, worker_links)
+    links_buf = io.BytesIO()
+    links_wb.save(links_buf)
+    links_buf.seek(0)
 
     full_report = {
         **report,
         'generated_at': datetime.now().isoformat(timespec='seconds'),
         'files': [
-            f'ملف اتخاذ القرار - {day_label}.xlsx',
-            f'ملخص تشغيل اليوم - {day_label}.xlsx',
-            f'مخرجات تشغيل أولية حسب فاتورة المشتركين - {day_label}.xlsx',
+            f'01_Decision/ملف اتخاذ القرار - {day_label}.xlsx',
+            f'01_Decision/ملخص تشغيل اليوم - {day_label}.xlsx',
+            f'03_Stations/مخرجات تشغيل أولية حسب فاتورة المشتركين - {day_label}.xlsx',
+            f'08_Worker_Links/روابط العاملين - {day_label}.xlsx',
+            f'08_Worker_Links/روابط تشغيل اليوم - {day_label}.html',
         ],
         'operations': ops_summary,
         'worker_links_count': len(worker_links),
@@ -661,25 +668,22 @@ def process_day_operations(file_storage, day_label_override=None):
     station_pdf_outputs, station_image_sources, station_pdf_reports = _generate_station_pdfs(day_label, dont_use_rows)
     full_report['station_pdfs'] = station_pdf_reports
     for filename, _path in station_pdf_outputs:
-        full_report['files'].append(f'pdf/{filename}')
+        full_report['files'].append(f'04_PDF/{filename}')
     if station_image_sources:
-        full_report['files'].append('images/صور المحطات بصيغة PNG')
+        full_report['files'].append('05_Images/صور المحطات بصيغة PNG')
 
     tokyo_path = None
     tokyo_report = None
     tokyo_error = None
+    tokyo_zip_path = None
     tokyo_template_path = DAY_OPS_TEMPLATES['tokyo'] if os.path.exists(DAY_OPS_TEMPLATES['tokyo']) else TOKYO_TEMPLATE_PATH
     if os.path.exists(tokyo_template_path):
         try:
             file_storage.seek(0)
-            tokyo_day_no, tokyo_meals, tokyo_input_report = read_day_file_payload(file_storage)
-            tokyo_path, tokyo_report = merge_day_into_template(
+            tokyo_zip_path, tokyo_path, tokyo_report = build_tokyo_day_package(
                 tokyo_template_path,
-                tokyo_day_no,
-                tokyo_meals,
-                out_path=tempfile.NamedTemporaryFile(suffix='.xlsm', delete=False).name,
+                file_storage,
             )
-            tokyo_report['input_report'] = tokyo_input_report
         except Exception as exc:
             tokyo_error = str(exc)
         finally:
@@ -687,15 +691,24 @@ def process_day_operations(file_storage, day_label_override=None):
     else:
         tokyo_error = 'ملف قالب توكيو غير موجود على السيرفر'
 
+    full_report['tokyo'] = tokyo_report or {'error': tokyo_error}
+    if tokyo_report and tokyo_report.get('files'):
+        for name in reversed(tokyo_report['files']):
+            full_report['files'].insert(3, f'02_Tokyo_Production/{name}')
+    elif tokyo_path:
+        full_report['files'].insert(3, f'02_Tokyo_Production/شيت توكيو المحدث - {day_label}.xlsm')
+
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         with open(decision_path, 'rb') as fh:
-            zf.writestr(f'ملف اتخاذ القرار - {day_label}.xlsx', fh.read())
-        zf.writestr(f'ملخص تشغيل اليوم - {day_label}.xlsx', ops_buf.getvalue())
-        zf.writestr(f'مخرجات تشغيل أولية حسب فاتورة المشتركين - {day_label}.xlsx', station_buf.getvalue())
+            zf.writestr(f'01_Decision/ملف اتخاذ القرار - {day_label}.xlsx', fh.read())
+        zf.writestr(f'01_Decision/ملخص تشغيل اليوم - {day_label}.xlsx', ops_buf.getvalue())
+        zf.writestr(f'03_Stations/مخرجات تشغيل أولية حسب فاتورة المشتركين - {day_label}.xlsx', station_buf.getvalue())
+        zf.writestr(f'08_Worker_Links/روابط العاملين - {day_label}.xlsx', links_buf.getvalue())
+        zf.writestr(f'08_Worker_Links/روابط تشغيل اليوم - {day_label}.html', _worker_links_html(day_label, worker_links).encode('utf-8'))
         for filename, path in station_pdf_outputs:
             with open(path, 'rb') as fh:
-                zf.writestr(f'pdf/{filename}', fh.read())
+                zf.writestr(f'04_PDF/{filename}', fh.read())
         if station_image_sources:
             try:
                 from xlsx_to_images import add_workbook_images_to_zip
@@ -705,18 +718,22 @@ def process_day_operations(file_storage, day_label_override=None):
                         zf,
                         xlsx_path,
                         image_date,
-                        folder='images',
+                        folder='05_Images',
                         prefix=f'{prefix}_',
                         day_num_override=_day_no(day_label),
                     )
             except Exception as exc:
-                zf.writestr('images/تعذر_توليد_الصور.txt', f'تعذر توليد صور المحطات: {exc}')
-        if tokyo_path:
+                zf.writestr('05_Images/تعذر_توليد_الصور.txt', f'تعذر توليد صور المحطات: {exc}')
+        if tokyo_zip_path and os.path.exists(tokyo_zip_path):
+            with zipfile.ZipFile(tokyo_zip_path, 'r') as tokyo_zip:
+                for member in tokyo_zip.infolist():
+                    if member.is_dir():
+                        continue
+                    zf.writestr(f'02_Tokyo_Production/{member.filename}', tokyo_zip.read(member.filename))
+        elif tokyo_path:
             with open(tokyo_path, 'rb') as fh:
-                zf.writestr(f'شيت توكيو المحدث - {day_label}.xlsm', fh.read())
-    if tokyo_path:
-        full_report['files'].insert(3, f'شيت توكيو المحدث - {day_label}.xlsm')
-    full_report['tokyo'] = tokyo_report or {'error': tokyo_error}
+                zf.writestr(f'02_Tokyo_Production/شيت توكيو المحدث - {day_label}.xlsm', fh.read())
+        zf.writestr('manifest.json', json.dumps(full_report, ensure_ascii=False, indent=2).encode('utf-8'))
     zip_buf.seek(0)
     return zip_buf, full_report
 
