@@ -133,6 +133,50 @@ def _norm_text(value):
     return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
 
 
+ARABIC_SIDE_PREFIXES = (
+    'الأرز', 'الارز', 'أرز', 'ارز', 'رز',
+    'المكرونة', 'المعكرونة', 'مكرونة', 'معكرونة', 'الباستا', 'باستا',
+    'خضار', 'الخضار',
+    'البطاط', 'بطاط',
+    'لسان العصفور', 'برغل', 'الكينوا', 'كينوا',
+)
+
+
+def _split_new_arabic_item(arabic_name, category=''):
+    """يفصل صنفًا عربيًا جديدًا تلقائيًا إلى Protein وSide.
+
+    صيغة فواتير أوكتا المعتادة للأطباق المركبة هي:
+    "اسم البروتين مع الأرز/المكرونة/الخضار/البطاطس". لا نفصل لمجرد وجود
+    كلمة "مع"؛ لازم الجزء الثاني يبدأ باسم طبق جانبي معروف، لتجنب تقسيم
+    أسماء منتجات عادية بالخطأ.
+    """
+    arabic = re.sub(r'\s+', ' ', str(arabic_name or '').strip())
+    if not arabic:
+        return '', None
+
+    is_meal = (
+        'الوجبات الرئيسية' in str(category or '')
+        or 'لو كارب' in str(category or '')
+    )
+    if not is_meal:
+        return arabic, None
+
+    parts = re.split(r'\s+مع\s+', arabic, maxsplit=1)
+    if len(parts) != 2:
+        return arabic, None
+
+    protein, side = (part.strip() for part in parts)
+    side_without_spice = (
+        side.replace('🌶️', '').replace('🌶', '').strip(' -–—')
+    )
+    if not any(side_without_spice.startswith(prefix) for prefix in ARABIC_SIDE_PREFIXES):
+        return arabic, None
+
+    if ('🌶' in arabic or '🌶️' in arabic) and '🌶' not in protein:
+        protein = f'{protein} 🌶'
+    return protein, side_without_spice
+
+
 def _lookup_item_info(english, row, lookup):
     """يرجع بيانات الصنف من القاموس، ولو جديد يبني fallback آمن بدل إيقاف الملف."""
     items_map = lookup['items']
@@ -145,9 +189,15 @@ def _lookup_item_info(english, row, lookup):
         if _norm_text(known_name) == english_norm:
             return known_info, False
 
+    arabic = str(row.get('الاسم العربي') or '').strip()
+    protein, side = _split_new_arabic_item(
+        arabic, row.get('التصنيف') or ''
+    )
     return {
-        'protein': english,
-        'side': None,
+        # الاسم العربي موجود أصلًا في فاتورة المشتركين؛ استخدامه يمنع ظهور
+        # الإنجليزي، والفصل التلقائي يمنع دمج وزن الأرز/الخضار في اسم واحد.
+        'protein': protein or english,
+        'side': side,
         'category': row.get('التصنيف') or '',
     }, True
 
@@ -281,7 +331,8 @@ def compute_decision_tables(rows, lookup):
       3) لو الصنف مالوش طبق جانبي حقيقي، بيتضاف تحته صف "-" بنفس أرقامه،
          كما يظهر في ملف المرجع بالضبط.
 
-    pivot_rows: list[(display_name, {final_package: [count, grams]})]
+    pivot_rows: list[(display_name, {final_package: [count, grams]},
+                     is_protein_level, category)]
     بنفس ترتيب الظهور الحقيقي في ملف اليوم الجاهز."""
     package_map = lookup['package_map']
     double_items = set(lookup.get('double_in_bulking', []))
@@ -381,7 +432,7 @@ def compute_decision_tables(rows, lookup):
                 sbucket[0] += final_count
                 sbucket[1] += final_gm
 
-    # pivot_rows: (display_name, totals_by_package, is_protein_level)
+    # pivot_rows: (display_name, totals_by_package, is_protein_level, category)
     # is_protein_level=True بس للصف الأب (البروتين) - ده اللي بيدخل في
     # حساب Grand Total، أما صفوف الطبق الجانبي فهي تفصيل تحت صف البروتين
     # (نفس قيمه جزئيًا) ومينفعش تتجمع تاني في الإجمالي الكلي وإلا
@@ -407,7 +458,8 @@ def compute_decision_tables(rows, lookup):
     pivot_rows = []
     for protein in ordered_proteins:
         pd = protein_data[protein]
-        pivot_rows.append((protein, pd['totals'], True))
+        category = protein_category.get(protein, '')
+        pivot_rows.append((protein, pd['totals'], True, category))
         side_lookup_order = (
             REFERENCE_SIDE_ORDER_BY_PROTEIN.get(protein)
             or lookup.get('side_order_by_protein', {}).get(protein)
@@ -421,7 +473,7 @@ def compute_decision_tables(rows, lookup):
             ),
         )
         for side in ordered_sides:
-            pivot_rows.append((side, pd['sides'][side], False))
+            pivot_rows.append((side, pd['sides'][side], False, category))
 
     ordered_packages = list(PREFERRED_PACKAGE_ORDER)
     ordered_packages += [p for p in package_order if p not in ordered_packages]
@@ -549,12 +601,20 @@ def build_output_workbook(day_label, export_rows, dont_use_rows, pivot_rows,
     r = 10
     grand = [0.0] * (n_pkg * 2)
     parent_category = ''
-    for name, bucket, is_protein_level in pivot_rows:
+    for name, bucket, is_protein_level, category_hint in pivot_rows:
         if is_protein_level:
-            parent_category = lookup.get('name_category', {}).get(name, '')
+            parent_category = (
+                lookup.get('name_category', {}).get(name)
+                or category_hint
+                or ''
+            )
         category = (
             parent_category if not is_protein_level and name == '-'
-            else lookup.get('name_category', {}).get(name, parent_category)
+            else (
+                lookup.get('name_category', {}).get(name)
+                or category_hint
+                or parent_category
+            )
         )
         fill = _category_fill(category, lookup)
         name_cell = ws_up.cell(row=r, column=1, value=name)
