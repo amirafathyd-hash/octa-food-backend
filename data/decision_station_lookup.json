@@ -259,6 +259,246 @@
       "protein": "كابلي لحم",
       "side": null,
       "category": "الوجبات الرئيسية"
+    },
+    "Fava bean": {
+      "protein": "فول",
+      "side": null,
+      "category": "فطور"
+    },
+    "Labneh and vegetable mankosha pie": {
+      "protein": "مناقيش لبنة بالخضار",
+      "side": null,
+      "category": "فطور"
+    },
+    "Meat and cheese mankosha pie": {
+      "protein": "مناقيش لحمة وجبنة",
+      "side": null,
+      "category": "فطور"
+    },
+    "Egg and Cheese Sandwich": {
+      "protein": "ساندوتش بيض بالجبن",
+      "side": null,
+      "category": "فطور"
+    },
+    "Za’ater and Cheese pie (thyme pie)": {
+      "protein": "فطيرة الزعتر بالجبنة",
+      "side": null,
+      "category": "فطور"
+    },
+    "Italian salad": {
+      "protein": "سلطة إيطالية",
+      "side": null,
+      "category": "سلطات"
+    },
+    "Chicken curry with pasta": {
+      "protein": "دجاج بالكاري",
+      "side": "المكرونة",
+      "category": "الوجبات الرئيسية"
+    },
+    "Pan fried fish with sayadieh rice": {
+      "protein": "بان فرايد فش",
+      "side": "أرز الصيادية",
+      "category": "الوجبات الرئيسية"
+    },
+    "Asian chicken sandwich served with oat bread": {
+      "protein": "ساندوتش الدجاج الآسيوي بخبز الشوفان",
+      "side": null,
+      "category": "الوجبات الرئيسية"
+    },
+    "Beef chilli dry with mashed potatoes 🌶": {
+      "protein": "بيف شيلي دراي 🌶",
+      "side": "البطاطس المهروسة",
+      "category": "الوجبات الرئيسية"
+    },
+    "Meat and okra with saffron rice": {
+      "protein": "بامية لحم",
+      "side": "الأرز بالزعفران",
+      "category": "الوجبات الرئيسية"
+    },
+    "Beef Kabsa": {
+      "protein": "كبسة لحم",
+      "side": null,
+      "category": "الوجبات الرئيسية"
+    },
+    "Chinese chicken and white rice": {
+      "protein": "دجاج صيني",
+      "side": "الأرز الأبيض",
+      "category": "الوجبات الرئيسية"
+    },
+    "Blueberry cheesecake": {
+      "protein": "تشيز كيك التوت الأزرق",
+      "side": null,
+      "category": "حلى"
+    },
+    "Rocky Road": {
+      "protein": "روكي رود",
+      "side": null,
+      "category": "حلى"
+    },
+    "Red Apple": {
+      "protein": "تفاح أحمر",
+      "side": null,
+      "category": "فواكه"
+    },
+    "Pan fried fish with sauteed vegetables": {
+      "protein": "بان فرايد فش",
+      "side": "خضار سوتيه",
+      "category": "وجبات لو كارب فقط مع خضار سوتيه"
+    },
+    "Curry chicken with sauteed vegetables": {
+      "protein": "دجاج بالكاري",
+      "side": "خضار سوتيه",
+      "category": "وجبات لو كارب فقط مع خضار سوتيه"
+    },
+    "Dry Chili Beef with sauteed vegetables (Spicy)": {
+      "protein": "بيف شيلي دراي 🌶",
+      "side": "خضار سوتيه",
+      "category": "وجبات لو كارب فقط مع خضار سوتيه"
+    },
+    "Chicken Awsal sandwich": {
+      "protein": "ساندوتش دجاج أوصال",
+      "side": null,
+      "category": "فطور"
+    },
+    "Cheese croissant with spinach": {
+      "protein": "كرواسون جبنة بالسبانخ",
+      "side": null,
+      "category": "فطور"
+    },
+    "Basbousa with cream": {
+      "protein": "بسبوسة بالقشطة",
+      "side": null,
+      "category": "حلويات رمضان"
+    },
+    "Herbal chicken with potato": {
+      "protein": "دجاج بالأعشاب",
+      "side": "البطاطا",
+      "category": "الوجبات الرئيسية"
+    },
+    "Beetroot salad": {
+      "protein": "سلطة الشمندر",
+      "side": null,
+      "category": "سلطات"
+    },
+    "Chicken Mandi": {
+      "protein": "مندي دجاج",
+      "side": null,
+      "category": "الوجبات الرئيسية"
+    },
+    "Tuna sandwich": {
+      "protein": "تونة ساندوتش",
+      "side": null,
+      "category": "فطور"
+    },
+    "Sombrero salad": {
+      "protein": "سلطة السيمبريرو",
+      "side": null,
+      "category": "سلطات"
+    },
+    "Blankwet Fish with saffron rice": {
+      "protein": "سمك بلانكويت",
+      "side": "الأرز بالزعفران",
+      "category": "الوجبات الرئيسية"
+    },
+    "Beef burger": {
+      "protein": "برجر لحم",
+      "side": null,
+      "category": "الوجبات الرئيسية"
+    },
+    "Lamb mkhtoum with white rice": {
+      "protein": "مختوم لحم",
+      "side": "الأرز الأبيض",
+      "category": "الوجبات الرئيسية"
+    },
+    "Chicken alfredo with pasta": {
+      "protein": "دجاج ألفريدو",
+      "side": "المكرونة",
+      "category": "الوجبات الرئيسية"
+    },
+    "Banoffee Pie": {
+      "protein": "بانوفي باي",
+      "side": null,
+      "category": "حلى"
+    },
+    "Greek Yogurt With Oats And Blueberries": {
+      "protein": "زبادي يوناني بالشوفان والتوت الأزرق",
+      "side": null,
+      "category": "فطور"
+    },
+    "Alfredo chicken with sauteed vegetables": {
+      "protein": "دجاج ألفريدو",
+      "side": "خضار سوتيه",
+      "category": "وجبات لو كارب فقط مع خضار سوتيه"
+    },
+    "Spicy Indian chicken 65 with sauteed vegetables": {
+      "protein": "دجاج 65 الهندي الحار 🌶",
+      "side": "خضار سوتيه",
+      "category": "وجبات لو كارب فقط مع خضار سوتيه"
+    },
+    "Fish blanquette with sauteed vegetables": {
+      "protein": "سمك بلانكويت",
+      "side": "خضار سوتيه",
+      "category": "وجبات لو كارب فقط مع خضار سوتيه"
+    },
+    "Indian Spicy Chicken 65 with White Rice 🌶": {
+      "protein": "دجاج 65 الهندي الحار 🌶",
+      "side": "الأرز الأبيض",
+      "category": "الوجبات الرئيسية"
+    },
+    "Tateema": {
+      "protein": "تعتيمة",
+      "side": null,
+      "category": "فطور"
+    },
+    "Egg and oatmeal pie": {
+      "protein": "فطيرة البيض والشوفان",
+      "side": null,
+      "category": "فطور"
+    },
+    "Turkey croissant": {
+      "protein": "كرواسون الديك الرومي",
+      "side": null,
+      "category": "فطور"
+    },
+    "chocolate cake": {
+      "protein": "كيك الشكولاته",
+      "side": null,
+      "category": "حلى"
+    },
+    "San sebastian cheese cake": {
+      "protein": "سان سباستيان تشيز كيك",
+      "side": null,
+      "category": "حلى"
+    },
+    "BBQ chicken skewers with African jollof rice": {
+      "protein": "أسياخ دجاج الباربكيو",
+      "side": "أرز جولوف",
+      "category": "الوجبات الرئيسية"
+    },
+    "Rocket and mashroom salad": {
+      "protein": "سلطة الجرجير بالمشروم",
+      "side": null,
+      "category": "سلطات"
+    },
+    "Chicken Curry with coconut cream": {
+      "protein": "دجاج بكريمة جوز الهند",
+      "side": "الأرز الأبيض",
+      "category": "الوجبات الرئيسية"
+    },
+    "Chicken Curry and coconut with sauteed vegetables": {
+      "protein": "دجاج بكريمة جوز الهند",
+      "side": "خضار سوتيه",
+      "category": "وجبات لو كارب فقط مع خضار سوتيه"
+    },
+    "Rosemary Brownie bites": {
+      "protein": "براوني بايتس بالروزميري",
+      "side": null,
+      "category": "حلى"
+    },
+    "Lamb Zurbian": {
+      "protein": "زربيان لحم",
+      "side": null,
+      "category": "الوجبات الرئيسية"
     }
   },
   "name_category": {
@@ -316,7 +556,51 @@
     "الأرز بالخضار": "الوجبات الرئيسية",
     "كيكة الزعفران": "حلى",
     "سليق دجاج": "الوجبات الرئيسية",
-    "كابلي لحم": "الوجبات الرئيسية"
+    "كابلي لحم": "الوجبات الرئيسية",
+    "فول": "فطور",
+    "مناقيش لبنة بالخضار": "فطور",
+    "مناقيش لحمة وجبنة": "فطور",
+    "ساندوتش بيض بالجبن": "فطور",
+    "فطيرة الزعتر بالجبنة": "فطور",
+    "سلطة إيطالية": "سلطات",
+    "دجاج بالكاري": "الوجبات الرئيسية",
+    "المكرونة": "الوجبات الرئيسية",
+    "بان فرايد فش": "الوجبات الرئيسية",
+    "ساندوتش الدجاج الآسيوي بخبز الشوفان": "الوجبات الرئيسية",
+    "بيف شيلي دراي 🌶": "الوجبات الرئيسية",
+    "بامية لحم": "الوجبات الرئيسية",
+    "كبسة لحم": "الوجبات الرئيسية",
+    "دجاج صيني": "الوجبات الرئيسية",
+    "تشيز كيك التوت الأزرق": "حلى",
+    "روكي رود": "حلى",
+    "تفاح أحمر": "فواكه",
+    "ساندوتش دجاج أوصال": "فطور",
+    "كرواسون جبنة بالسبانخ": "فطور",
+    "بسبوسة بالقشطة": "حلويات رمضان",
+    "دجاج بالأعشاب": "الوجبات الرئيسية",
+    "البطاطا": "الوجبات الرئيسية",
+    "سلطة الشمندر": "سلطات",
+    "مندي دجاج": "الوجبات الرئيسية",
+    "تونة ساندوتش": "فطور",
+    "سلطة السيمبريرو": "سلطات",
+    "سمك بلانكويت": "الوجبات الرئيسية",
+    "برجر لحم": "الوجبات الرئيسية",
+    "مختوم لحم": "الوجبات الرئيسية",
+    "دجاج ألفريدو": "الوجبات الرئيسية",
+    "بانوفي باي": "حلى",
+    "زبادي يوناني بالشوفان والتوت الأزرق": "فطور",
+    "دجاج 65 الهندي الحار 🌶": "الوجبات الرئيسية",
+    "تعتيمة": "فطور",
+    "فطيرة البيض والشوفان": "فطور",
+    "كرواسون الديك الرومي": "فطور",
+    "كيك الشكولاته": "حلى",
+    "سان سباستيان تشيز كيك": "حلى",
+    "أسياخ دجاج الباربكيو": "الوجبات الرئيسية",
+    "أرز جولوف": "الوجبات الرئيسية",
+    "سلطة الجرجير بالمشروم": "سلطات",
+    "دجاج بكريمة جوز الهند": "الوجبات الرئيسية",
+    "براوني بايتس بالروزميري": "حلى",
+    "زربيان لحم": "الوجبات الرئيسية"
   },
   "package_map": {
     "التكميم": "تكميم لايت",
