@@ -32,13 +32,16 @@ from db import get_client, execute_with_retry
 from invoice_export import parse_invoice_full, build_invoices_workbook
 from tokyo_ordering import (
     DAY_NAMES,
+    UnmappedTokyoMealsError,
+    list_tokyo_recipe_sheet_names,
     read_day_file_payload,
     read_day_safety_fields,
+    save_raw_tokyo_mappings,
     validate_raw_targets_for_day,
     merge_day_into_template,
 )
 from tokyo_production_reports import build_tokyo_day_package
-from decision_station import process_subscribers_invoice, process_subscribers_invoices
+from decision_station import process_subscribers_invoice
 from day_operations import (
     get_day_operations_archive_path,
     list_day_operations_archives,
@@ -554,6 +557,12 @@ def tokyo_production_process_day():
         )
         # لا نحدّث النسخة التشغيلية إلا بعد نجاح إنشاء كل المخرجات.
         shutil.copyfile(updated_xlsm, TOKYO_TEMPLATE_PATH)
+    except UnmappedTokyoMealsError as exc:
+        return jsonify({
+            'error': str(exc),
+            'code': 'unmapped_tokyo_meals',
+            'items': exc.items,
+        }), 400
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     except Exception as exc:
@@ -568,6 +577,40 @@ def tokyo_production_process_day():
     response.headers['X-Tokyo-Report'] = json.dumps(report, ensure_ascii=True)
     response.headers['Access-Control-Expose-Headers'] = 'X-Tokyo-Report, Content-Disposition'
     return response
+
+
+@app.route('/api/tokyo-production/mapping-options', methods=['GET'])
+def tokyo_production_mapping_options():
+    if not os.path.exists(TOKYO_TEMPLATE_PATH):
+        return jsonify({'error': 'ملف توكيو الرئيسي غير موجود على السيرفر'}), 404
+    try:
+        return jsonify({
+            'targets': list_tokyo_recipe_sheet_names(TOKYO_TEMPLATE_PATH),
+            'weight_kinds': [
+                {'value': 'protein', 'label': 'بروتين / Protein grams'},
+                {'value': 'side', 'label': 'كارب أو سايد / Carb grams'},
+                {'value': 'count', 'label': 'عدد فقط / Count'},
+            ],
+        })
+    except Exception as exc:
+        app.logger.exception('tokyo_production_mapping_options failed')
+        return jsonify({'error': f'تعذّر تحميل اختيارات توكيو: {exc}'}), 500
+
+
+@app.route('/api/tokyo-production/save-mappings', methods=['POST'])
+def tokyo_production_save_mappings():
+    payload = request.get_json(silent=True) or {}
+    mappings = payload.get('mappings') or []
+    if not isinstance(mappings, list) or not mappings:
+        return jsonify({'error': 'اختار ربط واحد على الأقل قبل الحفظ'}), 400
+    try:
+        result = save_raw_tokyo_mappings(mappings)
+        if not result['count']:
+            return jsonify({'error': 'لم يتم حفظ أي ربط. راجع اسم الشيت ونوع الوزن.'}), 400
+        return jsonify({'ok': True, **result})
+    except Exception as exc:
+        app.logger.exception('tokyo_production_save_mappings failed')
+        return jsonify({'error': f'تعذّر حفظ ربط توكيو: {exc}'}), 500
 
 
 @app.route('/api/tokyo-production/analyze-day', methods=['POST'])
@@ -590,6 +633,12 @@ def tokyo_production_analyze_day():
             'safety_fields': fields,
             'input': input_report,
         })
+    except UnmappedTokyoMealsError as exc:
+        return jsonify({
+            'error': str(exc),
+            'code': 'unmapped_tokyo_meals',
+            'items': exc.items,
+        }), 400
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     except Exception as exc:
@@ -625,31 +674,14 @@ def decision_station_process():
     ملف كامل بنفس شكل ملف اليوم الجاهز (Export / Don't Use just refresh /
     Update / Packages) - بنفس الحساب اللي كان بيتعمل يدوي في الإكسل، من
     غير ما تلمس حاجة."""
-    files = request.files.getlist('files')
-    if not files:
-        legacy_file = request.files.get('file')
-        files = [legacy_file] if legacy_file else []
-    if not files:
-        return jsonify({'error': 'ارفع فاتورة كمية واحدة على الأقل'}), 400
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'ارفع فاتورة الكمية للمشتركين باسم file'}), 400
 
     day_label = request.form.get('day_label') or None
 
     try:
-        if len(files) == 1:
-            out_path, report = process_subscribers_invoice(
-                files[0], day_label_override=day_label
-            )
-            download_name = f"Octa_Food_Decision_{report['day_label']}.xlsx"
-            mimetype = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        else:
-            if day_label:
-                return jsonify({
-                    'error': 'عند رفع أكثر من يوم، لازم يكون تاريخ كل يوم موجودًا '
-                             'في اسم ملفه بصيغة YYYY-MM-DD'
-                }), 400
-            out_path, report = process_subscribers_invoices(files)
-            download_name = f"Octa_Food_Decision_Multiple_Days_{datetime.now().strftime('%Y-%m-%d')}.zip"
-            mimetype = 'application/zip'
+        out_path, report = process_subscribers_invoice(f, day_label_override=day_label)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     except Exception as exc:
@@ -658,8 +690,7 @@ def decision_station_process():
 
     response = send_file(
         out_path, as_attachment=True,
-        download_name=download_name,
-        mimetype=mimetype,
+        download_name=f"Octa_Food_Decision_{report['day_label']}.xlsx",
     )
     response.headers['X-Decision-Report'] = json.dumps(report, ensure_ascii=True)
     response.headers['Access-Control-Expose-Headers'] = 'X-Decision-Report, Content-Disposition'

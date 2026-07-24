@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import os
 import re
+import json
 from datetime import datetime
 from difflib import SequenceMatcher
 from openpyxl import load_workbook
@@ -154,6 +155,90 @@ RAW_REQUIRED_HEADERS = {
     'مجموع الكارب', 'مجموع البروتين', 'الكمية',
 }
 
+RAW_TOKYO_LEARNING_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tokyo_raw_component_lookup.json')
+
+
+class UnmappedTokyoMealsError(ValueError):
+    def __init__(self, items):
+        self.items = sorted(set(items))
+        super().__init__(
+            'توجد وجبات إنتاج جديدة غير مربوطة بتوكيو: ' +
+            ', '.join(self.items)
+        )
+
+
+def _normalize_raw_meal_name(value):
+    return re.sub(r'\s+', ' ', str(value or '')).strip().lower()
+
+
+def _load_raw_tokyo_learning():
+    try:
+        with open(RAW_TOKYO_LEARNING_PATH, 'r', encoding='utf-8') as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return {'mappings': {}, 'labels': {}}
+    except (json.JSONDecodeError, TypeError):
+        return {'mappings': {}, 'labels': {}}
+    if not isinstance(payload, dict):
+        return {'mappings': {}, 'labels': {}}
+    mappings = payload.get('mappings') if isinstance(payload.get('mappings'), dict) else {}
+    labels = payload.get('labels') if isinstance(payload.get('labels'), dict) else {}
+    return {'mappings': mappings, 'labels': labels}
+
+
+def _raw_tokyo_component_map():
+    merged = {key: list(value) for key, value in RAW_TOKYO_COMPONENT_MAP.items()}
+    learned = _load_raw_tokyo_learning().get('mappings', {})
+    for source_key, components in learned.items():
+        clean_components = []
+        for component in components or []:
+            if isinstance(component, dict):
+                target = str(component.get('target') or '').strip()
+                weight_kind = str(component.get('weight_kind') or '').strip()
+            elif isinstance(component, (list, tuple)) and len(component) >= 2:
+                target = str(component[0] or '').strip()
+                weight_kind = str(component[1] or '').strip()
+            else:
+                continue
+            if target and weight_kind in {'protein', 'side', 'count'}:
+                clean_components.append((target, weight_kind))
+        if clean_components:
+            merged[_normalize_raw_meal_name(source_key)] = clean_components
+    return merged
+
+
+def list_tokyo_recipe_sheet_names(template_path):
+    wb = load_workbook(template_path, read_only=True, keep_vba=True, data_only=False)
+    try:
+        excluded = {'All_Ingredients', "Don't Use just refresh", 'Update', 'Packages'}
+        return sorted([name for name in wb.sheetnames if name not in excluded], key=str.lower)
+    finally:
+        wb.close()
+
+
+def save_raw_tokyo_mappings(mappings):
+    current = _load_raw_tokyo_learning()
+    saved = current.get('mappings', {})
+    labels = current.get('labels', {})
+    updated = []
+    for item in mappings or []:
+        source = str(item.get('source') or '').strip()
+        target = str(item.get('target') or '').strip()
+        weight_kind = str(item.get('weight_kind') or '').strip()
+        if not source or not target or weight_kind not in {'protein', 'side', 'count'}:
+            continue
+        key = _normalize_raw_meal_name(source)
+        labels[key] = source
+        saved.setdefault(key, [])
+        component = {'target': target, 'weight_kind': weight_kind}
+        if component not in saved[key]:
+            saved[key].append(component)
+        updated.append(source)
+    os.makedirs(os.path.dirname(RAW_TOKYO_LEARNING_PATH), exist_ok=True)
+    with open(RAW_TOKYO_LEARNING_PATH, 'w', encoding='utf-8') as fh:
+        json.dump({'mappings': saved, 'labels': labels}, fh, ensure_ascii=False, indent=2)
+    return {'updated': updated, 'count': len(updated)}
+
 
 def read_current_inputs(template_path):
     wb = load_workbook(template_path, data_only=False, keep_vba=True, read_only=False)
@@ -225,6 +310,7 @@ def _read_repeat_update(wb, file_storage):
     ignored_names = set()
     unmapped_production = set()
     source_rows = 0
+    component_map = _raw_tokyo_component_map()
 
     for row in range(2, ws.max_row + 1):
         english = str(ws.cell(row, headers['الاسم الإنجليزي']).value or '').strip()
@@ -235,8 +321,8 @@ def _read_repeat_update(wb, file_storage):
         if quantity <= 0:
             continue
         source_rows += 1
-        normalized = re.sub(r'\s+', ' ', english).strip().lower()
-        components = RAW_TOKYO_COMPONENT_MAP.get(normalized)
+        normalized = _normalize_raw_meal_name(english)
+        components = component_map.get(normalized)
         is_production_meal = 'الوجبات الرئيسية' in category or 'لو كارب' in category
         if not components:
             if is_production_meal:
@@ -259,10 +345,7 @@ def _read_repeat_update(wb, file_storage):
             totals[target] = (count + quantity, grams + row_grams)
 
     if unmapped_production:
-        raise ValueError(
-            'توجد وجبات إنتاج جديدة غير مربوطة بتوكيو: ' +
-            ', '.join(sorted(unmapped_production))
-        )
+        raise UnmappedTokyoMealsError(unmapped_production)
     if not totals:
         raise ValueError('لم يتم العثور على وجبات إنتاج قابلة لتحديث توكيو في ملف ابديت تكرار')
 
