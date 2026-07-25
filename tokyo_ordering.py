@@ -148,6 +148,90 @@ RAW_TOKYO_COMPONENT_MAP = {
     'lamb kabli rice': [
         ('Beef Kabli', 'protein'),
     ],
+    'chicken alfredo with pasta': [
+        ('Chicken Alfredo', 'protein'),
+        ('Fettuccine Pasta Sauce', 'side'),
+    ],
+    'alfredo chicken with sauteed vegetables': [
+        ('Chicken Alfredo', 'protein'),
+        ('Grilled Vegetables(2)', 'side'),
+    ],
+    'bbq chicken skewers with african jollof rice': [
+        ('BBQ Chicken Skewers', 'protein'),
+    ],
+    'beef burger': [
+        ('Beef Burger', 'count'),
+    ],
+    'blankwet fish with saffron rice': [
+        ('Blankwet Fish', 'protein'),
+    ],
+    'fish blanquette with sauteed vegetables': [
+        ('Blankwet Fish', 'protein'),
+        ('Grilled Vegetables(2)', 'side'),
+    ],
+    'chicken curry and coconut with sauteed vegetables': [
+        ('Coconut Chicken', 'protein'),
+        ('Grilled Vegetables(2)', 'side'),
+    ],
+    'chicken curry with coconut cream': [
+        ('Coconut Chicken', 'protein'),
+    ],
+    'indian spicy chicken 65 with white rice': [
+        ('Chicken 65', 'protein'),
+    ],
+    'spicy indian chicken 65 with sauteed vegetables': [
+        ('Chicken 65', 'protein'),
+        ('Grilled Vegetables(2)', 'side'),
+    ],
+    'lamb zurbian': [
+        ('Beef Zurbian', 'protein'),
+    ],
+    'lamb mkhtoum with white rice': [
+        ('Mkhtoum Lahm', 'protein'),
+    ],
+    'almond chicken in the oven with potato wedges': [
+        ('Almond Chicken', 'protein'),
+        ('Potato Wedges', 'side'),
+    ],
+    'changezi chicken with sauteed vegetables': [
+        ('Changezi Chicken', 'protein'),
+        ('Grilled Vegetables(2)', 'side'),
+    ],
+    'changzi chicken with sauteed vegetables': [
+        ('Changezi Chicken', 'protein'),
+        ('Grilled Vegetables(2)', 'side'),
+    ],
+    'changezi chicken with white rice': [
+        ('Changezi Chicken', 'protein'),
+    ],
+    'changzi chicken with white rice': [
+        ('Changezi Chicken', 'protein'),
+    ],
+    'chicken mandi': [
+        ('Chicken Mandi (1)', 'protein'),
+    ],
+    'daoud basha with saffron rice': [
+        ('Daoud Basha', 'protein'),
+    ],
+    'daoud pasha with saffron rice': [
+        ('Daoud Basha', 'protein'),
+    ],
+    'daoud basha with sauteed vegetables': [
+        ('Daoud Basha', 'protein'),
+        ('Sautee Vegetables (4)', 'side'),
+    ],
+    'daoud pasha with sauteed vegetables': [
+        ('Daoud Basha', 'protein'),
+        ('Sautee Vegetables (4)', 'side'),
+    ],
+    'fish with cream and mashed potatoes': [
+        ('Fish with cream', 'protein'),
+        ('Mached Potato(3)', 'side'),
+    ],
+    'oriental beef with nuts rice': [
+        ('Laham Oriental', 'protein'),
+        ('Beef Oriental rice', 'side'),
+    ],
 }
 
 RAW_REQUIRED_HEADERS = {
@@ -205,6 +289,62 @@ def _raw_tokyo_component_map():
         if clean_components:
             merged[_normalize_raw_meal_name(source_key)] = clean_components
     return merged
+
+
+def _infer_raw_tokyo_components(normalized_name, day_no=None):
+    text = _normalize_raw_meal_name(normalized_name)
+    components = []
+
+    def add(target, kind):
+        pair = (target, kind)
+        if pair not in components:
+            components.append(pair)
+
+    protein_patterns = [
+        ('changezi chicken', 'Changezi Chicken', 'protein'),
+        ('changzi chicken', 'Changezi Chicken', 'protein'),
+        ('chicken alfredo', 'Chicken Alfredo', 'protein'),
+        ('alfredo chicken', 'Chicken Alfredo', 'protein'),
+        ('bbq chicken skewers', 'BBQ Chicken Skewers', 'protein'),
+        ('blankwet fish', 'Blankwet Fish', 'protein'),
+        ('fish blanquette', 'Blankwet Fish', 'protein'),
+        ('chicken 65', 'Chicken 65', 'protein'),
+        ('spicy indian chicken 65', 'Chicken 65', 'protein'),
+        ('chicken curry', 'Coconut Chicken', 'protein'),
+        ('curry chicken', 'Coconut Chicken', 'protein'),
+        ('lamb zurbian', 'Beef Zurbian', 'protein'),
+        ('lamb mkhtoum', 'Mkhtoum Lahm', 'protein'),
+        ('beef burger', 'Beef Burger', 'count'),
+        ('chicken fajita', 'Chicken Fajita', 'count'),
+        ('chicken mandi', 'Chicken Mandi (1)', 'protein'),
+        ('almond chicken', 'Almond Chicken', 'protein'),
+        ('daoud basha', 'Daoud Basha', 'protein'),
+        ('daoud pasha', 'Daoud Basha', 'protein'),
+        ('fish with cream', 'Fish with cream', 'protein'),
+        ('oriental beef', 'Laham Oriental', 'protein'),
+    ]
+    for phrase, target, kind in protein_patterns:
+        if phrase in text:
+            add(target, kind)
+            break
+
+    if 'sauteed vegetables' in text or 'sautee vegetables' in text:
+        if int(day_no or 0) == 2:
+            add('Grilled Vegetables(2)', 'side')
+        elif int(day_no or 0) == 4:
+            add('Oven Vegetables (6)', 'side')
+        else:
+            add('Sautee Vegetables (4)', 'side')
+    if 'potato wedges' in text:
+        add('Burger Potato Wedges' if int(day_no or 0) == 2 else 'Potato Wedges', 'side')
+    if 'mashed potato' in text or 'mashed potatoes' in text:
+        add('Mached Potato(3)', 'side')
+    if 'with pasta' in text and ('alfredo' in text or 'fettuccine' in text):
+        add('Fettuccine Pasta Sauce', 'side')
+    if 'oriental beef' in text and 'nuts rice' in text:
+        add('Beef Oriental rice', 'side')
+
+    return components
 
 
 def list_tokyo_recipe_sheet_names(template_path):
@@ -309,6 +449,7 @@ def _read_repeat_update(wb, file_storage):
     source_names = set()
     ignored_names = set()
     unmapped_production = set()
+    inferred_names = set()
     source_rows = 0
     component_map = _raw_tokyo_component_map()
 
@@ -323,6 +464,10 @@ def _read_repeat_update(wb, file_storage):
         source_rows += 1
         normalized = _normalize_raw_meal_name(english)
         components = component_map.get(normalized)
+        if not components:
+            components = _infer_raw_tokyo_components(normalized, day_no)
+            if components:
+                inferred_names.add(english)
         is_production_meal = 'الوجبات الرئيسية' in category or 'لو كارب' in category
         if not components:
             if is_production_meal:
@@ -344,8 +489,6 @@ def _read_repeat_update(wb, file_storage):
                 row_grams = quantity
             totals[target] = (count + quantity, grams + row_grams)
 
-    if unmapped_production:
-        raise UnmappedTokyoMealsError(unmapped_production)
     if not totals:
         raise ValueError('لم يتم العثور على وجبات إنتاج قابلة لتحديث توكيو في ملف ابديت تكرار')
 
@@ -357,6 +500,10 @@ def _read_repeat_update(wb, file_storage):
         'target_recipes': len(totals),
         'ignored_meals': len(ignored_names),
         'ignored_names': sorted(ignored_names),
+        'inferred_meals': len(inferred_names),
+        'inferred_names': sorted(inferred_names),
+        'unmapped_production_count': len(unmapped_production),
+        'unmapped_production': sorted(unmapped_production),
     }
     return day_no, totals, report
 
@@ -450,12 +597,13 @@ def validate_raw_targets_for_day(template_path, day_no, meals_by_name):
                 day_sheets.add(name)
     wb.close()
     wrong_day = sorted(set(meals_by_name).difference(day_sheets))
-    if wrong_day:
+    matched_count = len(set(meals_by_name).intersection(day_sheets))
+    if wrong_day and matched_count == 0:
         raise ValueError(
             f'تاريخ الملف يشير إلى {DAY_NAMES.get(day_no, day_no)} لكن الوصفات لا تطابق هذا اليوم: ' +
             ', '.join(wrong_day)
         )
-    return len(set(meals_by_name).intersection(day_sheets))
+    return matched_count
 
 
 def read_day_safety_fields(template_path, day_no):
@@ -499,7 +647,7 @@ def _normalize_meal_name(s):
 
 
 def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
-                            safety_overrides=None):
+                            safety_overrides=None, zero_missing=False):
     """بتاخد قاموس {اسم الصنف: (count, grams)} من ملف يوم واحد، وتحدّث بيه
     صفوف نفس اليوم (AJ=day_no) بس في شيت All_Ingredients، بالمطابقة على
     عمود AQ (Meal name). بترجع (out_path, report) - الـreport بيوضح كل صنف
@@ -520,7 +668,7 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
             raise ValueError(f'قيمة Safety لا يمكن أن تكون سالبة للصف {row_no}')
         clean_safety[row_no] = number
 
-    matched, unmatched = [], []
+    matched, unmatched, zeroed = [], [], []
     applied_safety = []
     for r in range(2, ws.max_row + 1):
         row_day = ws.cell(row=r, column=DAY_NO_COL).value
@@ -578,6 +726,15 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
             elif norm_key in norm_lookup:
                 found, matched_input = norm_lookup[norm_key], key
         if found is None:
+            if zero_missing:
+                ws.cell(row=r, column=COUNT_COL, value=0)
+                ws.cell(row=r, column=GRAMS_COL, value=0)
+                if sheet_name in wb.sheetnames:
+                    recipe = wb[sheet_name]
+                    recipe['Z1'] = 0
+                    recipe['AD1'] = 0
+                zeroed.append({'row': r, 'name': sheet_name or key})
+                continue
             unmatched.append(sheet_name or key)
             continue
         count, grams = found
@@ -611,6 +768,8 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
         'unmatched_count': len(unmatched),
         'matched': matched,
         'unmatched': unmatched,  # أصناف في اليوم ده مالقتش ليها رقم في الملف المرفوع - اتسابت زي ما هي
+        'zeroed_count': len(zeroed),
+        'zeroed': zeroed,
         'safety_count': len(applied_safety),
         'safety': applied_safety,
     }

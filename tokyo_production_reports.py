@@ -298,18 +298,13 @@ def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str |
     if input_report.get('kind') == 'repeat_update':
         validate_raw_targets_for_day(template_path, day_no, meals)
     updated_xlsm, match_report = merge_day_into_template(
-        template_path, day_no, meals, safety_overrides=safety_overrides
+        template_path,
+        day_no,
+        meals,
+        safety_overrides=safety_overrides,
+        zero_missing=input_report.get('kind') == 'repeat_update',
     )
     updated_xlsm = Path(updated_xlsm)
-
-    # A raw Repeat Update file is the authoritative input for the whole day.
-    # Never continue with old values left in an unmatched Tokyo recipe: that
-    # would make the exported production sheets look valid while incomplete.
-    if input_report.get('kind') == 'repeat_update' and match_report['unmatched_count']:
-        raise ValueError(
-            'تم إيقاف التشغيل لحماية الأرقام؛ توجد وصفات توكيو بلا بيانات في ابديت تكرار: ' +
-            ', '.join(match_report['unmatched'])
-        )
 
     wb = load_workbook(updated_xlsm, keep_vba=True, data_only=False)
     wb['All_Ingredients']['R1'] = day_no
@@ -332,12 +327,20 @@ def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str |
     counts = {}
     for section in ('batch', 'special', 'actuals', 'garnish'):
         block_book = root / f'{section}.xlsx'
-        block_book, page_count = _make_block_workbook(
-            recalculated, recalculated, block_book, day_no, section, hot_sheets
-        )
-        block_pdf = _run_soffice(block_book, root / 'pdf', 'pdf')
-        blocks.append(block_pdf)
-        counts[section] = page_count
+        try:
+            block_book, page_count = _make_block_workbook(
+                recalculated, recalculated, block_book, day_no, section, hot_sheets
+            )
+            block_pdf = _run_soffice(block_book, root / 'pdf', 'pdf')
+            blocks.append(block_pdf)
+            counts[section] = page_count
+        except RuntimeError as exc:
+            if 'لا توجد جداول قابلة للطباعة' not in str(exc):
+                raise
+            counts[section] = 0
+
+    if not blocks:
+        raise RuntimeError('لا توجد أي جداول Hot Section قابلة للطباعة لليوم المختار')
 
     mar_book = root / 'marination.xlsx'
     mar_book, mar_count = _make_block_workbook(
