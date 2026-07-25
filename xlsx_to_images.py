@@ -23,6 +23,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 def _find_font():
     candidates = [
+        '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
+        '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+        '/System/Library/Fonts/Supplemental/Arial.ttf',
+        '/Library/Fonts/Arial Unicode.ttf',
+        '/Library/Fonts/Arial.ttf',
         '/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
     ]
@@ -85,11 +90,14 @@ def _draw_title_raqm(im, title, font):
 def _draw_title_fallback(im, sheet_name, day_label, day_num, font_path):
     """احتياطي لو libraqm مش متاح على السيرفر - بيرسم كل جزء (إنجليزي/عربي/رقم)
     لوحده بترتيبه الطبيعي بدل الاعتماد على raqm، فمش بيحتاج شكل معقد."""
-    import arabic_reshaper
-    from bidi.algorithm import get_display
-
     font = ImageFont.truetype(font_path, TITLE_FONT_SIZE)
-    segments = [f"{sheet_name} — ", get_display(arabic_reshaper.reshape(day_label)), f" ({day_num})"]
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        day_text = get_display(arabic_reshaper.reshape(day_label))
+    except Exception:
+        day_text = day_label
+    segments = [f"{sheet_name} — ", day_text, f" ({day_num})"]
 
     dummy_im = Image.new('RGB', (10, 10))
     dummy_draw = ImageDraw.Draw(dummy_im)
@@ -121,7 +129,7 @@ def add_title_bar(im, sheet_name, day_label, day_num):
     try:
         font = ImageFont.truetype(FONT_BOLD, TITLE_FONT_SIZE, layout_engine=ImageFont.Layout.RAQM)
         return _draw_title_raqm(im, title, font)
-    except ImportError:
+    except Exception:
         # مكتبة raqm نفسها مش متظبطة على السيرفر - استخدم الطريقة الاحتياطية
         return _draw_title_fallback(im, sheet_name, day_label, day_num, FONT_BOLD)
 
@@ -147,8 +155,18 @@ def convert_to_pdf(xlsx_path, workdir):
             'LibreOffice (soffice) مش متظبط على السيرفر. '
             'أضف الباكدج libreoffice في nixpacks.toml/Dockerfile وأعد الـ deploy.'
         )
+    profile_dir = tempfile.mkdtemp(prefix='xlsx_img_lo_profile_')
     subprocess.run(
-        ['soffice', '--headless', '--convert-to', 'pdf', '--outdir', workdir, xlsx_path],
+        [
+            'soffice',
+            f'-env:UserInstallation=file://{profile_dir}',
+            '--headless',
+            '--convert-to',
+            'pdf',
+            '--outdir',
+            workdir,
+            xlsx_path,
+        ],
         check=True, capture_output=True, timeout=120,
     )
     pdf_path = os.path.join(workdir, os.path.splitext(os.path.basename(xlsx_path))[0] + '.pdf')

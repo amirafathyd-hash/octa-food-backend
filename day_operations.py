@@ -6,6 +6,7 @@ import tempfile
 import uuid
 import zipfile
 from collections import OrderedDict, defaultdict
+from copy import copy
 from datetime import datetime
 
 from openpyxl import Workbook
@@ -30,6 +31,12 @@ DAY_OPS_TEMPLATES = {
     'dessert': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Tokyo_Dessert_Ordering.xlsm'),
     'tokyo': os.path.join(DAY_OPS_TEMPLATE_DIR, 'tokyo_ordering_template.xlsm'),
 }
+
+TOKYO_STATION_SHEETS = OrderedDict([
+    ('Hot Section', 'All_Ingredients'),
+    ('Marination', 'Marination_Ordering'),
+])
+PRODUCE_CATEGORY_LABELS = {'خضروات', 'خضراوات', 'فاكهة', 'فاكهه', 'فواكه'}
 
 
 PACKAGE_ORDER = ['تضخيم', 'تكميم لايت', 'جيم', 'سمارت دايت', 'غذاء العمل']
@@ -181,6 +188,177 @@ def _style_sheet(ws, title=None):
         ws.column_dimensions[letter].width = min(max_len, 38)
     if title:
         ws.title = _clean_sheet_title(title)
+
+
+def _copy_cell_style(src, dst):
+    if src.has_style:
+        dst.font = copy(src.font)
+        dst.fill = copy(src.fill)
+        dst.border = copy(src.border)
+        dst.alignment = copy(src.alignment)
+        dst.number_format = src.number_format
+
+
+def _copy_station_daily_sheet(src_ws, out_ws):
+    out_ws.sheet_view.rightToLeft = False
+    out_row = 1
+    for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row, min_col=1, max_col=4):
+        daily_weight = row[3].value if len(row) > 3 else None
+        if isinstance(daily_weight, (int, float)) and not isinstance(daily_weight, bool) and daily_weight == 0:
+            continue
+        category = row[1].value if len(row) > 1 else None
+        if category and str(category).strip() in PRODUCE_CATEGORY_LABELS:
+            continue
+        for cell in row:
+            new_cell = out_ws.cell(row=out_row, column=cell.column, value=cell.value)
+            _copy_cell_style(cell, new_cell)
+        out_row += 1
+    for col_letter in ['A', 'B', 'C', 'D']:
+        if col_letter in src_ws.column_dimensions:
+            out_ws.column_dimensions[col_letter].width = src_ws.column_dimensions[col_letter].width
+    out_ws.freeze_panes = 'A2'
+
+
+def _append_daily_summary(wb):
+    rows_by_name = OrderedDict()
+    for ws in wb.worksheets:
+        if ws.title == 'Summary':
+            continue
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=4, values_only=True):
+            name, category, unit, daily_weight = (list(row) + [None] * 4)[:4]
+            if not name or str(name).strip().lower() == 'items':
+                continue
+            if not isinstance(daily_weight, (int, float)) or daily_weight == 0:
+                continue
+            key = str(name).strip()
+            bucket = rows_by_name.setdefault(key, {
+                'name': key,
+                'category': category or '',
+                'unit': unit or '',
+                'daily_weight': 0.0,
+            })
+            bucket['daily_weight'] += daily_weight
+            if not bucket['category'] and category:
+                bucket['category'] = category
+            if not bucket['unit'] and unit:
+                bucket['unit'] = unit
+
+    ws = wb.create_sheet('Summary')
+    _append_rows(ws, ['ITEMS', 'Category', 'Unit', 'Daily Weight'], [
+        [row['name'], row['category'], row['unit'], row['daily_weight']]
+        for row in rows_by_name.values()
+    ])
+    _style_sheet(ws)
+    ws.sheet_view.rightToLeft = False
+    return len(rows_by_name)
+
+
+def _build_daily_ordering_from_tokyo(tokyo_workbook_path):
+    from openpyxl import load_workbook
+
+    src_wb = load_workbook(tokyo_workbook_path, data_only=True, keep_vba=True)
+    wb = Workbook()
+    wb.remove(wb.active)
+    try:
+        for title, sheet_name in TOKYO_STATION_SHEETS.items():
+            if sheet_name not in src_wb.sheetnames:
+                continue
+            out_ws = wb.create_sheet(title)
+            _copy_station_daily_sheet(src_wb[sheet_name], out_ws)
+        if not wb.sheetnames:
+            return None, {'error': 'ملف توكيو لا يحتوي تابات Daily Ordering المطلوبة'}
+        summary_count = _append_daily_summary(wb)
+        return wb, {'stations': list(TOKYO_STATION_SHEETS.keys()), 'summary_items': summary_count}
+    finally:
+        src_wb.close()
+
+
+def _build_weekly_order_from_tokyo(tokyo_workbook_path):
+    from openpyxl import load_workbook
+
+    src_wb = load_workbook(tokyo_workbook_path, data_only=True, keep_vba=True)
+    rows = OrderedDict()
+    try:
+        for station_label, sheet_name in TOKYO_STATION_SHEETS.items():
+            if sheet_name not in src_wb.sheetnames:
+                continue
+            ws = src_wb[sheet_name]
+            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=5, values_only=True):
+                name, category, unit, _daily_weight, weekly = (list(row) + [None] * 5)[:5]
+                if not name or str(name).strip().lower() == 'items':
+                    continue
+                if not isinstance(weekly, (int, float)) or weekly == 0:
+                    continue
+                key = str(name).strip()
+                bucket = rows.setdefault(key, {
+                    'name': key,
+                    'category': category or '',
+                    'unit': unit or '',
+                    'stations': defaultdict(float),
+                    'total': 0.0,
+                })
+                bucket['stations'][station_label] += weekly
+                bucket['total'] += weekly
+                if not bucket['category'] and category:
+                    bucket['category'] = category
+                if not bucket['unit'] and unit:
+                    bucket['unit'] = unit
+    finally:
+        src_wb.close()
+
+    if not rows:
+        return None, {'error': 'ملف توكيو لا يحتوي Weekly Order قابل للتجميع'}
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Weekly Order'
+    headers = ['ITEMS', 'Category', 'Unit', *TOKYO_STATION_SHEETS.keys(), 'Weekly Total']
+    station_labels = list(TOKYO_STATION_SHEETS.keys())
+    _append_rows(ws, headers, [
+        [
+            row['name'],
+            row['category'],
+            row['unit'],
+            *[row['stations'].get(label, 0) for label in station_labels],
+            row['total'],
+        ]
+        for row in rows.values()
+    ])
+    _style_sheet(ws)
+    ws.sheet_view.rightToLeft = False
+    return wb, {'stations': station_labels, 'items': len(rows)}
+
+
+def _write_workbook_with_images(zf, wb, folder, workbook_name, image_prefix, day_label, full_report, report_key):
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    workbook_arc = f'{folder}/{workbook_name}'
+    zf.writestr(workbook_arc, buf.getvalue())
+    full_report['files'].append(workbook_arc)
+    try:
+        from xlsx_to_images import add_workbook_images_to_zip
+        image_date = datetime.now().strftime('%Y-%m-%d')
+        saved = add_workbook_images_to_zip(
+            zf,
+            wb,
+            image_date,
+            folder=f'{folder}/صور PNG',
+            prefix=image_prefix,
+            day_num_override=_day_no(day_label),
+        )
+        full_report[report_key] = {
+            **(full_report.get(report_key) or {}),
+            'images_count': len(saved),
+        }
+        full_report['files'].append(f'{folder}/صور PNG')
+    except Exception as exc:
+        full_report[report_key] = {
+            **(full_report.get(report_key) or {}),
+            'images_error': str(exc),
+        }
+        zf.writestr(f'{folder}/ملاحظة - تعذر توليد الصور.txt', f'تعذر توليد الصور: {exc}')
+        full_report['files'].append(f'{folder}/ملاحظة - تعذر توليد الصور.txt')
 
 
 def _summaries(dont_use_rows):
@@ -633,23 +811,11 @@ def process_day_operations(file_storage, day_label_override=None):
     )
     ops_wb, ops_summary = _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_order, report, worker_links)
 
-    ops_buf = io.BytesIO()
-    ops_wb.save(ops_buf)
-    ops_buf.seek(0)
-    links_wb = _build_worker_links_workbook(day_label, worker_links)
-    links_buf = io.BytesIO()
-    links_wb.save(links_buf)
-    links_buf.seek(0)
-
     full_report = {
         **report,
         'generated_at': datetime.now().isoformat(timespec='seconds'),
         'files': [
-            f'01_Decision/ملف اتخاذ القرار - {day_label}.xlsx',
-            f'01_Decision/ملخص تشغيل اليوم - {day_label}.xlsx',
-            f'03_Stations/مخرجات تشغيل أولية حسب فاتورة المشتركين - {day_label}.xlsx',
-            f'08_Worker_Links/روابط العاملين - {day_label}.xlsx',
-            f'08_Worker_Links/روابط تشغيل اليوم - {day_label}.html',
+            f'01_محطة_القرار/ملف اتخاذ القرار - {day_label}.xlsx',
         ],
         'operations': ops_summary,
         'worker_links_count': len(worker_links),
@@ -661,16 +827,10 @@ def process_day_operations(file_storage, day_label_override=None):
         ),
     }
 
-    station_wb = _build_station_outputs_workbook(day_label, dont_use_rows)
-    station_buf = io.BytesIO()
-    station_wb.save(station_buf)
-    station_buf.seek(0)
     station_pdf_outputs, station_image_sources, station_pdf_reports = _generate_station_pdfs(day_label, dont_use_rows)
     full_report['station_pdfs'] = station_pdf_reports
     for filename, _path in station_pdf_outputs:
-        full_report['files'].append(f'04_PDF/{filename}')
-    if station_image_sources:
-        full_report['files'].append('05_Images/صور المحطات بصيغة PNG')
+        full_report['files'].append(f'02_PDF_المحطات_الجاهزة/{filename}')
 
     tokyo_path = None
     tokyo_report = None
@@ -694,46 +854,65 @@ def process_day_operations(file_storage, day_label_override=None):
     full_report['tokyo'] = tokyo_report or {'error': tokyo_error}
     if tokyo_report and tokyo_report.get('files'):
         for name in reversed(tokyo_report['files']):
-            full_report['files'].insert(3, f'02_Tokyo_Production/{name}')
+            full_report['files'].insert(1, f'03_توكيو_الإنتاج/{name}')
     elif tokyo_path:
-        full_report['files'].insert(3, f'02_Tokyo_Production/شيت توكيو المحدث - {day_label}.xlsm')
+        full_report['files'].insert(1, f'03_توكيو_الإنتاج/شيت توكيو المحدث - {day_label}.xlsm')
+
+    daily_wb = None
+    weekly_wb = None
+    if tokyo_path:
+        try:
+            daily_wb, daily_report = _build_daily_ordering_from_tokyo(tokyo_path)
+            full_report['daily_ordering'] = daily_report
+        except Exception as exc:
+            full_report['daily_ordering'] = {'error': str(exc)}
+        try:
+            weekly_wb, weekly_report = _build_weekly_order_from_tokyo(tokyo_path)
+            full_report['weekly_order'] = weekly_report
+        except Exception as exc:
+            full_report['weekly_order'] = {'error': str(exc)}
+    else:
+        full_report['daily_ordering'] = {'error': 'Daily Ordering يحتاج شيت توكيو محدث؛ لم يتم توليد توكيو من الملف المرفوع'}
+        full_report['weekly_order'] = {'error': 'Weekly Order يحتاج شيت توكيو محدث؛ لم يتم توليد توكيو من الملف المرفوع'}
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         with open(decision_path, 'rb') as fh:
-            zf.writestr(f'01_Decision/ملف اتخاذ القرار - {day_label}.xlsx', fh.read())
-        zf.writestr(f'01_Decision/ملخص تشغيل اليوم - {day_label}.xlsx', ops_buf.getvalue())
-        zf.writestr(f'03_Stations/مخرجات تشغيل أولية حسب فاتورة المشتركين - {day_label}.xlsx', station_buf.getvalue())
-        zf.writestr(f'08_Worker_Links/روابط العاملين - {day_label}.xlsx', links_buf.getvalue())
-        zf.writestr(f'08_Worker_Links/روابط تشغيل اليوم - {day_label}.html', _worker_links_html(day_label, worker_links).encode('utf-8'))
+            zf.writestr(f'01_محطة_القرار/ملف اتخاذ القرار - {day_label}.xlsx', fh.read())
         for filename, path in station_pdf_outputs:
             with open(path, 'rb') as fh:
-                zf.writestr(f'04_PDF/{filename}', fh.read())
-        if station_image_sources:
-            try:
-                from xlsx_to_images import add_workbook_images_to_zip
-                image_date = datetime.now().strftime('%Y-%m-%d')
-                for prefix, xlsx_path in station_image_sources:
-                    add_workbook_images_to_zip(
-                        zf,
-                        xlsx_path,
-                        image_date,
-                        folder='05_Images',
-                        prefix=f'{prefix}_',
-                        day_num_override=_day_no(day_label),
-                    )
-            except Exception as exc:
-                zf.writestr('05_Images/تعذر_توليد_الصور.txt', f'تعذر توليد صور المحطات: {exc}')
+                zf.writestr(f'02_PDF_المحطات_الجاهزة/{filename}', fh.read())
         if tokyo_zip_path and os.path.exists(tokyo_zip_path):
             with zipfile.ZipFile(tokyo_zip_path, 'r') as tokyo_zip:
                 for member in tokyo_zip.infolist():
                     if member.is_dir():
                         continue
-                    zf.writestr(f'02_Tokyo_Production/{member.filename}', tokyo_zip.read(member.filename))
+                    zf.writestr(f'03_توكيو_الإنتاج/{member.filename}', tokyo_zip.read(member.filename))
         elif tokyo_path:
             with open(tokyo_path, 'rb') as fh:
-                zf.writestr(f'02_Tokyo_Production/شيت توكيو المحدث - {day_label}.xlsm', fh.read())
-        zf.writestr('manifest.json', json.dumps(full_report, ensure_ascii=False, indent=2).encode('utf-8'))
+                zf.writestr(f'03_توكيو_الإنتاج/شيت توكيو المحدث - {day_label}.xlsm', fh.read())
+        if daily_wb:
+            _write_workbook_with_images(
+                zf,
+                daily_wb,
+                f'04_Daily_Ordering_طلبات_اليوم',
+                f'Daily_Ordering_{day_label}.xlsx',
+                'DailyOrdering_',
+                day_label,
+                full_report,
+                'daily_ordering',
+            )
+        if weekly_wb:
+            _write_workbook_with_images(
+                zf,
+                weekly_wb,
+                f'05_Weekly_Order_طلب_الأسبوع',
+                f'Weekly_Order_{day_label}.xlsx',
+                'WeeklyOrder_',
+                day_label,
+                full_report,
+                'weekly_order',
+            )
     zip_buf.seek(0)
     return zip_buf, full_report
 
