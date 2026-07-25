@@ -48,6 +48,7 @@ from day_operations import (
     process_day_operations,
     save_day_operations_archive,
 )
+from sada_scales import build_sada_scales_workbook
 from dessert_ordering import (
     export_dessert_cost_report_pdf_with_edits,
     export_dessert_cost_report_with_edits,
@@ -84,6 +85,7 @@ from invoice_receipts_api import invoice_receipts_bp, configure_invoice_receipts
 from veg_comparison import veg_comparison_bp, configure_veg_comparison, group_veg_daily_rows
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
+SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -3620,6 +3622,84 @@ def weight_log_today_photos_zip():
         as_attachment=True,
         download_name=f'Weight_Log_Photos_{today}.zip',
     )
+
+
+@app.route('/api/sada-scales/export', methods=['POST'])
+def sada_scales_export():
+    """تصدير ملف موازين صدى من شيت توكيو + أوزان يوم محدد من مركز التخزين."""
+    _, err = _require_auth()
+    if err:
+        return err
+
+    uploaded = request.files.get('file')
+    day_name = (request.form.get('day') or '').strip()
+    weight_date = (request.form.get('weight_date') or '').strip()
+    if not uploaded or not uploaded.filename:
+        return jsonify({'error': 'ارفع شيت توكيو الأول'}), 400
+    if not day_name:
+        return jsonify({'error': 'اختار يوم التشغيل'}), 400
+    if not weight_date:
+        return jsonify({'error': 'اختار تاريخ من مركز تخزين الموازين'}), 400
+    if not os.path.exists(SADA_SCALES_TEMPLATE_PATH):
+        return jsonify({'error': 'قالب موازين صدى غير موجود على السيرفر'}), 500
+
+    try:
+        selected_date = datetime.strptime(weight_date, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'error': 'تاريخ مركز التخزين غير صحيح'}), 400
+
+    start_ksa = datetime(selected_date.year, selected_date.month, selected_date.day, tzinfo=timezone(timedelta(hours=3)))
+    end_ksa = start_ksa + timedelta(days=1)
+    start_iso = start_ksa.astimezone(timezone.utc).isoformat()
+    end_iso = end_ksa.astimezone(timezone.utc).isoformat()
+
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('weight_log_entries')
+            .select('id, item_name, weight, logged_at, batch_no, deleted')
+            .gte('logged_at', start_iso)
+            .lt('logged_at', end_iso)
+            .eq('deleted', False)
+            .order('logged_at', desc=False)
+        )
+        weight_entries = res.data or []
+    except Exception as exc:
+        return jsonify({'error': f'تعذر قراءة مركز تخزين الموازين: {exc}'}), 400
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded.filename)[1] or '.xlsx')
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        uploaded.save(tmp_path)
+        out, report = build_sada_scales_workbook(
+            tmp_path,
+            SADA_SCALES_TEMPLATE_PATH,
+            day_name,
+            weight_date,
+            weight_entries,
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر استخراج موازين صدى: {exc}'}), 400
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    safe_day = re.sub(r'[^\w\u0600-\u06FF-]+', '_', day_name).strip('_') or 'day'
+    response = send_file(
+        out,
+        as_attachment=True,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        download_name=f'Sada_Scales_{safe_day}_{weight_date}.xlsx',
+    )
+    response.headers['X-Sada-Matched-Tokyo'] = str(report.get('matched_tokyo', 0))
+    response.headers['X-Sada-Matched-Actual'] = str(report.get('matched_actual', 0))
+    response.headers['X-Sada-Missing-Tokyo'] = str(report.get('missing_tokyo_count', 0))
+    response.headers['X-Sada-Missing-Actual'] = str(report.get('missing_actual_count', 0))
+    response.headers['X-Sada-Added-Actual'] = str(report.get('added_actual_rows', 0))
+    return response
 
 
 # ============================================================
