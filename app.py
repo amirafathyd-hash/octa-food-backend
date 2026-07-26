@@ -5535,7 +5535,7 @@ def daily_ordering():
         wb_veg = _build_vegetables_workbook(vegetable_data)
 
         day_numbers_by_station = _read_report_day_numbers_per_station({k: request.files[k] for k in STATION_ORDER})
-        today = _operation_date_from_uploaded_files({k: request.files[k] for k in STATION_ORDER}, day_numbers_by_station)
+        today = _riyadh_today_date()
         day_num_by_tab = _day_numbers_by_tab(day_numbers_by_station)
         zip_buf = _build_daily_ordering_zip(
             wb_daily,
@@ -5755,7 +5755,7 @@ def auto_detect_stations():
         wb_veg = _build_vegetables_workbook(vegetable_data)
 
         day_numbers_by_station = _read_report_day_numbers_per_station(station_files)
-        today = _operation_date_from_uploaded_files(station_files, day_numbers_by_station)
+        today = _riyadh_today_date()
         day_num_override = _day_numbers_by_tab(day_numbers_by_station)
 
         # ?only=daily أو ?only=vegetables — بيرجّع zip فيه ملف واحد بس + صوره،
