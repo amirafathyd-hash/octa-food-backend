@@ -3287,7 +3287,7 @@ def _weight_log_light_entries(include_deleted=False):
         return rows
 
     def metadata_query():
-        fields = 'id, item_name, weight, logged_at, batch_no'
+        fields = 'id, item_name, weight, logged_at, batch_no, day_names'
         if include_deleted:
             fields += ', deleted'
         query = sb.table('weight_log_entries').select(fields)
@@ -3304,6 +3304,71 @@ def _weight_log_light_entries(include_deleted=False):
     return entries
 
 
+def _weight_log_infer_batch_from_name(item_name):
+    match = re.search(r'(\d+)\s*/\s*(\d+)', str(item_name or ''))
+    if not match:
+        return None
+    left, right = match.group(1), match.group(2)
+    # أسماء العربي تظهر أحيانًا معكوسة بصريًا داخل النص، لكن الرقم المخزن
+    # المطلوب في النظام هو نفس شكل اختيار العامل: الجزء/الإجمالي.
+    return f'{right}/{left}'
+
+
+def _weight_log_day_key(logged_at):
+    try:
+        dt = datetime.fromisoformat(str(logged_at).replace('Z', '+00:00'))
+    except Exception:
+        return ''
+    return (dt.astimezone(timezone(timedelta(hours=3)))).strftime('%Y-%m-%d')
+
+
+def _weight_log_name_key(item_name):
+    text = str(item_name or '').strip()
+    text = text.replace('إ', 'ا').replace('أ', 'ا').replace('آ', 'ا').replace('ى', 'ي').replace('ة', 'ه')
+    text = re.sub(r'\d+\s*/\s*\d+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().lower()
+
+
+def _weight_log_recovered_batches(entries):
+    """يرجع updates مقترحة للسجلات القديمة التي لا تحتوي batch_no.
+
+    أولوية الاسترجاع:
+    1) لو رقم الدفعة موجود داخل اسم الصنف، نستخرجه.
+    2) لو مش موجود، نرتب نفس الصنف داخل نفس اليوم حسب وقت التسجيل ونوزع
+       1/N، 2/N... وده مطابق لطريقة تصوير الدفعات في التشغيل.
+    """
+    missing = []
+    updates = {}
+    for row in entries:
+        if row.get('deleted'):
+            continue
+        if str(row.get('batch_no') or '').strip():
+            continue
+        inferred = _weight_log_infer_batch_from_name(row.get('item_name'))
+        if inferred:
+            updates[row['id']] = inferred
+            continue
+        day_key = _weight_log_day_key(row.get('logged_at'))
+        name_key = _weight_log_name_key(row.get('item_name'))
+        if not day_key or not name_key:
+            continue
+        missing.append({**row, '_day_key': day_key, '_name_key': name_key})
+
+    groups = {}
+    for row in missing:
+        groups.setdefault((row['_day_key'], row['_name_key']), []).append(row)
+
+    for rows in groups.values():
+        rows.sort(key=lambda r: str(r.get('logged_at') or ''))
+        total = len(rows)
+        if total <= 0:
+            continue
+        for index, row in enumerate(rows, 1):
+            updates[row['id']] = f'{index}/{total}'
+    return updates
+
+
 @app.route('/api/weight-log', methods=['POST'])
 def weight_log_add():
     """بيستقبل صنف واحد (اسم + وزن + صورة اختيارية) من صفحة العامل. من غير
@@ -3313,6 +3378,8 @@ def weight_log_add():
 
     item_name = (request.form.get('item_name') or '').strip()
     weight_raw = (request.form.get('weight') or '').strip()
+    day_names = (request.form.get('day_names') or '').strip()
+    batch_no = (request.form.get('batch_no') or '').strip() or None
     if not item_name:
         return jsonify({'error': 'اكتب اسم الصنف'}), 400
     try:
@@ -3336,6 +3403,8 @@ def weight_log_add():
         'photo_base64': photo_b64,
         'logged_at': datetime.now(timezone.utc).isoformat(),
         'deleted': False,
+        'day_names': day_names,
+        'batch_no': batch_no,
     }
     try:
         res = execute_with_retry(sb.table('weight_log_entries').insert(row))
@@ -3408,7 +3477,7 @@ def weight_log_mine():
     start_iso, end_iso = _weight_log_day_bounds_utc()
     sb = get_client()
     res = execute_with_retry(
-        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at')
+        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at, batch_no, day_names')
         .gte('logged_at', start_iso).lt('logged_at', end_iso)
         .eq('deleted', False)
         .order('logged_at', desc=True)
@@ -3429,7 +3498,7 @@ def weight_log_list():
         return response
     sb = get_client()
     res = execute_with_retry(
-        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at')
+        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at, batch_no, day_names')
         .eq('deleted', False)
         .order('logged_at', desc=True)
     )
@@ -3450,10 +3519,70 @@ def weight_log_archive():
         return response
     sb = get_client()
     res = execute_with_retry(
-        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at, deleted')
+        sb.table('weight_log_entries').select('id, item_name, weight, photo_base64, logged_at, batch_no, day_names, deleted')
         .order('logged_at', desc=True)
     )
     return jsonify({'entries': res.data or []})
+
+
+@app.route('/api/weight-log/repair-batches', methods=['POST'])
+def weight_log_repair_batches():
+    """استرجاع أرقام الدفعات القديمة التي لم تكن محفوظة.
+
+    Body اختياري:
+      { "apply": true, "date": "YYYY-MM-DD" }
+    بدون apply يرجع معاينة فقط.
+    """
+    _, err = _require_auth()
+    if err:
+        return err
+
+    payload = request.get_json(silent=True) or {}
+    should_apply = bool(payload.get('apply'))
+    target_date = (payload.get('date') or '').strip()
+
+    sb = get_client()
+    query = sb.table('weight_log_entries').select('id, item_name, weight, logged_at, batch_no, deleted')
+    if target_date:
+        try:
+            selected_date = datetime.strptime(target_date, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'error': 'تاريخ غير صحيح'}), 400
+        start_ksa = datetime(selected_date.year, selected_date.month, selected_date.day, tzinfo=timezone(timedelta(hours=3)))
+        end_ksa = start_ksa + timedelta(days=1)
+        query = query.gte('logged_at', start_ksa.astimezone(timezone.utc).isoformat()).lt('logged_at', end_ksa.astimezone(timezone.utc).isoformat())
+
+    try:
+        res = execute_with_retry(query.order('logged_at', desc=False))
+        rows = res.data or []
+    except Exception as exc:
+        return jsonify({'error': f'تعذر قراءة سجلات الموازين: {exc}'}), 400
+
+    updates = _weight_log_recovered_batches(rows)
+    preview = []
+    by_id = {row['id']: row for row in rows}
+    for entry_id, batch_no in list(updates.items())[:300]:
+        row = by_id.get(entry_id) or {}
+        preview.append({
+            'id': entry_id,
+            'item_name': row.get('item_name'),
+            'logged_at': row.get('logged_at'),
+            'batch_no': batch_no,
+        })
+
+    applied = 0
+    if should_apply:
+        for entry_id, batch_no in updates.items():
+            execute_with_retry(sb.table('weight_log_entries').update({'batch_no': batch_no}).eq('id', entry_id))
+            applied += 1
+
+    return jsonify({
+        'ok': True,
+        'total_checked': len(rows),
+        'recoverable': len(updates),
+        'applied': applied,
+        'preview': preview,
+    })
 
 
 @app.route('/api/weight-log/<int:entry_id>', methods=['PUT'])
@@ -3474,6 +3603,8 @@ def weight_log_update(entry_id):
             updates['weight'] = float(payload.get('weight'))
         except (TypeError, ValueError):
             return jsonify({'error': 'الوزن لازم يكون رقم'}), 400
+    if 'batch_no' in payload:
+        updates['batch_no'] = (payload.get('batch_no') or '').strip() or None
     if not updates:
         return jsonify({'error': 'مفيش حاجة للتعديل'}), 400
 
