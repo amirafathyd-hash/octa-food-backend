@@ -5371,6 +5371,77 @@ def _day_numbers_by_tab(day_numbers_by_station):
     return result
 
 
+def _date_from_uploaded_filename(filename):
+    raw = os.path.basename(str(filename or ''))
+    patterns = [
+        (r'(20\d{2})[-_/.](\d{1,2})[-_/.](\d{1,2})', '%Y-%m-%d'),
+        (r'(\d{1,2})[-_/.](\d{1,2})[-_/.](20\d{2})', '%d-%m-%Y'),
+    ]
+    for pattern, fmt in patterns:
+        match = re.search(pattern, raw)
+        if not match:
+            continue
+        parts = match.groups()
+        text = '-'.join(parts)
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+
+    month_names = {
+        'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
+        'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6,
+        'jul': 7, 'july': 7, 'aug': 8, 'august': 8, 'sep': 9, 'sept': 9,
+        'september': 9, 'oct': 10, 'october': 10, 'nov': 11, 'november': 11,
+        'dec': 12, 'december': 12,
+    }
+    match = re.search(
+        r'(\d{1,2})\s+([A-Za-z]{3,9})\s+(20\d{2})|([A-Za-z]{3,9})\s+(\d{1,2})\s+(20\d{2})',
+        raw,
+        re.IGNORECASE,
+    )
+    if match:
+        if match.group(1):
+            day = int(match.group(1)); month = month_names.get(match.group(2).lower()); year = int(match.group(3))
+        else:
+            month = month_names.get(match.group(4).lower()); day = int(match.group(5)); year = int(match.group(6))
+        if month:
+            try:
+                return datetime(year, month, day).date().isoformat()
+            except ValueError:
+                pass
+    return None
+
+
+def _date_from_day_number_in_current_ksa_week(day_num):
+    try:
+        n = int(day_num)
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= n <= 7:
+        return None
+
+    today_ksa = (datetime.now(timezone.utc) + timedelta(hours=3)).date()
+    # نفس ترقيم النظام: السبت=1 ... الجمعة=7
+    today_num = (today_ksa.weekday() - 5) % 7 + 1
+    start_of_week = today_ksa - timedelta(days=today_num - 1)
+    return (start_of_week + timedelta(days=n - 1)).isoformat()
+
+
+def _operation_date_from_uploaded_files(files_by_key, day_numbers_by_station):
+    for f in files_by_key.values():
+        detected = _date_from_uploaded_filename(getattr(f, 'filename', ''))
+        if detected:
+            return detected
+
+    preferred = day_numbers_by_station.get('hot') or next(iter(day_numbers_by_station.values()), None)
+    inferred = _date_from_day_number_in_current_ksa_week(preferred)
+    if inferred:
+        return inferred
+
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).date().isoformat()
+
+
 @app.route('/api/daily-ordering', methods=['POST'])
 def daily_ordering():
     """بتاخد نفس ملفات الـ7 محطات بتاعة Weekly Purchasing، وبترجع zip فيه
@@ -5463,8 +5534,8 @@ def daily_ordering():
 
         wb_veg = _build_vegetables_workbook(vegetable_data)
 
-        today = datetime.now().strftime('%Y-%m-%d')
         day_numbers_by_station = _read_report_day_numbers_per_station({k: request.files[k] for k in STATION_ORDER})
+        today = _operation_date_from_uploaded_files({k: request.files[k] for k in STATION_ORDER}, day_numbers_by_station)
         day_num_by_tab = _day_numbers_by_tab(day_numbers_by_station)
         zip_buf = _build_daily_ordering_zip(
             wb_daily,
@@ -5683,12 +5754,8 @@ def auto_detect_stations():
 
         wb_veg = _build_vegetables_workbook(vegetable_data)
 
-        selected_date = (request.form.get('selected_date') or '').strip()
-        if re.match(r'^\d{4}-\d{2}-\d{2}$', selected_date):
-            today = selected_date
-        else:
-            today = datetime.now().strftime('%Y-%m-%d')
         day_numbers_by_station = _read_report_day_numbers_per_station(station_files)
+        today = _operation_date_from_uploaded_files(station_files, day_numbers_by_station)
         day_num_override = _day_numbers_by_tab(day_numbers_by_station)
 
         # ?only=daily أو ?only=vegetables — بيرجّع zip فيه ملف واحد بس + صوره،
