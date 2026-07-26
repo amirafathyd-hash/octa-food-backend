@@ -3542,7 +3542,8 @@ def weight_log_repair_batches():
     target_date = (payload.get('date') or '').strip()
 
     sb = get_client()
-    query = sb.table('weight_log_entries').select('id, item_name, weight, logged_at, batch_no, deleted')
+    start_iso = None
+    end_iso = None
     if target_date:
         try:
             selected_date = datetime.strptime(target_date, '%Y-%m-%d').date()
@@ -3550,11 +3551,26 @@ def weight_log_repair_batches():
             return jsonify({'error': 'تاريخ غير صحيح'}), 400
         start_ksa = datetime(selected_date.year, selected_date.month, selected_date.day, tzinfo=timezone(timedelta(hours=3)))
         end_ksa = start_ksa + timedelta(days=1)
-        query = query.gte('logged_at', start_ksa.astimezone(timezone.utc).isoformat()).lt('logged_at', end_ksa.astimezone(timezone.utc).isoformat())
+        start_iso = start_ksa.astimezone(timezone.utc).isoformat()
+        end_iso = end_ksa.astimezone(timezone.utc).isoformat()
+
+    def build_repair_query():
+        query = sb.table('weight_log_entries').select('id, item_name, weight, logged_at, batch_no, deleted')
+        if start_iso and end_iso:
+            query = query.gte('logged_at', start_iso).lt('logged_at', end_iso)
+        return query.order('logged_at', desc=False)
 
     try:
-        res = execute_with_retry(query.order('logged_at', desc=False))
-        rows = res.data or []
+        rows = []
+        page_size = 1000
+        offset = 0
+        while True:
+            res = execute_with_retry(build_repair_query().range(offset, offset + page_size - 1))
+            batch = res.data or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
     except Exception as exc:
         return jsonify({'error': f'تعذر قراءة سجلات الموازين: {exc}'}), 400
 
