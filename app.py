@@ -4179,6 +4179,67 @@ def veg_inventory_items_add():
     return jsonify({'ok': True, 'item': (inserted.data or [row])[0]})
 
 
+@app.route('/api/veg-inventory/items/import', methods=['POST'])
+def veg_inventory_items_import():
+    """استبدال قائمة أصناف مخزون الخضار من Excel.
+
+    الشيت المتوقع:
+      العمود الأول: اسم الصنف
+      العمود الثاني: الوحدة
+      العمود الثالث اختياري: التصنيف
+    """
+    _, err = _require_auth()
+    if err:
+        return err
+
+    file_storage = request.files.get('file')
+    if not file_storage or not file_storage.filename:
+        return jsonify({'error': 'اختار ملف Excel أولاً'}), 400
+
+    try:
+        wb = openpyxl.load_workbook(file_storage, read_only=True, data_only=True)
+        ws = wb.active
+    except Exception as exc:
+        return jsonify({'error': f'تعذر قراءة ملف Excel: {exc}'}), 400
+
+    rows = []
+    seen = set()
+    for row in ws.iter_rows(values_only=True):
+        raw_name = row[0] if row and len(row) > 0 else None
+        raw_unit = row[1] if row and len(row) > 1 else None
+        raw_category = row[2] if row and len(row) > 2 else None
+        item_name = str(raw_name or '').strip()
+        unit = str(raw_unit or 'gm').strip() or 'gm'
+        category = str(raw_category or 'مخزون الخضار').strip() or 'مخزون الخضار'
+        if not item_name:
+            continue
+        header_key = item_name.replace(' ', '').lower()
+        if header_key in {'الصنف', 'اسمالصنف', 'item', 'itemname', 'name', 'items'}:
+            continue
+        key = item_name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            'item_name': item_name,
+            'category': category,
+            'unit': unit,
+            'sort_order': len(rows) + 1,
+        })
+
+    if not rows:
+        return jsonify({'error': 'لم يتم العثور على أصناف داخل الملف'}), 400
+
+    sb = get_client()
+    try:
+        execute_with_retry(sb.table('veg_inventory_items').delete().neq('id', -1))
+        execute_with_retry(sb.table('veg_inventory_items').insert(rows))
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تحديث قائمة الأصناف: {exc}'}), 400
+
+    return jsonify({'ok': True, 'count': len(rows)})
+
+
 @app.route('/api/veg-inventory/today', methods=['GET'])
 def veg_inventory_today_get():
     """بترجّع قيم إنهاردة المحفوظة لحد دلوقتي (لو العامل رجع يعدّل) - للعامل
