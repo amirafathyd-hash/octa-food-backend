@@ -3330,7 +3330,7 @@ def _weight_log_name_key(item_name):
     return text.strip().lower()
 
 
-def _weight_log_recovered_batches(entries):
+def _weight_log_recovered_batches(entries, include_deleted=False):
     """يرجع updates مقترحة للسجلات القديمة التي لا تحتوي batch_no.
 
     أولوية الاسترجاع:
@@ -3341,7 +3341,7 @@ def _weight_log_recovered_batches(entries):
     missing = []
     updates = {}
     for row in entries:
-        if row.get('deleted'):
+        if row.get('deleted') and not include_deleted:
             continue
         if str(row.get('batch_no') or '').strip():
             continue
@@ -3540,6 +3540,9 @@ def weight_log_repair_batches():
     payload = request.get_json(silent=True) or {}
     should_apply = bool(payload.get('apply'))
     target_date = (payload.get('date') or '').strip()
+    requested_ids = payload.get('ids') or []
+    requested_ids = [str(item).strip() for item in requested_ids if str(item).strip()]
+    include_deleted = bool(payload.get('include_deleted') or requested_ids)
 
     sb = get_client()
     start_iso = None
@@ -3556,6 +3559,8 @@ def weight_log_repair_batches():
 
     def build_repair_query():
         query = sb.table('weight_log_entries').select('id, item_name, weight, logged_at, batch_no, deleted')
+        if requested_ids:
+            query = query.in_('id', requested_ids[:2000])
         if start_iso and end_iso:
             query = query.gte('logged_at', start_iso).lt('logged_at', end_iso)
         return query.order('logged_at', desc=False)
@@ -3574,7 +3579,7 @@ def weight_log_repair_batches():
     except Exception as exc:
         return jsonify({'error': f'تعذر قراءة سجلات الموازين: {exc}'}), 400
 
-    updates = _weight_log_recovered_batches(rows)
+    updates = _weight_log_recovered_batches(rows, include_deleted=include_deleted)
     preview = []
     by_id = {row['id']: row for row in rows}
     for entry_id, batch_no in list(updates.items())[:300]:
