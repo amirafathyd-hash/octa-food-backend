@@ -4982,7 +4982,7 @@ def _add_station_tab_daily(wb, station_key, file_storage):
     return out_ws
 
 
-def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num_override=None):
+def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num_override=None, vegetable_summary_rows=None):
     """بتبني zip فيه Daily_Ordering + Vegetables (إكسيل) + صورة PNG لكل تاب
     فيهم لو with_images=True (لو توليد الصور فشل لأي سبب - مثلاً LibreOffice
     مش متظبط على السيرفر - بيرجع الإكسيل عادي بدون ما يكسر الطلب كله).
@@ -4995,6 +4995,17 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
         zf.writestr(f'Daily_Ordering_{today}.xlsx', buf1.getvalue())
         buf2 = io.BytesIO(); wb_veg.save(buf2)
         zf.writestr(f'Vegetables_{today}.xlsx', buf2.getvalue())
+        if vegetable_summary_rows:
+            try:
+                wb_after_inventory, previous_date = _build_vegetables_after_inventory_workbook(vegetable_summary_rows, today)
+                buf3 = io.BytesIO(); wb_after_inventory.save(buf3)
+                zf.writestr(f'Vegetables_After_Yesterday_Inventory_{today}.xlsx', buf3.getvalue())
+            except Exception as e:
+                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم مخزون أمس')
+                zf.writestr('Vegetables_After_Yesterday_Inventory_ERROR.txt',
+                             f'حصل خطأ أثناء خصم مخزون أمس: {e}')
+                wb_after_inventory = None
+                previous_date = None
 
         if with_images:
             try:
@@ -5002,6 +5013,14 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
                                             day_num_override=day_num_override)
                 add_workbook_images_to_zip(zf, wb_veg, today, prefix='Vegetables_',
                                             day_num_override=day_num_override)
+                if vegetable_summary_rows and wb_after_inventory:
+                    add_workbook_images_to_zip(
+                        zf,
+                        wb_after_inventory,
+                        today,
+                        prefix='Vegetables_After_Yesterday_Inventory_',
+                        day_num_override=day_num_override,
+                    )
             except Exception as e:
                 app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
                 zf.writestr('images/تعذر_توليد_الصور.txt',
@@ -5010,7 +5029,7 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
     return zip_buf
 
 
-def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_override=None):
+def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_override=None, vegetable_summary_rows=None):
     """زي _build_daily_ordering_zip بالظبط بس لملف واحد بس (مش اتنين) — مستخدمة
     في زرار "Daily Ordering" أو "Vegetables" لوحدهم، عشان صور التابات PNG
     تفضل متضافة زي ما كانت أول ما الزرارين كانوا مدموجين في واحد."""
@@ -5018,9 +5037,27 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         buf = io.BytesIO(); wb.save(buf)
         zf.writestr(f'{file_label}_{today}.xlsx', buf.getvalue())
+        wb_after_inventory = None
+        if vegetable_summary_rows:
+            try:
+                wb_after_inventory, previous_date = _build_vegetables_after_inventory_workbook(vegetable_summary_rows, today)
+                buf2 = io.BytesIO(); wb_after_inventory.save(buf2)
+                zf.writestr(f'Vegetables_After_Yesterday_Inventory_{today}.xlsx', buf2.getvalue())
+            except Exception as e:
+                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم مخزون أمس')
+                zf.writestr('Vegetables_After_Yesterday_Inventory_ERROR.txt',
+                             f'حصل خطأ أثناء خصم مخزون أمس: {e}')
         try:
             add_workbook_images_to_zip(zf, wb, today, prefix=image_prefix,
                                         day_num_override=day_num_override)
+            if wb_after_inventory:
+                add_workbook_images_to_zip(
+                    zf,
+                    wb_after_inventory,
+                    today,
+                    prefix='Vegetables_After_Yesterday_Inventory_',
+                    day_num_override=day_num_override,
+                )
         except Exception as e:
             app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
             zf.writestr('images/تعذر_توليد_الصور.txt',
@@ -5046,6 +5083,196 @@ def _vegetable_summary_rows_from_station_data(vegetable_data):
                 if not summary[name].get('order_unit') and row.get('order_unit'):
                     summary[name]['order_unit'] = row.get('order_unit')
     return sorted(summary.values(), key=lambda r: str(r['name']).lower())
+
+
+def _vegetable_match_aliases(name):
+    raw = str(name or '').strip()
+    if not raw:
+        return []
+
+    def _clean(value):
+        value = str(value or '').strip().casefold()
+        value = re.sub(r'[إأآا]', 'ا', value)
+        value = value.replace('ة', 'ه').replace('ى', 'ي')
+        value = re.sub(r'[^\w\u0600-\u06FF]+', ' ', value)
+        return re.sub(r'\s+', ' ', value).strip()
+
+    parts = [raw]
+    for sep in (' - ', '-', '–', '—', '/', '\\'):
+        if sep in raw:
+            parts.extend(p.strip() for p in raw.split(sep) if p and p.strip())
+    aliases = []
+    for part in parts:
+        cleaned = _clean(part)
+        if cleaned and cleaned not in aliases:
+            aliases.append(cleaned)
+    return aliases
+
+
+def _to_number(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    try:
+        text = str(value or '').replace(',', '').strip()
+        return float(text) if text else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_inventory_qty(qty, inventory_unit, order_unit):
+    inv_unit = str(inventory_unit or '').strip().lower()
+    out_unit = str(order_unit or '').strip().lower()
+    if inv_unit in ('gm', 'g', 'جرام') and out_unit in ('kg', 'كيلو', 'كيلوجرام'):
+        return qty / 1000.0
+    if inv_unit in ('kg', 'كيلو', 'كيلوجرام') and out_unit in ('gm', 'g', 'جرام'):
+        return qty * 1000.0
+    if inv_unit in ('l', 'liter', 'litre', 'لتر') and out_unit in ('ml', 'مل'):
+        return qty * 1000.0
+    if inv_unit in ('ml', 'مل') and out_unit in ('l', 'liter', 'litre', 'لتر'):
+        return qty / 1000.0
+    return qty
+
+
+def _load_previous_day_veg_inventory(target_date):
+    try:
+        target_dt = datetime.strptime(target_date, '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        target_dt = datetime.now(timezone.utc).date()
+    previous_date = (target_dt - timedelta(days=1)).isoformat()
+
+    sb = get_client()
+    entries_res = execute_with_retry(
+        sb.table('veg_inventory_entries')
+        .select('item_name, remaining_stock')
+        .eq('entry_date', previous_date)
+    )
+    items_res = execute_with_retry(
+        sb.table('veg_inventory_items')
+        .select('item_name, unit, category')
+        .order('sort_order')
+    )
+
+    item_meta = {}
+    for item in (items_res.data or []):
+        for alias in _vegetable_match_aliases(item.get('item_name')):
+            item_meta[alias] = item
+
+    inventory = {}
+    for entry in (entries_res.data or []):
+        item_name = entry.get('item_name') or ''
+        qty = _to_number(entry.get('remaining_stock'))
+        meta = None
+        for alias in _vegetable_match_aliases(item_name):
+            meta = item_meta.get(alias)
+            if meta:
+                break
+        record = {
+            'item_name': item_name,
+            'remaining_stock': qty,
+            'unit': (meta or {}).get('unit') or '',
+            'category': (meta or {}).get('category') or '',
+        }
+        for alias in _vegetable_match_aliases(item_name):
+            inventory[alias] = record
+
+    return previous_date, inventory
+
+
+def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
+    previous_date, inventory = _load_previous_day_veg_inventory(target_date)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'اطلب بعد المخزون'
+    ws.sheet_view.rightToLeft = True
+
+    dark_fill = PatternFill('solid', start_color='1A1A1A')
+    gold_fill = PatternFill('solid', start_color='D8A83D')
+    green_fill = PatternFill('solid', start_color='DDF4E8')
+    red_fill = PatternFill('solid', start_color='FFE5E5')
+    soft_fill = PatternFill('solid', start_color='FFF8EA')
+    white_fill = PatternFill('solid', start_color='FFFFFF')
+    header_font = Font(name='Tahoma', bold=True, color='FFFFFF', size=12)
+    title_font = Font(name='Tahoma', bold=True, color='FFFFFF', size=17)
+    data_font = Font(name='Tahoma', size=11)
+    num_font = Font(name='Tahoma', bold=True, size=11)
+    thin = Side(style='thin', color='E7D2B8')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    right = Alignment(horizontal='right', vertical='center', wrap_text=True)
+
+    ws.merge_cells('A1:G1')
+    ws['A1'] = f'طلبية الخضار بعد خصم مخزون أمس - {target_date}'
+    ws['A1'].fill = dark_fill
+    ws['A1'].font = title_font
+    ws['A1'].alignment = center
+    ws.row_dimensions[1].height = 34
+
+    ws.merge_cells('A2:G2')
+    if inventory:
+        ws['A2'] = f'تم الخصم من مخزون يوم {previous_date} فقط. أي مخزون بتاريخ أقدم لم يتم استخدامه.'
+    else:
+        ws['A2'] = f'لا يوجد مخزون محفوظ ليوم {previous_date}، لذلك ظهرت طلبية اليوم بدون خصم.'
+    ws['A2'].fill = soft_fill
+    ws['A2'].font = Font(name='Tahoma', bold=True, color='6B4A20', size=11)
+    ws['A2'].alignment = center
+    ws.row_dimensions[2].height = 26
+
+    headers = ['الصنف', 'طلب اليوم', 'مخزون أمس', 'اطلب المتبقي', 'الوحدة', 'حالة الخصم', 'التصنيف']
+    widths = [44, 16, 16, 18, 12, 22, 18]
+    for col, (header, width) in enumerate(zip(headers, widths), 1):
+        cell = ws.cell(row=3, column=col, value=header)
+        cell.fill = gold_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = border
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    for idx, row in enumerate(summary_rows, start=4):
+        item_name = row.get('name') or ''
+        order_qty = _to_number(row.get('daily_order'))
+        order_unit = row.get('order_unit') or ''
+        inv_record = None
+        for alias in _vegetable_match_aliases(item_name):
+            inv_record = inventory.get(alias)
+            if inv_record:
+                break
+        raw_stock = _to_number((inv_record or {}).get('remaining_stock'))
+        stock_qty = _normalize_inventory_qty(raw_stock, (inv_record or {}).get('unit'), order_unit) if inv_record else 0.0
+        remaining = max(order_qty - stock_qty, 0.0)
+        if not inventory:
+            status = 'لا يوجد مخزون أمس'
+        elif inv_record:
+            status = 'تم الخصم' if stock_qty else 'موجود بلا كمية'
+        else:
+            status = 'غير موجود في المخزون'
+
+        fill = white_fill if idx % 2 == 0 else soft_fill
+        if inv_record and stock_qty > 0:
+            fill = green_fill
+        elif inventory and not inv_record:
+            fill = red_fill
+
+        values = [
+            item_name,
+            order_qty,
+            stock_qty,
+            remaining,
+            order_unit,
+            status,
+            row.get('category') or (inv_record or {}).get('category') or '',
+        ]
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row=idx, column=col, value=value)
+            cell.fill = fill
+            cell.font = num_font if col in (2, 3, 4) else data_font
+            cell.alignment = center if col != 1 else right
+            cell.border = border
+            if col in (2, 3, 4):
+                cell.number_format = '#,##0.000'
+
+    ws.freeze_panes = 'A4'
+    return wb, previous_date
 
 
 def _detect_uploaded_station_files(uploaded):
@@ -5239,7 +5466,13 @@ def daily_ordering():
         today = datetime.now().strftime('%Y-%m-%d')
         day_numbers_by_station = _read_report_day_numbers_per_station({k: request.files[k] for k in STATION_ORDER})
         day_num_by_tab = _day_numbers_by_tab(day_numbers_by_station)
-        zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today, day_num_override=day_num_by_tab)
+        zip_buf = _build_daily_ordering_zip(
+            wb_daily,
+            wb_veg,
+            today,
+            day_num_override=day_num_by_tab,
+            vegetable_summary_rows=_vegetable_summary_rows_from_station_data(vegetable_data),
+        )
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
                           mimetype='application/zip')
@@ -5450,7 +5683,11 @@ def auto_detect_stations():
 
         wb_veg = _build_vegetables_workbook(vegetable_data)
 
-        today = datetime.now().strftime('%Y-%m-%d')
+        selected_date = (request.form.get('selected_date') or '').strip()
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', selected_date):
+            today = selected_date
+        else:
+            today = datetime.now().strftime('%Y-%m-%d')
         day_numbers_by_station = _read_report_day_numbers_per_station(station_files)
         day_num_override = _day_numbers_by_tab(day_numbers_by_station)
 
@@ -5464,12 +5701,25 @@ def auto_detect_stations():
                               download_name=f'Daily_Ordering_{today}.zip',
                               mimetype='application/zip')
         if only == 'vegetables':
-            zip_buf = _build_single_workbook_zip(wb_veg, today, 'Vegetables', 'Vegetables_', day_num_override)
+            zip_buf = _build_single_workbook_zip(
+                wb_veg,
+                today,
+                'Vegetables',
+                'Vegetables_',
+                day_num_override,
+                vegetable_summary_rows=_vegetable_summary_rows_from_station_data(vegetable_data),
+            )
             return send_file(zip_buf, as_attachment=True,
                               download_name=f'Vegetables_{today}.zip',
                               mimetype='application/zip')
 
-        zip_buf = _build_daily_ordering_zip(wb_daily, wb_veg, today, day_num_override=day_num_override)
+        zip_buf = _build_daily_ordering_zip(
+            wb_daily,
+            wb_veg,
+            today,
+            day_num_override=day_num_override,
+            vegetable_summary_rows=_vegetable_summary_rows_from_station_data(vegetable_data),
+        )
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
                           mimetype='application/zip')
