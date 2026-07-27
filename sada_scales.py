@@ -227,6 +227,7 @@ def _build_weight_index(entries):
         key = _candidate_key(base, batch, component)
         index[key] = round(index.get(key, 0) + weight, 3)
         rows[key] = {
+            'key': key,
             'item_name': str(item_name).strip(),
             'base': base,
             'batch': batch,
@@ -267,6 +268,11 @@ def _copy_row_style(ws, source_row, target_row):
             dst.protection = copy(src.protection)
 
 
+def _clear_row_values(ws, row):
+    for col in range(1, ws.max_column + 1):
+        ws.cell(row, col).value = None
+
+
 def _last_template_item_row(ws):
     for row in range(ws.max_row, 3, -1):
         if ws.cell(row, 1).value:
@@ -302,6 +308,8 @@ def build_sada_scales_workbook(tokyo_path, template_path, day_name, output_date,
     tokyo_wb.close()
 
     wb, ws = _copy_sheet_to_single_workbook(template_path, template_sheet)
+    ws.cell(3, 2).value = 'الوزن للطبخ طوكيو'
+    ws.cell(3, 3).value = 'الوزن الفعلي بعد الطبخ'
     if output_date:
         try:
             dt = datetime.strptime(output_date, '%Y-%m-%d')
@@ -312,53 +320,41 @@ def build_sada_scales_workbook(tokyo_path, template_path, day_name, output_date,
             ws.title = str(output_date)[:31]
             ws['A2'] = output_date
 
-    weight_index, weight_rows = _build_weight_index(weight_entries)
+    _weight_index, weight_rows = _build_weight_index(weight_entries)
+    output_rows = list(weight_rows.values())
+    output_rows.sort(key=lambda r: (_norm_text(r['base']), _batch_sort_value(r['batch']), _component_sort_value(r['component']), _norm_text(r['item_name'])))
+
+    template_last_row = _last_template_item_row(ws)
+    existing_slots = max(1, template_last_row - 3)
+    needed_slots = max(1, len(output_rows))
+    if needed_slots > existing_slots:
+        ws.insert_rows(template_last_row + 1, amount=needed_slots - existing_slots)
+    elif existing_slots > needed_slots:
+        ws.delete_rows(4 + needed_slots, existing_slots - needed_slots)
+
+    for row in range(4, 4 + needed_slots):
+        if row != 4:
+            _copy_row_style(ws, 4, row)
+        _clear_row_values(ws, row)
+
     matched_tokyo = matched_actual = 0
     missing_tokyo = []
-    missing_actual = []
-    consumed_weight_keys = set()
+    for offset, item in enumerate(output_rows):
+        target_row = 4 + offset
+        ws.cell(target_row, 1).value = item['item_name']
 
-    for row in range(4, ws.max_row + 1):
-        name = ws.cell(row, 1).value
-        if not name:
-            continue
-        batch = _batch_from_any_text(name, rtl_template=True)
-        component = _component_for_template_name(name)
-        base = _base_for_template_name(name)
-        key = _candidate_key(base, batch, component)
-        fallback_key = _candidate_key(base, '', component)
-
-        planned = value_index.get(key)
+        planned = value_index.get(item['key'])
         if planned is None:
-            planned = value_index.get(fallback_key)
+            planned = value_index.get(_candidate_key(item['base'], '', item['component']))
         if planned is not None:
-            _set_cell_value(ws.cell(row, 2), planned)
+            _set_cell_value(ws.cell(target_row, 2), planned)
             matched_tokyo += 1
         else:
-            missing_tokyo.append(str(name))
-
-        actual = weight_index.get(key)
-        if actual is not None:
-            _set_cell_value(ws.cell(row, 3), actual)
-            matched_actual += 1
-            consumed_weight_keys.add(key)
-        else:
-            missing_actual.append(str(name))
-
-    extra_rows = [row for key, row in weight_rows.items() if key not in consumed_weight_keys]
-    extra_rows.sort(key=lambda r: (_norm_text(r['base']), _batch_sort_value(r['batch']), _component_sort_value(r['component']), _norm_text(r['item_name'])))
-    if extra_rows:
-        style_row = _last_template_item_row(ws)
-        insert_at = style_row + 1
-        ws.insert_rows(insert_at, amount=len(extra_rows))
-        for offset, item in enumerate(extra_rows):
-            target_row = insert_at + offset
-            _copy_row_style(ws, style_row, target_row)
-            ws.cell(target_row, 1).value = item['item_name']
             ws.cell(target_row, 2).value = None
-            _set_cell_value(ws.cell(target_row, 3), item['weight'])
-            matched_actual += 1
             missing_tokyo.append(item['item_name'])
+
+        _set_cell_value(ws.cell(target_row, 3), item['weight'])
+        matched_actual += 1
 
     out = BytesIO()
     wb.save(out)
@@ -368,6 +364,6 @@ def build_sada_scales_workbook(tokyo_path, template_path, day_name, output_date,
         'matched_tokyo': matched_tokyo,
         'matched_actual': matched_actual,
         'missing_tokyo_count': len(missing_tokyo),
-        'missing_actual_count': len(missing_actual),
-        'added_actual_rows': len(extra_rows),
+        'missing_actual_count': 0,
+        'added_actual_rows': len(output_rows),
     }
