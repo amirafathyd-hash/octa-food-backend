@@ -22,6 +22,11 @@ DAY_OPTIONS = {
 ARABIC_RE = re.compile(r'[\u0600-\u06FF]+(?:[\s\u0600-\u06FF]+)*')
 PART_RE = re.compile(r'(\d+)\s*/\s*(\d+)')
 STANDALONE_TOTAL_RE = re.compile(r'^total\b', re.I)
+IGNORE_DETAIL_TERMS = {'قبل الطبخ', 'بعد الطبخ'}
+STOP_WORDS = {
+    'قبل', 'بعد', 'الطبخ', 'دفعه', 'دفعة', 'مع', 'بدون', 'الصوص', 'صوص',
+    'الاضافي', 'اضافي', 'اضافى', 'بال', 'و',
+}
 
 
 def _cell(ws, row, col):
@@ -45,7 +50,10 @@ def _norm_text(value):
     text = str(value or '').strip()
     text = text.replace('إ', 'ا').replace('أ', 'ا').replace('آ', 'ا')
     text = text.replace('ة', 'ه').replace('ى', 'ي')
-    text = re.sub(r'[ـ،,]+', ' ', text)
+    text = text.replace('أمانى', 'امانسي').replace('اماني', 'امانسي')
+    text = text.replace('بالجار', 'بالبخار').replace('باجار', 'بخار')
+    text = text.replace('مهروسة', 'مهروسه')
+    text = re.sub(r'[ـ،,()\[\]{}]+', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     return text.lower().strip()
 
@@ -66,12 +74,63 @@ def _strip_batch(value):
     return re.sub(r'\s+', ' ', text).strip()
 
 
+def _extract_parenthetical_detail(value):
+    text = str(value or '')
+    for match in re.findall(r'[\(\[]([^)\]]+)[\)\]]', text):
+        detail = _norm_text(match)
+        if detail and detail not in IGNORE_DETAIL_TERMS:
+            return detail
+    return ''
+
+
+def _clean_base_text(value):
+    text = str(value or '')
+    text = re.sub(r'[\(\[](?:قبل|بعد)\s+الطبخ[\)\]]', ' ', text)
+    text = re.sub(r'[\(\[][^\)\]]+[\)\]]', ' ', text)
+    return _strip_batch(text)
+
+
+def _display_name_with_batch(item_name, batch):
+    name = str(item_name or '').strip()
+    batch = str(batch or '').strip()
+    if batch and not PART_RE.search(name):
+        return f'{name} — دفعة {batch}'
+    return name
+
+
+def _arabic_part(value):
+    text = str(value or '').strip()
+    matches = ARABIC_RE.findall(text)
+    if not matches:
+        return ''
+    return _norm_text(matches[-1])
+
+
+def _name_tokens(value):
+    return {
+        token for token in re.split(r'\s+', _norm_text(value))
+        if len(token) > 1 and token not in STOP_WORDS
+    }
+
+
+def _names_match(left, right):
+    left_tokens = _name_tokens(left)
+    right_tokens = _name_tokens(right)
+    if not left_tokens or not right_tokens:
+        return _norm_text(left) == _norm_text(right)
+    overlap = left_tokens & right_tokens
+    needed = min(len(left_tokens), len(right_tokens))
+    return len(overlap) >= max(1, needed - 1)
+
+
 def _arabic_name(ws):
-    value = _cell(ws, 2, 37)  # AK2
-    if isinstance(value, str):
-        match = ARABIC_RE.search(value)
-        if match:
-            return match.group(0).strip()
+    preferred_cells = ((2, 37), (62, 2), (63, 2), (2, 2), (25, 18))
+    for row, col in preferred_cells:
+        value = _cell(ws, row, col)
+        if isinstance(value, str):
+            arabic = _arabic_part(value)
+            if arabic:
+                return arabic
     return None
 
 
@@ -157,8 +216,44 @@ def _total_rows(ws):
     return [r for r in rows if any(_number(v) for v in r.values() if isinstance(v, (int, float)))]
 
 
+def _simple_batch_rows(ws):
+    found = []
+    for row in range(1, ws.max_row + 1):
+        label = str(ws.cell(row, 2).value or '').strip().lower()
+        match = re.match(r'^batch\s+(\d+)$', label)
+        if not match:
+            continue
+        value = _number(ws.cell(row, 4).value)
+        if value is not None:
+            found.append({'part': int(match.group(1)), 'value': value})
+    total = len(found)
+    return [
+        {'batch': f"{item['part']}/{total}", 'value': item['value']}
+        for item in found
+        if item.get('value') is not None
+    ]
+
+
+def _simple_ingredient_rows(ws):
+    rows = []
+    for row in range(1, ws.max_row + 1):
+        ingredient = ws.cell(row, 2).value
+        value = _number(ws.cell(row, 8).value)
+        if not ingredient or value is None:
+            continue
+        detail = _arabic_part(ingredient)
+        if not detail:
+            continue
+        rows.append({'detail': detail, 'value': value})
+    return rows
+
+
 def _component_for_template_name(name):
     compact = _norm_text(_strip_batch(name))
+    if 'قبل الطبخ' in compact:
+        return 'protein'
+    if _extract_parenthetical_detail(name):
+        return 'ingredient'
     if 'صوص الاضافي' in compact or 'صوص اضافي' in compact:
         return 'topping'
     if 'بدون صوص' in compact:
@@ -171,14 +266,14 @@ def _component_for_template_name(name):
 
 
 def _base_for_template_name(name):
-    text = _strip_batch(name)
-    for phrase in ('صوص الاضافي', 'صوص اضافي', 'بدون صوص', 'مع الصوص', 'صوص'):
+    text = _clean_base_text(name)
+    for phrase in ('صوص الاضافي', 'صوص اضافي', 'بدون صوص', 'مع الصوص', 'صوص', 'قبل الطبخ', 'بعد الطبخ'):
         text = text.replace(phrase, ' ')
     return _norm_text(text)
 
 
-def _candidate_key(base, batch, component):
-    return f'{_norm_text(base)}|{batch or ""}|{component}'
+def _candidate_key(base, batch, component, detail=''):
+    return f'{_norm_text(base)}|{batch or ""}|{component}|{_norm_text(detail)}'
 
 
 def _build_tokyo_value_index(wb, day_no):
@@ -187,6 +282,23 @@ def _build_tokyo_value_index(wb, day_no):
     for sheet_name in _find_day_meals(wb, day_no):
         ws = wb[sheet_name]
         sheet_ar = _arabic_name(ws) or sheet_name
+        simple_rows = _simple_batch_rows(ws)
+        for item in simple_rows:
+            value = item.get('value')
+            batch = item.get('batch') or ''
+            if value is not None:
+                index[_candidate_key(sheet_ar, batch, 'simple')] = value
+                diagnostics.append({'name': sheet_ar, 'batch': batch, 'component': 'simple', 'value': value})
+        if simple_rows:
+            total_value = round(sum(item['value'] for item in simple_rows), 3)
+            index[_candidate_key(sheet_ar, '', 'simple')] = total_value
+            diagnostics.append({'name': sheet_ar, 'batch': '', 'component': 'simple', 'value': total_value})
+        for item in _simple_ingredient_rows(ws):
+            value = item.get('value')
+            detail = item.get('detail') or ''
+            if value is not None and detail:
+                index[_candidate_key(sheet_ar, '', 'ingredient', detail)] = value
+                diagnostics.append({'name': sheet_ar, 'batch': '', 'component': 'ingredient', 'detail': detail, 'value': value})
         for item in _total_rows(ws):
             banner = item.get('banner') or {}
             base_ar = _strip_batch(banner.get('arabic') or sheet_ar)
@@ -206,6 +318,31 @@ def _build_tokyo_value_index(wb, day_no):
     return index, diagnostics
 
 
+def _resolve_planned_value(item, value_index, diagnostics):
+    planned = value_index.get(item['key'])
+    if planned is not None:
+        return planned
+
+    planned = value_index.get(_candidate_key(item['base'], '', item['component'], item.get('detail') or ''))
+    if planned is not None:
+        return planned
+
+    wanted_batch = str(item.get('batch') or '').strip()
+    wanted_component = item.get('component') or ''
+    wanted_detail = item.get('detail') or ''
+    for candidate in diagnostics:
+        if candidate.get('component') != wanted_component:
+            continue
+        candidate_batch = str(candidate.get('batch') or '').strip()
+        if wanted_batch and candidate_batch and candidate_batch != wanted_batch:
+            continue
+        if wanted_detail and not _names_match(wanted_detail, candidate.get('detail') or ''):
+            continue
+        if _names_match(item.get('base') or '', candidate.get('name') or ''):
+            return candidate.get('value')
+    return None
+
+
 def _build_weight_index(entries):
     index = {}
     rows = {}
@@ -218,20 +355,22 @@ def _build_weight_index(entries):
             batch = _batch_from_any_text(item_name, rtl_template=True)
         base = _base_for_template_name(item_name)
         component = _component_for_template_name(item_name)
+        detail = _extract_parenthetical_detail(item_name)
         try:
             weight = float(row.get('weight') or 0)
         except (TypeError, ValueError):
             continue
         if weight <= 0:
             continue
-        key = _candidate_key(base, batch, component)
+        key = _candidate_key(base, batch, component, detail)
         index[key] = round(index.get(key, 0) + weight, 3)
         rows[key] = {
             'key': key,
-            'item_name': str(item_name).strip(),
+            'item_name': _display_name_with_batch(item_name, batch),
             'base': base,
             'batch': batch,
             'component': component,
+            'detail': detail,
             'weight': index[key],
         }
     return index, rows
@@ -304,7 +443,7 @@ def build_sada_scales_workbook(tokyo_path, template_path, day_name, output_date,
     day_no, template_sheet = DAY_OPTIONS[day_key]
 
     tokyo_wb = load_workbook(tokyo_path, data_only=True, keep_vba=False)
-    value_index, _diagnostics = _build_tokyo_value_index(tokyo_wb, day_no)
+    value_index, diagnostics = _build_tokyo_value_index(tokyo_wb, day_no)
     tokyo_wb.close()
 
     wb, ws = _copy_sheet_to_single_workbook(template_path, template_sheet)
@@ -343,9 +482,7 @@ def build_sada_scales_workbook(tokyo_path, template_path, day_name, output_date,
         target_row = 4 + offset
         ws.cell(target_row, 1).value = item['item_name']
 
-        planned = value_index.get(item['key'])
-        if planned is None:
-            planned = value_index.get(_candidate_key(item['base'], '', item['component']))
+        planned = _resolve_planned_value(item, value_index, diagnostics)
         if planned is not None:
             _set_cell_value(ws.cell(target_row, 2), planned)
             matched_tokyo += 1
