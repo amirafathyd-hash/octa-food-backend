@@ -4,6 +4,7 @@ from datetime import datetime
 from io import BytesIO
 
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 
 
 DAY_OPTIONS = {
@@ -27,6 +28,16 @@ STOP_WORDS = {
     'قبل', 'بعد', 'الطبخ', 'دفعه', 'دفعة', 'مع', 'بدون', 'الصوص', 'صوص',
     'الاضافي', 'اضافي', 'اضافى', 'بال', 'و',
 }
+GROUP_FILLS = [
+    'EAF4FF',
+    'FFF2CC',
+    'E2F0D9',
+    'FCE4D6',
+    'EDE7F6',
+    'DDEBF7',
+    'F4CCCC',
+    'E2F0CB',
+]
 
 
 def _cell(ws, row, col):
@@ -412,6 +423,12 @@ def _clear_row_values(ws, row):
         ws.cell(row, col).value = None
 
 
+def _apply_group_fill(ws, row, group_index):
+    fill = PatternFill('solid', fgColor=GROUP_FILLS[group_index % len(GROUP_FILLS)])
+    for col in range(1, 4):
+        ws.cell(row, col).fill = fill
+
+
 def _last_template_item_row(ws):
     for row in range(ws.max_row, 3, -1):
         if ws.cell(row, 1).value:
@@ -478,8 +495,13 @@ def build_sada_scales_workbook(tokyo_path, template_path, day_name, output_date,
 
     matched_tokyo = matched_actual = 0
     missing_tokyo = []
+    group_ids = {}
     for offset, item in enumerate(output_rows):
         target_row = 4 + offset
+        group_key = item.get('base') or item.get('item_name') or ''
+        if group_key not in group_ids:
+            group_ids[group_key] = len(group_ids)
+        _apply_group_fill(ws, target_row, group_ids[group_key])
         ws.cell(target_row, 1).value = item['item_name']
 
         planned = _resolve_planned_value(item, value_index, diagnostics)
