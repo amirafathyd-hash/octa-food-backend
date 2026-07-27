@@ -5019,7 +5019,7 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
                         wb_after_inventory,
                         today,
                         prefix='Vegetables_After_Yesterday_Inventory_',
-                        day_num_override=day_num_override,
+                        day_num_override=_inventory_sheet_day_override(day_num_override),
                     )
             except Exception as e:
                 app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
@@ -5056,7 +5056,7 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
                     wb_after_inventory,
                     today,
                     prefix='Vegetables_After_Yesterday_Inventory_',
-                    day_num_override=day_num_override,
+                    day_num_override=_inventory_sheet_day_override(day_num_override),
                 )
         except Exception as e:
             app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
@@ -5064,6 +5064,16 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
                          f'حصل خطأ أثناء توليد الصور: {e}')
     zip_buf.seek(0)
     return zip_buf
+
+
+def _inventory_sheet_day_override(day_num_override):
+    if isinstance(day_num_override, dict):
+        day_num = day_num_override.get('Summary') or next(iter(day_num_override.values()), None)
+        if day_num:
+            return {'الطلب المتبقي': day_num}
+    if day_num_override:
+        return day_num_override
+    return None
 
 
 def _vegetable_summary_rows_from_station_data(vegetable_data):
@@ -5122,6 +5132,19 @@ def _to_number(value):
 def _normalize_inventory_qty(qty, inventory_unit, order_unit):
     inv_unit = str(inventory_unit or '').strip().lower()
     out_unit = str(order_unit or '').strip().lower()
+    unit_aliases = {
+        'gm': 'gm', 'g': 'gm', 'جرام': 'gm',
+        'kg': 'kg', 'كيلو': 'kg', 'كيلوجرام': 'kg',
+        'ml': 'ml', 'مل': 'ml',
+        'l': 'l', 'liter': 'l', 'litre': 'l', 'لتر': 'l',
+        'pack': 'pack', 'باك': 'pack',
+        'box': 'box', 'بوكس': 'box',
+        'piece': 'piece', 'pcs': 'piece', 'حبة': 'piece',
+    }
+    inv_key = unit_aliases.get(inv_unit, inv_unit)
+    out_key = unit_aliases.get(out_unit, out_unit)
+    if inv_key and out_key and inv_key == out_key:
+        return qty
     if inv_unit in ('gm', 'g', 'جرام') and out_unit in ('kg', 'كيلو', 'كيلوجرام'):
         return qty / 1000.0
     if inv_unit in ('kg', 'كيلو', 'كيلوجرام') and out_unit in ('gm', 'g', 'جرام'):
@@ -5130,6 +5153,8 @@ def _normalize_inventory_qty(qty, inventory_unit, order_unit):
         return qty * 1000.0
     if inv_unit in ('ml', 'مل') and out_unit in ('l', 'liter', 'litre', 'لتر'):
         return qty / 1000.0
+    if inv_key and out_key and inv_key != out_key:
+        return None
     return qty
 
 
@@ -5183,17 +5208,15 @@ def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = 'اطلب بعد المخزون'
+    ws.title = 'الطلب المتبقي'
     ws.sheet_view.rightToLeft = True
 
-    dark_fill = PatternFill('solid', start_color='1A1A1A')
     gold_fill = PatternFill('solid', start_color='D8A83D')
     green_fill = PatternFill('solid', start_color='DDF4E8')
     red_fill = PatternFill('solid', start_color='FFE5E5')
     soft_fill = PatternFill('solid', start_color='FFF8EA')
     white_fill = PatternFill('solid', start_color='FFFFFF')
     header_font = Font(name='Tahoma', bold=True, color='FFFFFF', size=12)
-    title_font = Font(name='Tahoma', bold=True, color='FFFFFF', size=17)
     data_font = Font(name='Tahoma', size=11)
     num_font = Font(name='Tahoma', bold=True, size=11)
     thin = Side(style='thin', color='E7D2B8')
@@ -5201,34 +5224,17 @@ def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
     center = Alignment(horizontal='center', vertical='center', wrap_text=True)
     right = Alignment(horizontal='right', vertical='center', wrap_text=True)
 
-    ws.merge_cells('A1:G1')
-    ws['A1'] = f'طلبية الخضار بعد خصم مخزون أمس - {target_date}'
-    ws['A1'].fill = dark_fill
-    ws['A1'].font = title_font
-    ws['A1'].alignment = center
-    ws.row_dimensions[1].height = 34
-
-    ws.merge_cells('A2:G2')
-    if inventory:
-        ws['A2'] = f'تم الخصم من مخزون يوم {previous_date} فقط. أي مخزون بتاريخ أقدم لم يتم استخدامه.'
-    else:
-        ws['A2'] = f'لا يوجد مخزون محفوظ ليوم {previous_date}، لذلك ظهرت طلبية اليوم بدون خصم.'
-    ws['A2'].fill = soft_fill
-    ws['A2'].font = Font(name='Tahoma', bold=True, color='6B4A20', size=11)
-    ws['A2'].alignment = center
-    ws.row_dimensions[2].height = 26
-
-    headers = ['الصنف', 'طلب اليوم', 'مخزون أمس', 'اطلب المتبقي', 'الوحدة', 'حالة الخصم', 'التصنيف']
+    headers = ['الصنف', 'طلب اليوم', 'مخزون أمس', 'الطلب المتبقي', 'الوحدة', 'حالة الخصم', 'التصنيف']
     widths = [44, 16, 16, 18, 12, 22, 18]
     for col, (header, width) in enumerate(zip(headers, widths), 1):
-        cell = ws.cell(row=3, column=col, value=header)
+        cell = ws.cell(row=1, column=col, value=header)
         cell.fill = gold_fill
         cell.font = header_font
         cell.alignment = center
         cell.border = border
         ws.column_dimensions[get_column_letter(col)].width = width
 
-    for idx, row in enumerate(summary_rows, start=4):
+    for idx, row in enumerate(summary_rows, start=2):
         item_name = row.get('name') or ''
         order_qty = _to_number(row.get('daily_order'))
         order_unit = row.get('order_unit') or ''
@@ -5238,10 +5244,14 @@ def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
             if inv_record:
                 break
         raw_stock = _to_number((inv_record or {}).get('remaining_stock'))
-        stock_qty = _normalize_inventory_qty(raw_stock, (inv_record or {}).get('unit'), order_unit) if inv_record else 0.0
+        normalized_stock = _normalize_inventory_qty(raw_stock, (inv_record or {}).get('unit'), order_unit) if inv_record else 0.0
+        unit_mismatch = normalized_stock is None
+        stock_qty = 0.0 if unit_mismatch else normalized_stock
         remaining = max(order_qty - stock_qty, 0.0)
         if not inventory:
             status = 'لا يوجد مخزون أمس'
+        elif unit_mismatch:
+            status = 'وحدة مختلفة'
         elif inv_record:
             status = 'تم الخصم' if stock_qty else 'موجود بلا كمية'
         else:
@@ -5271,7 +5281,7 @@ def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
             if col in (2, 3, 4):
                 cell.number_format = '#,##0.000'
 
-    ws.freeze_panes = 'A4'
+    ws.freeze_panes = 'A2'
     return wb, previous_date
 
 
