@@ -1579,6 +1579,52 @@ def receipt_notifications_vegetables_delete(log_id):
     return jsonify({'ok': True})
 
 
+@app.route('/api/receipt-notifications/vegetables/<log_id>/rows', methods=['PATCH'])
+def receipt_notifications_vegetables_update_rows(log_id):
+    _, err = _require_auth()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    rows = body.get('rows')
+    if not isinstance(rows, list):
+        return jsonify({'error': 'صفوف الاستلام غير صحيحة'}), 400
+
+    sb = get_client()
+    found = execute_with_retry(
+        sb.table('upload_log')
+        .select('*')
+        .eq('id', log_id)
+        .eq('file_type', 'vegetables_receipt')
+        .limit(1)
+    ).data or []
+    if not found:
+        return jsonify({'error': 'لم يتم العثور على سجل الاستلام'}), 404
+
+    payload = _read_upload_log_message(found[0])
+    payload['rows'] = rows
+    payload['rows_count'] = len(rows)
+    payload['received_count'] = sum(1 for row in rows if str(row.get('received') or '').strip())
+    payload['signed_count'] = sum(1 for row in rows if str(row.get('signature') or '').strip())
+
+    def _num(value):
+        try:
+            text = str(value or '').replace(',', '').strip()
+            if not text:
+                return 0.0
+            return float(text)
+        except Exception:
+            return 0.0
+
+    payload['total_required'] = round(sum(_num(row.get('daily_order')) for row in rows), 2)
+    payload['total_received'] = round(sum(_num(row.get('received')) for row in rows), 2)
+    execute_with_retry(
+        sb.table('upload_log')
+        .update({'message': json.dumps(payload, ensure_ascii=False)})
+        .eq('id', log_id)
+    )
+    return jsonify({'ok': True, 'message': payload})
+
+
 @app.route('/api/vegetables-receipt-link/<receipt_id>', methods=['DELETE'])
 def vegetables_receipt_link_delete(receipt_id):
     _, err = _require_auth()
