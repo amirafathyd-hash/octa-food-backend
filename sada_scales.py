@@ -334,23 +334,48 @@ def _resolve_planned_value(item, value_index, diagnostics):
     if planned is not None:
         return planned
 
-    planned = value_index.get(_candidate_key(item['base'], '', item['component'], item.get('detail') or ''))
-    if planned is not None:
-        return planned
-
     wanted_batch = str(item.get('batch') or '').strip()
     wanted_component = item.get('component') or ''
     wanted_detail = item.get('detail') or ''
-    for candidate in diagnostics:
+
+    related = [
+        candidate for candidate in diagnostics
+        if candidate.get('component') == wanted_component
+        and (not wanted_detail or _names_match(wanted_detail, candidate.get('detail') or ''))
+        and _names_match(item.get('base') or '', candidate.get('name') or '')
+    ]
+    has_batch_specific = any(str(candidate.get('batch') or '').strip() for candidate in related)
+
+    # A row that came from the scales with a batch number must never borrow a
+    # no-batch total while Tokyo has batch-specific rows for the same component.
+    if not (wanted_batch and has_batch_specific):
+        planned = value_index.get(_candidate_key(item['base'], '', wanted_component, wanted_detail))
+        if planned is not None:
+            return planned
+
+    exact_batch_matches = []
+    same_part_matches = []
+    loose_matches = []
+    wanted_part = _batch_part(wanted_batch)
+    for candidate in related:
         if candidate.get('component') != wanted_component:
             continue
         candidate_batch = str(candidate.get('batch') or '').strip()
-        if wanted_batch and candidate_batch and candidate_batch != wanted_batch:
-            continue
-        if wanted_detail and not _names_match(wanted_detail, candidate.get('detail') or ''):
-            continue
-        if _names_match(item.get('base') or '', candidate.get('name') or ''):
-            return candidate.get('value')
+        if wanted_batch:
+            if candidate_batch == wanted_batch:
+                exact_batch_matches.append(candidate)
+            elif wanted_part is not None and _batch_part(candidate_batch) == wanted_part:
+                same_part_matches.append(candidate)
+            elif not candidate_batch and not has_batch_specific:
+                loose_matches.append(candidate)
+        else:
+            loose_matches.append(candidate)
+    if len(exact_batch_matches) == 1:
+        return exact_batch_matches[0].get('value')
+    if len(same_part_matches) == 1:
+        return same_part_matches[0].get('value')
+    if len(loose_matches) == 1:
+        return loose_matches[0].get('value')
     return None
 
 
@@ -392,6 +417,11 @@ def _batch_sort_value(batch):
     if not match:
         return (999, 999)
     return (int(match.group(2)), int(match.group(1)))
+
+
+def _batch_part(batch):
+    match = PART_RE.search(str(batch or ''))
+    return int(match.group(1)) if match else None
 
 
 def _component_sort_value(component):

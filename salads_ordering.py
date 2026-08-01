@@ -114,8 +114,21 @@ def _norm_text(value):
     return " ".join(str(value or "").replace("\u00a0", " ").split()).strip().lower()
 
 
+def _name_aliases(value):
+    text = str(value or "").strip()
+    aliases = {_norm_text(text)}
+    if " - " in text:
+        left, right = [part.strip() for part in text.split(" - ", 1)]
+        aliases.update({_norm_text(left), _norm_text(right), _norm_text(f"{right} - {left}")})
+    aliases.discard("")
+    return aliases
+
+
 def _extract_uploaded_counts(upload_path, known_salads):
-    known = {_norm_text(item["name"]): item for item in known_salads if item.get("name")}
+    known = {}
+    for item in known_salads:
+        for alias in _name_aliases(item.get("name")):
+            known[alias] = item
     matched = {}
     if not known:
         return matched
@@ -125,7 +138,8 @@ def _extract_uploaded_counts(upload_path, known_salads):
             for row in ws.iter_rows():
                 row_values = [cell.value for cell in row]
                 for idx, value in enumerate(row_values):
-                    key = _norm_text(value)
+                    aliases = _name_aliases(value)
+                    key = next((alias for alias in aliases if alias in known), "")
                     if key not in known or key in matched:
                         continue
                     candidates = row_values[idx + 1:idx + 5] + row_values[max(0, idx - 3):idx]
@@ -261,7 +275,7 @@ def update_salads_counts_from_upload(file_storage, template_path=SALADS_TEMPLATE
         ws = wb["User"]
         changed = 0
         for salad in current_state["salads"]:
-            key = _norm_text(salad["name"])
+            key = next((alias for alias in _name_aliases(salad["name"]) if alias in matched), "")
             if key not in matched:
                 continue
             ws[f"H{salad['row']}"] = matched[key]

@@ -17,6 +17,7 @@ import zipfile
 from pathlib import Path
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from pypdf import PdfWriter
 
 from tokyo_ordering import (
@@ -159,13 +160,32 @@ def _garnish_range(ws_values) -> str | None:
 
 
 def _marination_range(ws_values) -> str | None:
-    last = 4
-    for row in range(5, min(ws_values.max_row, 60) + 1):
-        if str(ws_values.cell(row, 36).value or '').strip():
-            last = row
-        elif last >= 5:
+    header_row = None
+    header_col = None
+    for row in range(1, min(ws_values.max_row, 40) + 1):
+        for col in range(30, min(ws_values.max_column, 55) + 1):
+            if str(ws_values.cell(row, col).value or '').strip().lower() == 'ingredient':
+                header_row = row
+                header_col = col
+                break
+        if header_row:
             break
-    return f'AJ1:AP{last}' if last >= 5 else None
+    if not header_row or not header_col:
+        return None
+
+    last = header_row
+    for row in range(header_row + 1, min(ws_values.max_row, header_row + 80) + 1):
+        if str(ws_values.cell(row, header_col).value or '').strip():
+            last = row
+        elif last > header_row:
+            break
+    if last <= header_row:
+        return None
+    start_col = max(1, header_col - 1)
+    end_col = min(ws_values.max_column, header_col + 9)
+    start_letter = get_column_letter(start_col)
+    end_letter = get_column_letter(end_col)
+    return f'{start_letter}1:{end_letter}{last}'
 
 
 def _page_setup(ws, day_no: int, section: str) -> None:

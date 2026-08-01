@@ -139,12 +139,21 @@ def _norm_text(value):
     return " ".join(str(value or "").replace("\u00a0", " ").split()).strip().lower()
 
 
+def _name_aliases(value):
+    text = str(value or "").strip()
+    aliases = {_norm_text(text)}
+    if " - " in text:
+        left, right = [part.strip() for part in text.split(" - ", 1)]
+        aliases.update({_norm_text(left), _norm_text(right), _norm_text(f"{right} - {left}")})
+    aliases.discard("")
+    return aliases
+
+
 def _extract_uploaded_counts(upload_path, known_sauces):
     known = {}
     for item in known_sauces:
         for value in (item.get("name"), item.get("sheet")):
-            key = _norm_text(value)
-            if key:
+            for key in _name_aliases(value):
                 known[key] = item
     matched = {}
     if not known:
@@ -155,7 +164,8 @@ def _extract_uploaded_counts(upload_path, known_sauces):
             for row in ws.iter_rows():
                 row_values = [cell.value for cell in row]
                 for idx, value in enumerate(row_values):
-                    key = _norm_text(value)
+                    aliases = _name_aliases(value)
+                    key = next((alias for alias in aliases if alias in known), "")
                     if key not in known or key in matched:
                         continue
                     candidates = row_values[idx + 1:idx + 5] + row_values[max(0, idx - 3):idx]
@@ -282,7 +292,7 @@ def update_sauce_counts_from_upload(file_storage, template_path=SAUCE_TEMPLATE_P
     try:
         changed = 0
         for item in current_state["sauce"]:
-            keys = [_norm_text(item["name"]), _norm_text(item["sheet"])]
+            keys = list(_name_aliases(item["name"])) + list(_name_aliases(item["sheet"]))
             value = next((matched[key] for key in keys if key in matched), None)
             if value is None or item["sheet"] not in wb.sheetnames:
                 continue
@@ -451,9 +461,10 @@ def replace_sauce_template(file_storage, template_path=SAUCE_TEMPLATE_PATH):
     file_storage.save(upload_path)
     wb = load_workbook(upload_path, data_only=False, keep_vba=True)
     try:
-        for required in ["List of Meals", "Ordering"]:
-            if required not in wb.sheetnames:
-                raise ValueError(f"الشيت الجديد لازم يحتوي على {required}")
+        if "Ordering" not in wb.sheetnames:
+            raise ValueError("الشيت الجديد لازم يحتوي على Ordering")
+        if not _recipe_sheet_names(wb):
+            raise ValueError("الشيت الجديد لازم يحتوي على وصفة صوص واحدة على الأقل")
     finally:
         wb.close()
     shutil.copyfile(upload_path, template_path)
