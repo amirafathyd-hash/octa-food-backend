@@ -83,6 +83,12 @@ from xlsx_to_images import add_workbook_images_to_zip
 from veg_screenshot_ocr import extract_vegetable_rows
 from invoice_receipts_api import invoice_receipts_bp, configure_invoice_receipts
 from veg_comparison import veg_comparison_bp, configure_veg_comparison, group_veg_daily_rows
+from price_center import (
+    build_price_items_workbook,
+    extract_price_items_from_workbook,
+    normalize_price_item_name,
+    price_item_key,
+)
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
@@ -2432,6 +2438,194 @@ def _require_auth():
 
 configure_invoice_receipts(_require_auth)
 configure_veg_comparison(_require_auth)
+
+
+def _price_center_row_from_payload(payload, partial=False):
+    item_name = normalize_price_item_name(payload.get('item_name'))
+    raw_price = payload.get('order_unit_price', payload.get('price'))
+    updates = {}
+    if item_name:
+        updates['item_name'] = item_name
+        updates['item_key'] = price_item_key(item_name)
+    elif not partial:
+        raise ValueError('اسم الصنف مطلوب')
+    if raw_price is not None and raw_price != '':
+        try:
+            updates['order_unit_price'] = float(str(raw_price).replace(',', '').strip())
+        except Exception:
+            raise ValueError('سعر وحدة الطلب غير صحيح')
+    elif not partial:
+        raise ValueError('سعر وحدة الطلب مطلوب')
+    updates['updated_at'] = datetime.now(timezone.utc).isoformat()
+    return updates
+
+
+@app.route('/api/price-center/items', methods=['GET'])
+def price_center_items_list():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('price_center_items')
+            .select('id, item_name, item_key, order_unit_price, source_file, active, created_at, updated_at')
+            .eq('active', True)
+            .order('item_name')
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تحميل مركز الأسعار: {exc}'}), 400
+    return jsonify({'items': res.data or []})
+
+
+@app.route('/api/price-center/items', methods=['POST'])
+def price_center_items_add():
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    try:
+        row = _price_center_row_from_payload(payload)
+        row['active'] = True
+        row['created_at'] = row['updated_at']
+        res = execute_with_retry(
+            get_client().table('price_center_items').upsert(row, on_conflict='item_key')
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر إضافة السعر: {exc}'}), 400
+    return jsonify({'ok': True, 'item': (res.data or [row])[0]})
+
+
+@app.route('/api/price-center/items/import', methods=['POST'])
+def price_center_items_import():
+    username, err = _require_auth()
+    if err:
+        return err
+    uploaded = request.files.get('file')
+    if not uploaded or not uploaded.filename:
+        return jsonify({'error': 'اختار ملف الأسعار أولاً'}), 400
+    try:
+        rows, skipped = extract_price_items_from_workbook(uploaded)
+    except Exception as exc:
+        return jsonify({'error': f'تعذر قراءة ملف الأسعار: {exc}'}), 400
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    source_file = uploaded.filename
+    for row in rows:
+        row['source_file'] = source_file
+        row['active'] = True
+        row['updated_at'] = now_iso
+        row.setdefault('created_at', now_iso)
+
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('price_center_items').upsert(rows, on_conflict='item_key')
+        )
+        _log(
+            'price_center_import',
+            source_file,
+            None,
+            json.dumps({'count': len(rows), 'skipped': skipped, 'by': username}, ensure_ascii=False),
+            level='info',
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر حفظ الأسعار في قاعدة البيانات: {exc}'}), 400
+    return jsonify({'ok': True, 'count': len(rows), 'skipped': skipped, 'items': res.data or rows})
+
+
+@app.route('/api/price-center/items/<int:item_id>', methods=['PUT', 'DELETE'])
+def price_center_items_item(item_id):
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    if request.method == 'DELETE':
+        try:
+            execute_with_retry(
+                sb.table('price_center_items').update({
+                    'active': False,
+                    'updated_at': datetime.now(timezone.utc).isoformat(),
+                }).eq('id', item_id)
+            )
+        except Exception as exc:
+            return jsonify({'error': f'تعذر حذف الصنف: {exc}'}), 400
+        return jsonify({'ok': True})
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        updates = _price_center_row_from_payload(payload, partial=True)
+        if len(updates) == 1:
+            return jsonify({'error': 'لا توجد تعديلات للحفظ'}), 400
+        res = execute_with_retry(sb.table('price_center_items').update(updates).eq('id', item_id))
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تعديل السعر: {exc}'}), 400
+    return jsonify({'ok': True, 'item': (res.data or [updates])[0]})
+
+
+@app.route('/api/price-center/export', methods=['GET'])
+def price_center_export():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('price_center_items')
+            .select('item_name, order_unit_price')
+            .eq('active', True)
+            .order('item_name')
+        )
+        out = build_price_items_workbook(res.data or [])
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تجهيز ملف الأسعار: {exc}'}), 400
+    return send_file(
+        out,
+        as_attachment=True,
+        download_name=f'Octa_Food_Price_Center_{datetime.now().strftime("%Y-%m-%d")}.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
+@app.route('/api/price-center/lookup', methods=['POST'])
+def price_center_lookup():
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    requested = payload.get('items') or []
+    if not isinstance(requested, list):
+        return jsonify({'error': 'قائمة الأصناف غير صحيحة'}), 400
+    keys = [price_item_key(name) for name in requested if normalize_price_item_name(name)]
+    if not keys:
+        return jsonify({'prices': {}, 'missing': []})
+    sb = get_client()
+    try:
+        res = execute_with_retry(
+            sb.table('price_center_items')
+            .select('item_name, item_key, order_unit_price')
+            .eq('active', True)
+            .in_('item_key', list(dict.fromkeys(keys)))
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر البحث في مركز الأسعار: {exc}'}), 400
+    found = {row.get('item_key'): row for row in (res.data or [])}
+    prices = {}
+    missing = []
+    for name in requested:
+        clean = normalize_price_item_name(name)
+        if not clean:
+            continue
+        key = price_item_key(clean)
+        row = found.get(key)
+        if row:
+            prices[clean] = {
+                'item_name': row.get('item_name'),
+                'order_unit_price': row.get('order_unit_price'),
+            }
+        else:
+            missing.append(clean)
+    return jsonify({'prices': prices, 'missing': missing})
 
 
 def _default_permissions_for_role(role):
