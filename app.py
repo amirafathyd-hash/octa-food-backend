@@ -89,6 +89,11 @@ from price_center import (
     normalize_price_item_name,
     price_item_key,
 )
+from receipt_pricing import (
+    build_receipt_cost_workbook,
+    parse_external_receipt_workbook,
+    price_receipt_rows,
+)
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
@@ -2626,6 +2631,72 @@ def price_center_lookup():
         else:
             missing.append(clean)
     return jsonify({'prices': prices, 'missing': missing})
+
+
+def _active_price_center_rows():
+    res = execute_with_retry(
+        get_client().table('price_center_items')
+        .select('item_name, item_key, order_unit_price')
+        .eq('active', True)
+        .order('item_name')
+    )
+    return res.data or []
+
+
+@app.route('/api/price-center/receipt-cost', methods=['POST'])
+def price_center_receipt_cost():
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    rows = payload.get('rows') or []
+    if not isinstance(rows, list) or not rows:
+        return jsonify({'error': 'لا توجد صفوف استلام لحساب الأسعار'}), 400
+    try:
+        priced_rows, missing = price_receipt_rows(rows, _active_price_center_rows())
+        out = build_receipt_cost_workbook(
+            priced_rows,
+            title=payload.get('title') or 'تقرير الاستلام بالأسعار',
+            subtitle=payload.get('subtitle') or '',
+            missing=missing,
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر حساب الاستلام بالأسعار: {exc}'}), 400
+    stamp = datetime.now().strftime('%Y-%m-%d')
+    return send_file(
+        out,
+        as_attachment=True,
+        download_name=f'Receipt_Cost_{stamp}.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
+@app.route('/api/price-center/external-receipt-cost', methods=['POST'])
+def price_center_external_receipt_cost():
+    _, err = _require_auth()
+    if err:
+        return err
+    uploaded = request.files.get('file')
+    if not uploaded or not uploaded.filename:
+        return jsonify({'error': 'اختار شيت الاستلام الخارجي أولاً'}), 400
+    try:
+        rows = parse_external_receipt_workbook(uploaded)
+        priced_rows, missing = price_receipt_rows(rows, _active_price_center_rows())
+        out = build_receipt_cost_workbook(
+            priced_rows,
+            title='تقرير شيت استلام خارجي بالأسعار',
+            subtitle=uploaded.filename,
+            missing=missing,
+        )
+    except Exception as exc:
+        return jsonify({'error': f'تعذر حساب الشيت الخارجي بالأسعار: {exc}'}), 400
+    safe_name = re.sub(r'[^A-Za-z0-9_-]+', '_', os.path.splitext(uploaded.filename or 'external_receipt')[0]).strip('_')
+    return send_file(
+        out,
+        as_attachment=True,
+        download_name=f'{safe_name or "External_Receipt"}_Cost.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
 
 
 def _default_permissions_for_role(role):
