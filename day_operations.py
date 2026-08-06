@@ -1,4 +1,5 @@
 import io
+import html
 import json
 import os
 import re
@@ -29,8 +30,15 @@ DAY_OPS_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), 'data', 'day_ops_
 DAY_OPS_TEMPLATES = {
     'breakfast': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Tokyo_Breakfast.xlsm'),
     'dessert': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Tokyo_Dessert_Ordering.xlsm'),
+    'rice': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Rice_Ordering_Sheet.xlsm'),
+    'sauce': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Tokyo_Sauce.xlsm'),
     'tokyo': os.path.join(DAY_OPS_TEMPLATE_DIR, 'tokyo_ordering_template.xlsm'),
 }
+PUBLIC_SITE_BASE = (
+    os.environ.get('PUBLIC_SITE_BASE')
+    or os.environ.get('APP_PUBLIC_URL')
+    or 'https://octafood-system.com'
+).rstrip('/')
 
 TOKYO_STATION_SHEETS = OrderedDict([
     ('Hot Section', 'All_Ingredients'),
@@ -58,6 +66,21 @@ DAY_OPS_NAME_ALIASES = {
     'club sandwich': 'Club Sandwich',
     'saffron cake': 'Saffron Cake',
     'orange cake': 'Orange Cake',
+    'أومليت خضار': 'Omelette Vegetable and Mushroom',
+    'اومليت خضار': 'Omelette Vegetable and Mushroom',
+    'egg and oatmeal pie': 'Oatmeal Egg Pie',
+    'oatmeal egg pie': 'Oatmeal Egg Pie',
+    'turkey croissant': 'Croissant Turkey',
+    'banoffee pie': 'Baboffee Pie',
+    'banoffee': 'Baboffee Pie',
+    'baboffee pie': 'Baboffee Pie',
+    'san sebastian cheese cake': 'Sabestien',
+    'san sebastian cheesecake': 'Sabestien',
+    'san sebastian': 'Sabestien',
+    'rosemary brownie bites': 'Brownie',
+    'brownie bites': 'Brownie',
+    'chocolate cake': 'Chocolate Profiterole',
+    'chocolate profiterole': 'Chocolate Profiterole',
 }
 
 WORKER_LINKS = [
@@ -67,11 +90,22 @@ WORKER_LINKS = [
 ]
 
 
+def _absolute_worker_url(url):
+    raw = str(url or '').strip()
+    if not raw:
+        return ''
+    if raw.startswith(('http://', 'https://', 'mailto:', 'tel:')):
+        return raw
+    if raw.startswith('/'):
+        return f'{PUBLIC_SITE_BASE}{raw}'
+    return f'{PUBLIC_SITE_BASE}/{raw.lstrip("./")}'
+
+
 def _static_worker_links():
     return [
         {
             'title': title,
-            'url': href,
+            'url': _absolute_worker_url(href),
             'description': desc,
             'worker_name': 'تشغيل النظام',
             'username': '',
@@ -86,7 +120,7 @@ def _public_worker_links(worker_links):
     for link in worker_links:
         public_links.append({
             'title': link.get('title') or '',
-            'url': link.get('url') or '',
+            'url': _absolute_worker_url(link.get('url')),
             'description': link.get('description') or '',
             'worker_name': link.get('worker_name') or 'تشغيل النظام',
             'username': link.get('username') or '',
@@ -109,7 +143,7 @@ def _load_worker_links():
         for row in res.data or []:
             links.append({
                 'title': row.get('task_title') or 'مهمة عامل',
-                'url': row.get('target_url') or '',
+                'url': _absolute_worker_url(row.get('target_url')),
                 'description': 'رابط عامل نشط',
                 'worker_name': row.get('worker_name') or '',
                 'username': row.get('username') or '',
@@ -395,8 +429,35 @@ def _day_no(day_label):
     return DAY_LABEL_TO_NO.get(str(day_label or '').strip()) or 1
 
 
+def _clean_side_name(value):
+    text = str(value or '').strip()
+    if not text or text in {'-', 'بدون', 'بدون صوص', 'None', 'nan'}:
+        return ''
+    return text
+
+
+def _looks_like_rice(value):
+    text = _norm_name(value)
+    return bool(text) and ('رز' in text or 'rice' in text)
+
+
+def _looks_like_sauce(value):
+    text = _norm_name(value)
+    sauce_terms = (
+        'صوص', 'sauce', 'طحينة', 'tahina', 'tahini', 'دقوس',
+        'زبادي', 'yogurt', 'كوكتيل', 'cocktail', 'coctail',
+        'herbal', 'red sauce', 'cucumber',
+    )
+    return bool(text) and any(term in text for term in sauce_terms)
+
+
 def _counts_by_station(dont_use_rows):
-    counts = {'breakfast': defaultdict(float), 'dessert': defaultdict(float)}
+    counts = {
+        'breakfast': defaultdict(float),
+        'dessert': defaultdict(float),
+        'rice': defaultdict(float),
+        'sauce': defaultdict(float),
+    }
     for row in dont_use_rows:
         category = str(row.get('التصنيف') or '')
         protein = row.get('Protein') or row.get('الاسم الإنجليزي') or ''
@@ -409,36 +470,54 @@ def _counts_by_station(dont_use_rows):
             counts['breakfast'][str(protein).strip()] += count
         elif 'حلى' in category or 'حلويات' in category:
             counts['dessert'][str(protein).strip()] += count
+        side = _clean_side_name(row.get('Side') or row.get('الصوص / الجانب') or row.get('Final_Side'))
+        if side and _looks_like_rice(side):
+            counts['rice'][side] += count
+        if side and _looks_like_sauce(side):
+            counts['sauce'][side] += count
     return counts
 
 
-def _match_template_sheets(template_path, counts):
+def _sheet_lookup_candidates(name):
+    key = _norm_name(name)
+    compact = re.sub(r'[^a-z0-9\u0600-\u06ff]+', '', key)
+    return key, compact
+
+
+def _match_sheet_name(sheet_by_norm, wanted):
+    key, compact = _sheet_lookup_candidates(wanted)
+    if key in sheet_by_norm:
+        return sheet_by_norm[key]
+    if not compact:
+        return None
+    for sheet_key, sheet in sheet_by_norm.items():
+        sheet_compact = re.sub(r'[^a-z0-9\u0600-\u06ff]+', '', sheet_key)
+        if compact == sheet_compact or compact in sheet_compact or sheet_compact in compact:
+            return sheet
+    return None
+
+
+def _template_sheet_lookup(template_path, include_ordering=False):
     from openpyxl import load_workbook
 
-    if not os.path.exists(template_path) or not counts:
-        return [], sorted(counts)
+    if not os.path.exists(template_path):
+        return {}
     wb = load_workbook(template_path, read_only=True, data_only=True, keep_vba=True)
     try:
-        sheet_by_norm = {_norm_name(name): name for name in wb.sheetnames if name != 'Ordering'}
+        return {
+            _norm_name(name): name
+            for name in wb.sheetnames
+            if include_ordering or name != 'Ordering'
+        }
     finally:
         wb.close()
-    edits = []
-    unmatched = []
-    for name, count in counts.items():
-        wanted = DAY_OPS_NAME_ALIASES.get(_norm_name(name), name)
-        sheet = sheet_by_norm.get(_norm_name(wanted))
-        if not sheet:
-            unmatched.append(name)
-            continue
-        edits.append({'sheet': sheet, 'address': 'V1', 'value': count})
-    return edits, unmatched
 
 
-def _match_dessert_ordering_edits(template_path, counts):
+def _dessert_ordering_lookup(template_path):
     from openpyxl import load_workbook
 
-    if not os.path.exists(template_path) or not counts:
-        return [], sorted(counts)
+    if not os.path.exists(template_path):
+        return {}
     wb = load_workbook(template_path, read_only=True, data_only=True, keep_vba=True)
     try:
         ws = wb['Ordering']
@@ -450,13 +529,106 @@ def _match_dessert_ordering_edits(template_path, counts):
                 key = _norm_name(value)
                 if key:
                     rows_by_norm[key] = row
+        return rows_by_norm
     finally:
         wb.close()
+
+
+def _count_value(pair, prefer='count'):
+    if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+        count, grams = pair[0], pair[1]
+    else:
+        count, grams = pair, 0
+    count = _num(count)
+    grams = _num(grams)
+    if prefer == 'grams':
+        return grams or count
+    return count or grams
+
+
+def _merge_tokyo_component_counts(counts, tokyo_totals):
+    """Use the one uploaded day sheet as a second source for station templates.
+
+    The subscriber invoice has breakfast/dessert categories, but rice/sauce
+    often arrive only through the Tokyo recipe mapping. This merge is additive
+    only where a station has no direct count yet, so existing station behavior
+    stays stable.
+    """
+    added = defaultdict(list)
+    if not tokyo_totals:
+        return added
+
+    station_lookups = {
+        'breakfast': _template_sheet_lookup(DAY_OPS_TEMPLATES['breakfast']),
+        'rice': _template_sheet_lookup(DAY_OPS_TEMPLATES['rice']),
+        'sauce': _template_sheet_lookup(DAY_OPS_TEMPLATES['sauce']),
+    }
+    dessert_lookup = _dessert_ordering_lookup(DAY_OPS_TEMPLATES['dessert'])
+
+    direct_station_has_data = {
+        'breakfast': bool(counts.get('breakfast')),
+        'dessert': bool(counts.get('dessert')),
+    }
+
+    for target, pair in (tokyo_totals or {}).items():
+        name = str(target or '').strip()
+        if not name:
+            continue
+        wanted = DAY_OPS_NAME_ALIASES.get(_norm_name(name), name)
+
+        rice_sheet = _match_sheet_name(station_lookups['rice'], wanted)
+        if rice_sheet:
+            counts['rice'][name] += _count_value(pair)
+            added['rice'].append(name)
+            continue
+
+        sauce_sheet = _match_sheet_name(station_lookups['sauce'], wanted)
+        if sauce_sheet:
+            counts['sauce'][name] += _count_value(pair)
+            added['sauce'].append(name)
+            continue
+
+        if not direct_station_has_data['breakfast']:
+            breakfast_sheet = _match_sheet_name(station_lookups['breakfast'], wanted)
+            if breakfast_sheet:
+                counts['breakfast'][name] += _count_value(pair)
+                added['breakfast'].append(name)
+                continue
+
+        if not direct_station_has_data['dessert']:
+            dessert_row = _match_sheet_name(dessert_lookup, wanted)
+            if dessert_row:
+                counts['dessert'][name] += _count_value(pair)
+                added['dessert'].append(name)
+
+    return added
+
+
+def _match_template_sheets(template_path, counts, target_cell='V1'):
+    if not os.path.exists(template_path) or not counts:
+        return [], sorted(counts)
+    sheet_by_norm = _template_sheet_lookup(template_path)
     edits = []
     unmatched = []
     for name, count in counts.items():
         wanted = DAY_OPS_NAME_ALIASES.get(_norm_name(name), name)
-        row = rows_by_norm.get(_norm_name(wanted))
+        sheet = _match_sheet_name(sheet_by_norm, wanted)
+        if not sheet:
+            unmatched.append(name)
+            continue
+        edits.append({'sheet': sheet, 'address': target_cell, 'value': count})
+    return edits, unmatched
+
+
+def _match_dessert_ordering_edits(template_path, counts):
+    if not os.path.exists(template_path) or not counts:
+        return [], sorted(counts)
+    rows_by_norm = _dessert_ordering_lookup(template_path)
+    edits = []
+    unmatched = []
+    for name, count in counts.items():
+        wanted = DAY_OPS_NAME_ALIASES.get(_norm_name(name), name)
+        row = _match_sheet_name(rows_by_norm, wanted)
         if not row:
             unmatched.append(name)
             continue
@@ -510,23 +682,72 @@ def _export_visible_sheet_pdf(workbook_path, sheet_name='Ordering'):
     return os.path.join(out_dir, os.path.splitext(os.path.basename(out_xlsx))[0] + '.pdf')
 
 
-def _generate_station_pdfs(day_label, dont_use_rows):
+def _updated_template_workbook(template_path, edits, day_no=None):
+    from openpyxl import load_workbook
+    from breakfast_ordering import recalc_workbook_to_xlsx
+
+    wb = load_workbook(template_path, data_only=False, keep_vba=True)
+    try:
+        if day_no and 'Ordering' in wb.sheetnames:
+            wb['Ordering']['R1'] = day_no
+        for edit in edits:
+            sheet_name = edit.get('sheet')
+            address = edit.get('address') or 'V1'
+            if sheet_name in wb.sheetnames:
+                wb[sheet_name][address] = edit.get('value') or 0
+        out_path = tempfile.NamedTemporaryFile(suffix='.xlsm', delete=False).name
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+        wb.calculation.calcMode = 'auto'
+        wb.save(out_path)
+    finally:
+        wb.close()
+    return recalc_workbook_to_xlsx(out_path)
+
+
+def _generate_station_pdfs(day_label, dont_use_rows, file_storage=None):
     outputs = []
     image_sources = []
     reports = []
     counts = _counts_by_station(dont_use_rows)
     day_no = _day_no(day_label)
+    tokyo_component_report = None
+
+    if file_storage is not None:
+        try:
+            file_storage.seek(0)
+            _tokyo_day_no, tokyo_totals, tokyo_input_report = read_day_file_payload(file_storage)
+            tokyo_added = _merge_tokyo_component_counts(counts, tokyo_totals)
+            tokyo_component_report = {
+                'station': 'tokyo_component_source',
+                'source_report': tokyo_input_report,
+                'added_counts': {key: len(value) for key, value in tokyo_added.items()},
+            }
+        except Exception as exc:
+            tokyo_component_report = {
+                'station': 'tokyo_component_source',
+                'error': str(exc),
+            }
+        finally:
+            try:
+                file_storage.seek(0)
+            except Exception:
+                pass
 
     breakfast_template = DAY_OPS_TEMPLATES['breakfast']
     breakfast_edits, breakfast_unmatched = _match_template_sheets(breakfast_template, counts['breakfast'])
     if breakfast_edits:
         try:
-            from breakfast_ordering import export_breakfast_excel_with_edits
+            from breakfast_ordering import export_breakfast_excel_with_edits, export_breakfast_pdf_with_edits
             xlsx_path, report = export_breakfast_excel_with_edits(
                 breakfast_edits,
                 template_path=breakfast_template,
             )
-            pdf_path = _export_visible_sheet_pdf(xlsx_path, 'Ordering')
+            pdf_path, pdf_report = export_breakfast_pdf_with_edits(
+                breakfast_edits,
+                day_no=day_no,
+                template_path=breakfast_template,
+            )
             outputs.append((f'Day{day_no}_Breakfast.pdf', pdf_path))
             image_sources.append(('Breakfast', xlsx_path))
             reports.append({
@@ -534,6 +755,7 @@ def _generate_station_pdfs(day_label, dont_use_rows):
                 'matched_count': len(breakfast_edits),
                 'unmatched': breakfast_unmatched,
                 **(report or {}),
+                'pdf': pdf_report,
             })
         except Exception as exc:
             reports.append({
@@ -549,12 +771,15 @@ def _generate_station_pdfs(day_label, dont_use_rows):
     dessert_edits, dessert_unmatched = _match_dessert_ordering_edits(dessert_template, counts['dessert'])
     if dessert_edits:
         try:
-            from dessert_ordering import export_dessert_excel_with_edits
+            from dessert_ordering import export_dessert_excel_with_edits, export_dessert_pdf_with_edits
             xlsx_path, report = export_dessert_excel_with_edits(
                 dessert_edits,
                 template_path=dessert_template,
             )
-            pdf_path = _export_visible_sheet_pdf(xlsx_path, 'Ordering')
+            pdf_path, pdf_report = export_dessert_pdf_with_edits(
+                dessert_edits,
+                template_path=dessert_template,
+            )
             outputs.append((f'Day{day_no}_Dessert.pdf', pdf_path))
             image_sources.append(('Dessert', xlsx_path))
             reports.append({
@@ -562,6 +787,7 @@ def _generate_station_pdfs(day_label, dont_use_rows):
                 'matched_count': len(dessert_edits),
                 'unmatched': dessert_unmatched,
                 **(report or {}),
+                'pdf': pdf_report,
             })
         except Exception as exc:
             reports.append({
@@ -573,6 +799,65 @@ def _generate_station_pdfs(day_label, dont_use_rows):
     elif counts['dessert']:
         reports.append({'station': 'dessert', 'matched_count': 0, 'unmatched': dessert_unmatched})
 
+    rice_template = DAY_OPS_TEMPLATES['rice']
+    rice_edits, rice_unmatched = _match_template_sheets(rice_template, counts['rice'], target_cell='Z1')
+    if rice_edits:
+        try:
+            xlsx_path = _updated_template_workbook(rice_template, rice_edits, day_no=day_no)
+            pdf_path = _export_visible_sheet_pdf(xlsx_path, 'Ordering')
+            outputs.append((f'Day{day_no}_Rice.pdf', pdf_path))
+            image_sources.append(('Rice', xlsx_path))
+            reports.append({
+                'station': 'rice',
+                'matched_count': len(rice_edits),
+                'unmatched': rice_unmatched,
+            })
+        except Exception as exc:
+            reports.append({
+                'station': 'rice',
+                'matched_count': len(rice_edits),
+                'unmatched': rice_unmatched,
+                'error': str(exc),
+            })
+    elif counts['rice']:
+        reports.append({'station': 'rice', 'matched_count': 0, 'unmatched': rice_unmatched})
+
+    sauce_template = DAY_OPS_TEMPLATES['sauce']
+    sauce_edits, sauce_unmatched = _match_template_sheets(sauce_template, counts['sauce'], target_cell='Q19')
+    if sauce_edits:
+        try:
+            from sauce_ordering import export_sauce_excel_with_edits, export_sauce_pdf_with_edits
+            xlsx_path, report = export_sauce_excel_with_edits(
+                sauce_edits,
+                template_path=sauce_template,
+            )
+            pdf_path, pdf_report = export_sauce_pdf_with_edits(
+                sauce_edits,
+                day_no=day_no,
+                template_path=sauce_template,
+            )
+            outputs.append((f'Day{day_no}_Sauce.pdf', pdf_path))
+            image_sources.append(('Sauce', xlsx_path))
+            reports.append({
+                'station': 'sauce',
+                'matched_count': len(sauce_edits),
+                'unmatched': sauce_unmatched,
+                **(report or {}),
+                'pdf': pdf_report,
+            })
+        except Exception as exc:
+            reports.append({
+                'station': 'sauce',
+                'matched_count': len(sauce_edits),
+                'unmatched': sauce_unmatched,
+                'error': str(exc),
+            })
+    elif counts['sauce']:
+        reports.append({'station': 'sauce', 'matched_count': 0, 'unmatched': sauce_unmatched})
+
+    if tokyo_component_report:
+        reports.insert(0, tokyo_component_report)
+
     return outputs, image_sources, reports
 
 
@@ -580,6 +865,18 @@ def _append_rows(ws, headers, rows):
     ws.append(headers)
     for row in rows:
         ws.append(row)
+
+
+def _activate_url_cells(ws, column=4, start_row=2):
+    for row_idx in range(start_row, ws.max_row + 1):
+        cell = ws.cell(row=row_idx, column=column)
+        url = _absolute_worker_url(cell.value)
+        if not url:
+            continue
+        cell.value = url
+        cell.hyperlink = url
+        cell.font = Font(name='Arial', color='0563C1', underline='single', size=11)
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
 
 def _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_order, report, worker_links):
@@ -652,6 +949,7 @@ def _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_ord
         for link in worker_links
     ])
     _style_sheet(ws)
+    _activate_url_cells(ws)
 
     inferred = (report.get('inferred_items') or [])
     if inferred:
@@ -691,6 +989,7 @@ def _build_worker_links_workbook(day_label, worker_links):
         for link in worker_links
     ])
     _style_sheet(ws)
+    _activate_url_cells(ws)
 
     info = wb.create_sheet('معلومات')
     _append_rows(info, ['البند', 'القيمة'], [
@@ -772,10 +1071,17 @@ def _build_station_outputs_workbook(day_label, dont_use_rows):
 
 
 def _worker_links_html(day_label, worker_links):
-    rows = '\n'.join(
-        f'<a class="link" href="{link.get("url") or "#"}"><b>{link.get("title") or ""}</b><span>{link.get("worker_name") or "تشغيل النظام"} · {link.get("description") or ""}</span></a>'
-        for link in worker_links
-    )
+    rows_parts = []
+    for link in worker_links:
+        url = html.escape(_absolute_worker_url(link.get('url')) or '#', quote=True)
+        title = html.escape(str(link.get('title') or ''), quote=True)
+        worker = html.escape(str(link.get('worker_name') or 'تشغيل النظام'), quote=True)
+        desc = html.escape(str(link.get('description') or ''), quote=True)
+        rows_parts.append(
+            f'<a class="link" href="{url}" target="_blank" rel="noopener">'
+            f'<b>{title}</b><span>{worker} · {desc}</span></a>'
+        )
+    rows = '\n'.join(rows_parts)
     return f"""<!doctype html>
 <html lang="ar" dir="rtl">
 <meta charset="utf-8">
@@ -827,13 +1133,16 @@ def process_day_operations(file_storage, day_label_override=None):
         'worker_links_count': len(worker_links),
         'worker_links': _public_worker_links(worker_links),
         'station_outputs_note': (
-            'مخرجات المحطات الدقيقة مثل Breakfast وDesserts وHot Section وRice وSauce '
-            'تعتمد على قوالب المحطات الأصلية/ملف توكيو ووصفات اليوم. الملف الحالي '
-            'يعرض تجميع تشغيل أولي من فاتورة المشتركين فقط إلى أن يتم ربط نفس قوالب المحطات.'
+            'مخرجات المحطات يتم توليدها من قوالب Breakfast/Dessert/Rice/Sauce عند وجود أسماء '
+            'قابلة للمطابقة من شيت اليوم، وأي صنف غير مطابق يظهر في manifest للمراجعة.'
         ),
     }
 
-    station_pdf_outputs, station_image_sources, station_pdf_reports = _generate_station_pdfs(day_label, dont_use_rows)
+    station_pdf_outputs, station_image_sources, station_pdf_reports = _generate_station_pdfs(
+        day_label,
+        dont_use_rows,
+        file_storage=file_storage,
+    )
     full_report['station_pdfs'] = station_pdf_reports
     for filename, _path in station_pdf_outputs:
         full_report['files'].append(f'02_PDF_المحطات_الجاهزة/{filename}')
