@@ -94,6 +94,7 @@ from receipt_pricing import (
     parse_external_receipt_workbook,
     price_receipt_rows,
 )
+from kitchen_live import register_kitchen_live_routes
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
@@ -112,6 +113,7 @@ from appointments_api import appointments_bp, send_push_to_all
 app.register_blueprint(appointments_bp)
 app.register_blueprint(invoice_receipts_bp)
 app.register_blueprint(veg_comparison_bp)
+register_kitchen_live_routes(app)
 
 
 @app.after_request
