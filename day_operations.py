@@ -810,12 +810,18 @@ def process_day_operations(file_storage, day_label_override=None):
         out_path=tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False).name,
     )
     ops_wb, ops_summary = _build_operations_workbook(day_label, dont_use_rows, pivot_rows, package_order, report, worker_links)
+    station_outputs_wb = _build_station_outputs_workbook(day_label, dont_use_rows)
+    worker_links_wb = _build_worker_links_workbook(day_label, worker_links)
 
     full_report = {
         **report,
         'generated_at': datetime.now().isoformat(timespec='seconds'),
         'files': [
             f'01_محطة_القرار/ملف اتخاذ القرار - {day_label}.xlsx',
+            f'00_لوحة_تشغيل_اليوم/ملخص تشغيل اليوم - {day_label}.xlsx',
+            f'06_ملخص_المحطات_من_الشيت/تجميع المحطات من الفاتورة - {day_label}.xlsx',
+            f'07_روابط_العاملين/روابط العاملين - {day_label}.xlsx',
+            f'07_روابط_العاملين/روابط تشغيل اليوم - {day_label}.html',
         ],
         'operations': ops_summary,
         'worker_links_count': len(worker_links),
@@ -877,8 +883,28 @@ def process_day_operations(file_storage, day_label_override=None):
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        ops_buf = io.BytesIO()
+        ops_wb.save(ops_buf)
+        ops_buf.seek(0)
+        zf.writestr(f'00_لوحة_تشغيل_اليوم/ملخص تشغيل اليوم - {day_label}.xlsx', ops_buf.getvalue())
+
         with open(decision_path, 'rb') as fh:
             zf.writestr(f'01_محطة_القرار/ملف اتخاذ القرار - {day_label}.xlsx', fh.read())
+
+        station_buf = io.BytesIO()
+        station_outputs_wb.save(station_buf)
+        station_buf.seek(0)
+        zf.writestr(f'06_ملخص_المحطات_من_الشيت/تجميع المحطات من الفاتورة - {day_label}.xlsx', station_buf.getvalue())
+
+        links_buf = io.BytesIO()
+        worker_links_wb.save(links_buf)
+        links_buf.seek(0)
+        zf.writestr(f'07_روابط_العاملين/روابط العاملين - {day_label}.xlsx', links_buf.getvalue())
+        zf.writestr(
+            f'07_روابط_العاملين/روابط تشغيل اليوم - {day_label}.html',
+            _worker_links_html(day_label, worker_links).encode('utf-8'),
+        )
+
         for filename, path in station_pdf_outputs:
             with open(path, 'rb') as fh:
                 zf.writestr(f'02_PDF_المحطات_الجاهزة/{filename}', fh.read())
@@ -913,6 +939,8 @@ def process_day_operations(file_storage, day_label_override=None):
                 full_report,
                 'weekly_order',
             )
+        full_report['files'].append('manifest.json')
+        zf.writestr('manifest.json', json.dumps(full_report, ensure_ascii=False, indent=2).encode('utf-8'))
     zip_buf.seek(0)
     return zip_buf, full_report
 
