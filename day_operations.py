@@ -81,6 +81,45 @@ DAY_OPS_NAME_ALIASES = {
     'brownie bites': 'Brownie',
     'chocolate cake': 'Chocolate Profiterole',
     'chocolate profiterole': 'Chocolate Profiterole',
+    'greek yogurt with oats and blueberries': 'Greek Yogurt with Oats',
+    'greek yogurt with blueberries': 'Greek Yogurt with Oats',
+    'tateema': "Ta'teema",
+    'ta teema': "Ta'teema",
+    'tuna sandwich': 'Tuna Sandwich',
+    'egg and cheese sandwich': 'Egg and Cheese Sandwich',
+    'croissant turkey': 'Croissant Turkey',
+    'رز ابيض': 'رز أبيض',
+    'white rice': 'رز أبيض',
+    'plain rice': 'رز أبيض',
+    'رز مندي': 'رز  المندى',
+    'رز المندي': 'رز  المندى',
+    'mandi rice': 'رز  المندى',
+    'rice mandi': 'رز  المندى',
+    'رز كابلي': 'رز الكابلى',
+    'رز كابلى': 'رز الكابلى',
+    'kabli rice': 'رز الكابلى',
+    'kabli': 'رز الكابلى',
+    'رز كبسة': 'رز كبسه',
+    'kabsa rice': 'رز كبسه',
+    'biryani rice': 'رز بريانى-رز زعفران',
+    'saffron rice': 'رز بريانى-رز زعفران',
+    'رز زعفران': 'رز بريانى-رز زعفران',
+    'رز برياني': 'رز بريانى-رز زعفران',
+    'رز بريانى': 'رز بريانى-رز زعفران',
+    'sayadiya rice': 'رز صيادية',
+    'رز صيادية': 'رز صيادية',
+    'jollof rice': 'رز جولوف',
+    'رز جولوف': 'رز جولوف',
+    'zurbian rice': 'رز الزربيان',
+    'رز زربيان': 'رز الزربيان',
+    'saleeq rice': 'رز السليق',
+    'رز سليق': 'رز السليق',
+    'bukhari rice': 'رز  البخارى',
+    'رز بخاري': 'رز  البخارى',
+    'mexican rice': 'رز مكسيكي',
+    'رز مكسيكي': 'رز مكسيكي',
+    'rice with nuts': 'رز بالمكسرات',
+    'رز بالمكسرات': 'رز بالمكسرات',
 }
 
 WORKER_LINKS = [
@@ -720,12 +759,14 @@ def _generate_station_pdfs(day_label, dont_use_rows, file_storage=None):
             tokyo_added = _merge_tokyo_component_counts(counts, tokyo_totals)
             tokyo_component_report = {
                 'station': 'tokyo_component_source',
+                'internal': True,
                 'source_report': tokyo_input_report,
                 'added_counts': {key: len(value) for key, value in tokyo_added.items()},
             }
         except Exception as exc:
             tokyo_component_report = {
                 'station': 'tokyo_component_source',
+                'internal': True,
                 'error': str(exc),
             }
         finally:
@@ -1143,7 +1184,16 @@ def process_day_operations(file_storage, day_label_override=None):
         dont_use_rows,
         file_storage=file_storage,
     )
-    full_report['station_pdfs'] = station_pdf_reports
+    full_report['station_pdfs'] = [
+        item for item in station_pdf_reports
+        if item.get('station') != 'tokyo_component_source' and not item.get('internal')
+    ]
+    internal_station_reports = [
+        item for item in station_pdf_reports
+        if item.get('station') == 'tokyo_component_source' or item.get('internal')
+    ]
+    if internal_station_reports:
+        full_report['station_pdf_source'] = internal_station_reports[0]
     for filename, _path in station_pdf_outputs:
         full_report['files'].append(f'02_PDF_المحطات_الجاهزة/{filename}')
 
