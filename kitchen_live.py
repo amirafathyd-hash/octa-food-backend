@@ -120,9 +120,9 @@ def _write_state(state):
 
 def _page_count(path):
     try:
-        return len(PdfReader(path).pages)
+        return max(1, len(PdfReader(path).pages))
     except Exception:
-        return 0
+        return 1
 
 
 def _station_from_filename(filename):
@@ -140,6 +140,11 @@ def _public_station_state(key, value):
     result = dict(value)
     pdf_path = os.path.join(PDF_DIR, f"{key}.pdf")
     if os.path.exists(pdf_path):
+        pages = _clamp_int(result.get("pages"), 1, 9999, 0)
+        if pages <= 0:
+            pages = _page_count(pdf_path)
+        result["pages"] = pages
+        result["page"] = _clamp_int(result.get("page"), 1, pages, 1)
         version = result.get("updated_at") or result.get("uploaded_at") or ""
         result["pdf_url"] = f"/api/kitchen-live/pdf/{key}?v={version}"
     else:
@@ -205,6 +210,7 @@ def register_kitchen_live_routes(app):
                     "pdf_name": filename,
                     "pages": pages,
                     "page": 1,
+                    "enabled": True,
                     "uploaded_at": _now_iso(),
                     "updated_at": _now_iso(),
                 })
