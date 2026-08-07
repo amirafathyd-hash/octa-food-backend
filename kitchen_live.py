@@ -1,15 +1,18 @@
 import json
 import os
+import re
 import threading
 from datetime import datetime, timezone
 
 from flask import abort, jsonify, request, send_file
+import pdfplumber
 from pypdf import PdfReader
 
 
 BASE_DIR = os.path.dirname(__file__)
 LIVE_DIR = os.path.join(BASE_DIR, "data", "kitchen_live")
 PDF_DIR = os.path.join(LIVE_DIR, "pdfs")
+CONTENT_DIR = os.path.join(LIVE_DIR, "content")
 STATE_PATH = os.path.join(LIVE_DIR, "state.json")
 _LOCK = threading.Lock()
 
@@ -66,6 +69,7 @@ def _now_iso():
 
 def _ensure_dirs():
     os.makedirs(PDF_DIR, exist_ok=True)
+    os.makedirs(CONTENT_DIR, exist_ok=True)
 
 
 def _empty_station_state(key):
@@ -125,6 +129,116 @@ def _page_count(path):
         return 1
 
 
+def _clean_cell(value):
+    text = "" if value is None else str(value)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _trim_empty_table(raw_table):
+    rows = []
+    for raw_row in raw_table or []:
+        row = [_clean_cell(cell) for cell in (raw_row or [])]
+        if any(row):
+            rows.append(row)
+    if not rows:
+        return []
+
+    width = max(len(row) for row in rows)
+    padded = [row + [""] * (width - len(row)) for row in rows]
+    useful_columns = [
+        index for index in range(width)
+        if any(row[index] for row in padded)
+    ]
+    return [[row[index] for index in useful_columns] for row in padded]
+
+
+def _page_title(lines, page_number):
+    skip_words = {"ingredient", "ingredients", "unit", "category", "items"}
+    for line in lines[:10]:
+        text = _clean_cell(line)
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered.startswith("page ") or lowered in skip_words:
+            continue
+        return text[:140]
+    return f"شاشة {page_number}"
+
+
+def _content_path(station_key):
+    return os.path.join(CONTENT_DIR, f"{station_key}.json")
+
+
+def _read_station_content(station_key):
+    path = _content_path(station_key)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _extract_pdf_content(station_key, pdf_path):
+    pages = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_number, page in enumerate(pdf.pages, start=1):
+            raw_text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
+            lines = [_clean_cell(line) for line in raw_text.splitlines() if _clean_cell(line)]
+            tables = []
+            try:
+                raw_tables = page.extract_tables({
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
+                    "intersection_tolerance": 6,
+                    "snap_tolerance": 4,
+                    "join_tolerance": 4,
+                    "edge_min_length": 8,
+                    "min_words_vertical": 2,
+                    "min_words_horizontal": 1,
+                }) or []
+            except Exception:
+                raw_tables = page.extract_tables() or []
+
+            for raw_table in raw_tables:
+                rows = _trim_empty_table(raw_table)
+                if rows:
+                    tables.append({
+                        "columns": max(len(row) for row in rows),
+                        "rows": rows,
+                    })
+
+            pages.append({
+                "number": page_number,
+                "title": _page_title(lines, page_number),
+                "lines": lines[:40],
+                "tables": tables,
+            })
+
+    content = {
+        "station": station_key,
+        "generated_at": _now_iso(),
+        "pages": pages,
+    }
+    with open(_content_path(station_key), "w", encoding="utf-8") as handle:
+        json.dump(content, handle, ensure_ascii=False, indent=2)
+    return content
+
+
+def _ensure_station_content(station_key):
+    content = _read_station_content(station_key)
+    if content:
+        return content
+    pdf_path = os.path.join(PDF_DIR, f"{station_key}.pdf")
+    if not os.path.exists(pdf_path):
+        return None
+    try:
+        return _extract_pdf_content(station_key, pdf_path)
+    except Exception:
+        return None
+
+
 def _station_from_filename(filename):
     name = (filename or "").lower().replace("-", "_").replace(" ", "_")
     original = (filename or "").lower()
@@ -139,16 +253,24 @@ def _station_from_filename(filename):
 def _public_station_state(key, value):
     result = dict(value)
     pdf_path = os.path.join(PDF_DIR, f"{key}.pdf")
+    content = _read_station_content(key)
+    content_pages = len((content or {}).get("pages") or [])
     if os.path.exists(pdf_path):
         pages = _clamp_int(result.get("pages"), 1, 9999, 0)
         if pages <= 0:
             pages = _page_count(pdf_path)
+        if content_pages:
+            pages = content_pages
         result["pages"] = pages
         result["page"] = _clamp_int(result.get("page"), 1, pages, 1)
         version = result.get("updated_at") or result.get("uploaded_at") or ""
         result["pdf_url"] = f"/api/kitchen-live/pdf/{key}?v={version}"
+        result["content_url"] = f"/api/kitchen-live/content/{key}?v={version}"
+        result["content_pages"] = content_pages
     else:
         result["pdf_url"] = ""
+        result["content_url"] = ""
+        result["content_pages"] = 0
         result["pages"] = 0
         result["page"] = 1
     return result
@@ -205,12 +327,19 @@ def register_kitchen_live_routes(app):
                 path = os.path.join(PDF_DIR, f"{station_key}.pdf")
                 file_storage.save(path)
                 pages = _page_count(path)
+                try:
+                    content = _extract_pdf_content(station_key, path)
+                    pages = max(1, len(content.get("pages") or []))
+                    extracted_at = content.get("generated_at", "")
+                except Exception:
+                    extracted_at = ""
                 current = state.get(station_key, _empty_station_state(station_key))
                 current.update({
                     "pdf_name": filename,
                     "pages": pages,
                     "page": 1,
                     "enabled": True,
+                    "extracted_at": extracted_at,
                     "uploaded_at": _now_iso(),
                     "updated_at": _now_iso(),
                 })
@@ -245,6 +374,20 @@ def register_kitchen_live_routes(app):
             _write_state(state)
             public = _public_station_state(station_key, station)
         return jsonify({"ok": True, "station": public})
+
+    @app.get("/api/kitchen-live/content/<station_key>")
+    def kitchen_live_content(station_key):
+        if station_key not in STATIONS:
+            abort(404)
+        with _LOCK:
+            state = _read_state()
+            content = _ensure_station_content(station_key)
+            station = _public_station_state(station_key, state[station_key])
+        return jsonify({
+            "ok": True,
+            "station": station,
+            "content": content or {"station": station_key, "pages": []},
+        })
 
     @app.get("/api/kitchen-live/pdf/<station_key>")
     def kitchen_live_pdf(station_key):
