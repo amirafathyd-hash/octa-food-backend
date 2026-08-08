@@ -375,6 +375,37 @@ def register_kitchen_live_routes(app):
             public = _public_station_state(station_key, station)
         return jsonify({"ok": True, "station": public})
 
+    @app.post("/api/kitchen-live/delete/<station_key>")
+    def kitchen_live_delete_content(station_key):
+        if station_key not in STATIONS:
+            abort(404)
+        with _LOCK:
+            state = _read_state()
+            station = state[station_key]
+            paths = (
+                os.path.join(PDF_DIR, f"{station_key}.pdf"),
+                _content_path(station_key),
+            )
+            try:
+                for path in paths:
+                    if os.path.exists(path):
+                        os.remove(path)
+            except OSError:
+                return jsonify({"ok": False, "error": "تعذر حذف ملف الشاشة من السيرفر"}), 500
+            station.update({
+                "pdf_name": "",
+                "pages": 0,
+                "page": 1,
+                "enabled": False,
+                "extracted_at": "",
+                "uploaded_at": "",
+                "updated_at": _now_iso(),
+            })
+            state[station_key] = station
+            _write_state(state)
+            public = _public_station_state(station_key, station)
+        return jsonify({"ok": True, "station": public})
+
     @app.get("/api/kitchen-live/content/<station_key>")
     def kitchen_live_content(station_key):
         if station_key not in STATIONS:
