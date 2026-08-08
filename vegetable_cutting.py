@@ -14,7 +14,7 @@ except ImportError:  # python-bidi 0.6.11+ exposes the Rust implementation here
     from bidi import get_display
 from flask import Blueprint, jsonify, request, send_file
 from reportlab.lib.colors import HexColor
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A1, A2, landscape
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
@@ -163,24 +163,7 @@ def _row_methods(row):
 
 def _pdf_row_height(row):
     method_count = len(_row_methods(row))
-    return max(48, 20 + method_count * 19)
-
-
-def _paginate_pdf_rows(rows, available_height):
-    pages = []
-    current_page = []
-    used_height = 0
-    for row in rows:
-        height = _pdf_row_height(row)
-        if current_page and used_height + height > available_height:
-            pages.append(current_page)
-            current_page = []
-            used_height = 0
-        current_page.append((row, height))
-        used_height += height
-    if current_page:
-        pages.append(current_page)
-    return pages
+    return max(34, 12 + method_count * 17)
 
 
 def build_cutting_pdf(payload):
@@ -191,14 +174,22 @@ def build_cutting_pdf(payload):
     if len(rows) > 500:
         raise CuttingWorkbookError("عدد الصفوف أكبر من الحد المسموح")
 
-    page_width, page_height = landscape(A4)
-    margin = 30
-    header_height = 104
-    columns_height = 32
-    footer_height = 24
-    available_rows_height = page_height - (margin * 2) - header_height - columns_height - footer_height
-    pages = _paginate_pdf_rows(rows, available_rows_height)
-    page_count = len(pages)
+    margin = 40
+    header_height = 126
+    columns_height = 40
+    footer_height = 28
+    row_heights = [_pdf_row_height(row) for row in rows]
+    required_height = (margin * 2) + header_height + columns_height + footer_height + sum(row_heights)
+    a2_width, a2_height = landscape(A2)
+    if required_height <= a2_height:
+        page_width, page_height = a2_width, a2_height
+    else:
+        a1_width, a1_height = landscape(A1)
+        if required_height <= a1_height:
+            page_width, page_height = a1_width, a1_height
+        else:
+            # Keep the promise of one page even for unusually large uploads.
+            page_width, page_height = a1_width, required_height + 20
     output = io.BytesIO()
     pdf = canvas.Canvas(output, pagesize=(page_width, page_height), pageCompression=1)
     pdf.setTitle(f"Vegetable Cutting - Day {payload.get('day_number', '')}")
@@ -206,112 +197,93 @@ def build_cutting_pdf(payload):
 
     table_left = margin
     table_width = page_width - (margin * 2)
-    icon_width = 120
-    method_width = 205
-    weight_width = 120
-    ingredient_width = table_width - icon_width - method_width - weight_width
+    cutting_width = min(510, table_width * 0.43)
+    weight_width = min(170, table_width * 0.14)
+    ingredient_width = table_width - cutting_width - weight_width
 
-    for page_index in range(page_count):
-        # Header band
-        header_y = page_height - margin - header_height
+    # Header band
+    header_y = page_height - margin - header_height
+    pdf.setFillColor(HexColor("#164F3C"))
+    pdf.roundRect(margin, header_y, table_width, header_height, 14, stroke=0, fill=1)
+    pdf.setFillColor(HexColor("#B9D94A"))
+    pdf.setFont(_PDF_FONT_BOLD, 13)
+    pdf.drawRightString(page_width - margin - 28, header_y + 94, _rtl("كشف تجهيز المطبخ"))
+    pdf.setFillColor(HexColor("#FFFFFF"))
+    pdf.setFont(_PDF_FONT_BOLD, 32)
+    day_ar = payload.get("day_name_ar") or f"يوم {payload.get('day_number', '')}"
+    pdf.drawRightString(page_width - margin - 28, header_y + 53, _rtl(day_ar))
+    pdf.setFont(_PDF_FONT_BOLD, 14)
+    pdf.setFillColor(HexColor("#CFDED7"))
+    pdf.drawRightString(page_width - margin - 28, header_y + 29, _clean_text(payload.get("day_name_en")))
+
+    pdf.setFillColor(HexColor("#FFFFFF"))
+    pdf.setFont(_PDF_FONT_BOLD, 24)
+    pdf.drawString(margin + 28, header_y + 68, f"{len(rows):,}")
+    pdf.setFont(_PDF_FONT_REGULAR, 11)
+    pdf.setFillColor(HexColor("#CFDED7"))
+    pdf.drawString(margin + 28, header_y + 48, _rtl("صنف مجمّع"))
+    pdf.setFillColor(HexColor("#FFFFFF"))
+    pdf.setFont(_PDF_FONT_BOLD, 24)
+    total_weight = sum(float(row.get("weight_grams") or 0) for row in rows)
+    pdf.drawString(margin + 155, header_y + 68, f"{total_weight:,.0f}")
+    pdf.setFont(_PDF_FONT_REGULAR, 11)
+    pdf.setFillColor(HexColor("#CFDED7"))
+    pdf.drawString(margin + 155, header_y + 48, _rtl("إجمالي جرام"))
+
+    columns_y = header_y - columns_height
+    pdf.setFillColor(HexColor("#E4EDCC"))
+    pdf.rect(table_left, columns_y, table_width, columns_height, stroke=0, fill=1)
+    pdf.setFillColor(HexColor("#234B39"))
+    pdf.setFont(_PDF_FONT_BOLD, 13)
+    pdf.drawRightString(table_left + ingredient_width - 16, columns_y + 14, _rtl("الصنف"))
+    pdf.drawCentredString(table_left + ingredient_width + weight_width / 2, columns_y + 14, _rtl("الإجمالي (جرام)"))
+    pdf.drawRightString(table_left + table_width - 18, columns_y + 14, _rtl("طريقة وشكل التقطيع"))
+
+    row_top = columns_y
+    cutting_left = table_left + ingredient_width + weight_width
+    cutting_right = table_left + table_width
+    for row_index, (row, row_height) in enumerate(zip(rows, row_heights)):
+        row_y = row_top - row_height
+        pdf.setFillColor(HexColor("#FFFFFF") if row_index % 2 == 0 else HexColor("#FBFCFA"))
+        pdf.rect(table_left, row_y, table_width, row_height, stroke=0, fill=1)
+        pdf.setStrokeColor(HexColor("#E7ECE8"))
+        pdf.setLineWidth(0.55)
+        pdf.line(table_left, row_y, table_left + table_width, row_y)
+
+        text_y = row_y + (row_height / 2) - 4
+        pdf.setFillColor(HexColor("#17211D"))
+        pdf.setFont(_PDF_FONT_BOLD, 12.5)
+        pdf.drawRightString(table_left + ingredient_width - 16, text_y, _rtl(row.get("ingredient"))[:100])
+
         pdf.setFillColor(HexColor("#164F3C"))
-        pdf.roundRect(margin, header_y, table_width, header_height, 10, stroke=0, fill=1)
-        pdf.setFillColor(HexColor("#B9D94A"))
-        pdf.setFont(_PDF_FONT_BOLD, 10)
-        pdf.drawRightString(page_width - margin - 22, header_y + 78, _rtl("كشف تجهيز المطبخ"))
-        pdf.setFillColor(HexColor("#FFFFFF"))
-        pdf.setFont(_PDF_FONT_BOLD, 24)
-        day_ar = payload.get("day_name_ar") or f"يوم {payload.get('day_number', '')}"
-        pdf.drawRightString(page_width - margin - 22, header_y + 46, _rtl(day_ar))
-        pdf.setFont(_PDF_FONT_BOLD, 11)
-        pdf.setFillColor(HexColor("#CFDED7"))
-        pdf.drawRightString(page_width - margin - 22, header_y + 27, _clean_text(payload.get("day_name_en")))
+        pdf.setFont(_PDF_FONT_BOLD, 16)
+        weight = float(row.get("weight_grams") or 0)
+        pdf.drawCentredString(table_left + ingredient_width + weight_width / 2, text_y, f"{weight:,.0f}")
 
-        pdf.setFillColor(HexColor("#FFFFFF"))
-        pdf.setFont(_PDF_FONT_BOLD, 17)
-        pdf.drawString(margin + 22, header_y + 56, f"{len(rows):,}")
-        pdf.setFont(_PDF_FONT_REGULAR, 8)
-        pdf.setFillColor(HexColor("#CFDED7"))
-        pdf.drawString(margin + 22, header_y + 42, _rtl("صنف مجمّع"))
-        pdf.setFillColor(HexColor("#FFFFFF"))
-        pdf.setFont(_PDF_FONT_BOLD, 17)
-        total_weight = sum(float(row.get("weight_grams") or 0) for row in rows)
-        pdf.drawString(margin + 112, header_y + 56, f"{total_weight:,.0f}")
-        pdf.setFont(_PDF_FONT_REGULAR, 8)
-        pdf.setFillColor(HexColor("#CFDED7"))
-        pdf.drawString(margin + 112, header_y + 42, _rtl("إجمالي جرام"))
-
-        # Column header - order is ingredient, weight, method, visual from left to right.
-        columns_y = header_y - columns_height
-        pdf.setFillColor(HexColor("#E4EDCC"))
-        pdf.rect(table_left, columns_y, table_width, columns_height, stroke=0, fill=1)
-        pdf.setFillColor(HexColor("#234B39"))
-        pdf.setFont(_PDF_FONT_BOLD, 10)
-        pdf.drawRightString(table_left + ingredient_width - 12, columns_y + 11, _rtl("الصنف"))
-        pdf.drawCentredString(table_left + ingredient_width + weight_width / 2, columns_y + 11, _rtl("الكمية (جرام)"))
-        pdf.drawRightString(table_left + ingredient_width + weight_width + method_width - 12, columns_y + 11, _rtl("طريقة التقطيع"))
-        pdf.drawCentredString(table_left + table_width - icon_width / 2, columns_y + 11, _rtl("شكل التقطيع"))
-
-        row_top = columns_y
-        for row_index, (row, row_height) in enumerate(pages[page_index]):
-            row_y = row_top - row_height
-            pdf.setFillColor(HexColor("#FFFFFF") if row_index % 2 == 0 else HexColor("#FBFCFA"))
-            pdf.rect(table_left, row_y, table_width, row_height, stroke=0, fill=1)
-            pdf.setStrokeColor(HexColor("#E7ECE8"))
-            pdf.setLineWidth(0.5)
-            pdf.line(table_left, row_y, table_left + table_width, row_y)
-
-            pdf.setFillColor(HexColor("#17211D"))
-            pdf.setFont(_PDF_FONT_BOLD, 10.5)
-            ingredient = _rtl(row.get("ingredient"))
-            text_y = row_y + (row_height / 2) - 4
-            pdf.drawRightString(table_left + ingredient_width - 12, text_y, ingredient[:95])
-
+        methods = _row_methods(row)
+        line_gap = 17
+        methods_height = len(methods) * line_gap
+        method_y = row_y + (row_height + methods_height) / 2 - 13
+        icon_w, icon_h = 42, 24
+        icon_x = cutting_right - icon_w - 14
+        method_right = icon_x - 12
+        for method_row in methods:
+            _pdf_icon(pdf, method_row.get("icon") or "knife", icon_x, method_y - 6, icon_w, icon_h)
             pdf.setFillColor(HexColor("#164F3C"))
-            pdf.setFont(_PDF_FONT_BOLD, 13)
-            weight = float(row.get("weight_grams") or 0)
-            pdf.drawCentredString(table_left + ingredient_width + weight_width / 2, text_y, f"{weight:,.0f}")
+            pdf.setFont(_PDF_FONT_BOLD, 11.5)
+            pdf.drawRightString(method_right, method_y, _rtl(method_row.get("method"))[:52])
+            pdf.setFillColor(HexColor("#718078"))
+            pdf.setFont(_PDF_FONT_REGULAR, 9)
+            method_weight = float(method_row.get("weight_grams") or 0)
+            pdf.drawString(cutting_left + 14, method_y + 1, f"{method_weight:,.0f} g")
+            method_y -= line_gap
+        row_top = row_y
 
-            methods = _row_methods(row)
-            method_left = table_left + ingredient_width + weight_width
-            method_right = method_left + method_width - 12
-            line_gap = 19
-            methods_block_height = len(methods) * line_gap
-            method_y = row_y + (row_height + methods_block_height) / 2 - 14
-            for method_row in methods:
-                pdf.setFont(_PDF_FONT_BOLD, 9.2)
-                pdf.setFillColor(HexColor("#164F3C"))
-                pdf.drawRightString(method_right, method_y, _rtl(method_row.get("method"))[:50])
-                if len(methods) > 1:
-                    pdf.setFont(_PDF_FONT_REGULAR, 7.5)
-                    pdf.setFillColor(HexColor("#718078"))
-                    method_weight = float(method_row.get("weight_grams") or 0)
-                    pdf.drawString(method_left + 10, method_y + 1, f"{method_weight:,.0f} g")
-                method_y -= line_gap
-
-            icon_left = table_left + ingredient_width + weight_width + method_width
-            if len(methods) == 1:
-                _pdf_icon(pdf, methods[0].get("icon") or "knife", icon_left + 26, row_y + (row_height - 38) / 2)
-            else:
-                icon_w, icon_h, icon_gap = 42, 24, 5
-                icon_rows = math.ceil(len(methods) / 2)
-                icons_height = icon_rows * icon_h + (icon_rows - 1) * icon_gap
-                icons_y = row_y + (row_height + icons_height) / 2 - icon_h
-                for method_index, method_row in enumerate(methods):
-                    icon_col = method_index % 2
-                    icon_row = method_index // 2
-                    icon_x = icon_left + 13 + icon_col * (icon_w + icon_gap)
-                    icon_y = icons_y - icon_row * (icon_h + icon_gap)
-                    _pdf_icon(pdf, method_row.get("icon") or "knife", icon_x, icon_y, icon_w, icon_h)
-
-            row_top = row_y
-
-        # Footer and page number
-        pdf.setFillColor(HexColor("#87938C"))
-        pdf.setFont(_PDF_FONT_REGULAR, 8)
-        pdf.drawString(margin, 14, "OCTA FOOD - VEGETABLE PREP")
-        pdf.drawRightString(page_width - margin, 14, _rtl(f"صفحة {page_index + 1} من {page_count}"))
-        pdf.showPage()
+    pdf.setFillColor(HexColor("#87938C"))
+    pdf.setFont(_PDF_FONT_REGULAR, 10)
+    pdf.drawString(margin, 18, "OCTA FOOD - VEGETABLE PREP")
+    pdf.drawRightString(page_width - margin, 18, _rtl("تقرير صفحة واحدة"))
+    pdf.showPage()
 
     pdf.save()
     output.seek(0)
@@ -561,6 +533,13 @@ def vegetable_cutting_export_pdf():
         output = build_cutting_pdf(payload)
     except (CuttingWorkbookError, TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
+    except Exception:
+        return jsonify({
+            "error": (
+                "تعذر إنشاء PDF. تأكد من رفع مجلد assets/fonts بالكامل، "
+                "وتحديث requirements.txt، ثم أعد نشر الـ backend."
+            )
+        }), 500
     day_number = _as_day(payload.get("day_number")) or 1
     return send_file(
         output,
