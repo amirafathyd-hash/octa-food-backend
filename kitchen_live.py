@@ -86,6 +86,7 @@ def _empty_station_state(key):
         "zoom": 115,
         "message": "",
         "enabled": True,
+        "disabled_pages": [],
         "fit_mode": "page",
         "auto_scroll": False,
         "uploaded_at": "",
@@ -185,6 +186,19 @@ def _refresh_edited_pdf(station_key, station, pdf_path, pages, page):
     })
 
 
+def _normalized_disabled_pages(station, pages):
+    disabled = station.get("disabled_pages") or []
+    normalized = set()
+    for value in disabled:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= number <= pages:
+            normalized.add(number)
+    return sorted(normalized)
+
+
 def _delete_pdf_page(station_key, station, requested_page):
     pdf_path = os.path.join(PDF_DIR, f"{station_key}.pdf")
     if not os.path.exists(pdf_path):
@@ -204,6 +218,7 @@ def _delete_pdf_page(station_key, station, requested_page):
             "pages": 0,
             "page": 1,
             "enabled": False,
+            "disabled_pages": [],
             "extracted_at": "",
             "uploaded_at": "",
             "updated_at": _now_iso(),
@@ -222,6 +237,11 @@ def _delete_pdf_page(station_key, station, requested_page):
     finally:
         if os.path.exists(output_path):
             os.remove(output_path)
+    station["disabled_pages"] = [
+        disabled - 1 if disabled > page else disabled
+        for disabled in _normalized_disabled_pages(station, total_pages)
+        if disabled != page
+    ]
     _refresh_edited_pdf(station_key, station, pdf_path, total_pages - 1, min(page, total_pages - 1))
 
 
@@ -252,6 +272,17 @@ def _replace_pdf_page(station_key, station, requested_page, replacement_path):
         if os.path.exists(output_path):
             os.remove(output_path)
     new_total = total_pages - 1 + replacement_pages
+    old_disabled = _normalized_disabled_pages(station, total_pages)
+    page_was_disabled = page in old_disabled
+    shifted_disabled = []
+    for disabled in old_disabled:
+        if disabled < page:
+            shifted_disabled.append(disabled)
+        elif disabled > page:
+            shifted_disabled.append(disabled + replacement_pages - 1)
+    if page_was_disabled:
+        shifted_disabled.extend(range(page, page + replacement_pages))
+    station["disabled_pages"] = sorted(set(shifted_disabled))
     _refresh_edited_pdf(station_key, station, pdf_path, new_total, page)
 
 
@@ -349,6 +380,8 @@ def _public_station_state(key, value):
             pages = content_pages
         result["pages"] = pages
         result["page"] = _clamp_int(result.get("page"), 1, pages, 1)
+        result["disabled_pages"] = _normalized_disabled_pages(result, pages)
+        result["page_enabled"] = result.get("enabled") is not False and result["page"] not in result["disabled_pages"]
         version = result.get("updated_at") or result.get("uploaded_at") or ""
         result["pdf_url"] = f"/api/kitchen-live/pdf/{key}?v={version}"
         result["content_url"] = f"/api/kitchen-live/content/{key}?v={version}"
@@ -359,6 +392,8 @@ def _public_station_state(key, value):
         result["content_pages"] = 0
         result["pages"] = 0
         result["page"] = 1
+        result["disabled_pages"] = []
+        result["page_enabled"] = False
     return result
 
 
@@ -425,6 +460,7 @@ def register_kitchen_live_routes(app):
                     "pages": pages,
                     "page": 1,
                     "enabled": True,
+                    "disabled_pages": [],
                     "extracted_at": extracted_at,
                     "uploaded_at": _now_iso(),
                     "updated_at": _now_iso(),
@@ -451,6 +487,21 @@ def register_kitchen_live_routes(app):
                 station["message"] = str(payload.get("message") or "")[:700]
             if "enabled" in payload:
                 station["enabled"] = str(payload.get("enabled")).lower() not in {"0", "false", "no", "off"}
+                reset_pages = str(payload.get("reset_pages", "")).lower() in {"1", "true", "yes", "on"}
+                if station["enabled"] and reset_pages:
+                    station["disabled_pages"] = []
+            if "page_enabled" in payload:
+                selected_page = _clamp_int(payload.get("page", station.get("page", 1)), 1, pages, station.get("page", 1))
+                disabled_pages = set(_normalized_disabled_pages(station, pages))
+                page_enabled = str(payload.get("page_enabled")).lower() not in {"0", "false", "no", "off"}
+                if page_enabled:
+                    if station.get("enabled") is False:
+                        disabled_pages = set(range(1, pages + 1))
+                        station["enabled"] = True
+                    disabled_pages.discard(selected_page)
+                else:
+                    disabled_pages.add(selected_page)
+                station["disabled_pages"] = sorted(disabled_pages)
             if "fit_mode" in payload and payload.get("fit_mode") in {"page", "width"}:
                 station["fit_mode"] = payload["fit_mode"]
             if "auto_scroll" in payload:
