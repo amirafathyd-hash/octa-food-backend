@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from flask import abort, jsonify, request, send_file
 import pdfplumber
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
 
 
 BASE_DIR = os.path.dirname(__file__)
@@ -167,6 +167,92 @@ def _page_title(lines, page_number):
 
 def _content_path(station_key):
     return os.path.join(CONTENT_DIR, f"{station_key}.json")
+
+
+def _refresh_edited_pdf(station_key, station, pdf_path, pages, page):
+    extracted_at = ""
+    try:
+        content = _extract_pdf_content(station_key, pdf_path)
+        pages = len(content.get("pages") or []) or pages
+        extracted_at = content.get("generated_at", "")
+    except Exception:
+        pass
+    station.update({
+        "pages": pages,
+        "page": _clamp_int(page, 1, max(1, pages), 1),
+        "extracted_at": extracted_at,
+        "updated_at": _now_iso(),
+    })
+
+
+def _delete_pdf_page(station_key, station, requested_page):
+    pdf_path = os.path.join(PDF_DIR, f"{station_key}.pdf")
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError
+    reader = PdfReader(pdf_path)
+    total_pages = len(reader.pages)
+    if total_pages < 1:
+        raise ValueError("empty pdf")
+    page = _clamp_int(requested_page, 1, total_pages, station.get("page", 1))
+    if total_pages == 1:
+        os.remove(pdf_path)
+        content_path = _content_path(station_key)
+        if os.path.exists(content_path):
+            os.remove(content_path)
+        station.update({
+            "pdf_name": "",
+            "pages": 0,
+            "page": 1,
+            "enabled": False,
+            "extracted_at": "",
+            "uploaded_at": "",
+            "updated_at": _now_iso(),
+        })
+        return
+
+    output_path = f"{pdf_path}.editing"
+    writer = PdfWriter()
+    try:
+        for index, pdf_page in enumerate(reader.pages, start=1):
+            if index != page:
+                writer.add_page(pdf_page)
+        with open(output_path, "wb") as handle:
+            writer.write(handle)
+        os.replace(output_path, pdf_path)
+    finally:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+    _refresh_edited_pdf(station_key, station, pdf_path, total_pages - 1, min(page, total_pages - 1))
+
+
+def _replace_pdf_page(station_key, station, requested_page, replacement_path):
+    pdf_path = os.path.join(PDF_DIR, f"{station_key}.pdf")
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError
+    reader = PdfReader(pdf_path)
+    replacement = PdfReader(replacement_path)
+    total_pages = len(reader.pages)
+    replacement_pages = len(replacement.pages)
+    if total_pages < 1 or replacement_pages < 1:
+        raise ValueError("empty pdf")
+    page = _clamp_int(requested_page, 1, total_pages, station.get("page", 1))
+    output_path = f"{pdf_path}.editing"
+    writer = PdfWriter()
+    try:
+        for index, pdf_page in enumerate(reader.pages, start=1):
+            if index == page:
+                for new_page in replacement.pages:
+                    writer.add_page(new_page)
+            else:
+                writer.add_page(pdf_page)
+        with open(output_path, "wb") as handle:
+            writer.write(handle)
+        os.replace(output_path, pdf_path)
+    finally:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+    new_total = total_pages - 1 + replacement_pages
+    _refresh_edited_pdf(station_key, station, pdf_path, new_total, page)
 
 
 def _read_station_content(station_key):
@@ -379,28 +465,47 @@ def register_kitchen_live_routes(app):
     def kitchen_live_delete_content(station_key):
         if station_key not in STATIONS:
             abort(404)
+        payload = request.get_json(silent=True) or request.form.to_dict()
         with _LOCK:
             state = _read_state()
             station = state[station_key]
-            paths = (
-                os.path.join(PDF_DIR, f"{station_key}.pdf"),
-                _content_path(station_key),
-            )
             try:
-                for path in paths:
-                    if os.path.exists(path):
-                        os.remove(path)
-            except OSError:
-                return jsonify({"ok": False, "error": "تعذر حذف ملف الشاشة من السيرفر"}), 500
-            station.update({
-                "pdf_name": "",
-                "pages": 0,
-                "page": 1,
-                "enabled": False,
-                "extracted_at": "",
-                "uploaded_at": "",
-                "updated_at": _now_iso(),
-            })
+                _delete_pdf_page(station_key, station, payload.get("page", station.get("page", 1)))
+            except FileNotFoundError:
+                return jsonify({"ok": False, "error": "لا يوجد محتوى في هذه الشاشة"}), 404
+            except (OSError, ValueError):
+                return jsonify({"ok": False, "error": "تعذر حذف الشاشة الحالية من ملف PDF"}), 500
+            state[station_key] = station
+            _write_state(state)
+            public = _public_station_state(station_key, station)
+        return jsonify({"ok": True, "station": public})
+
+    @app.post("/api/kitchen-live/page/<station_key>/replace")
+    def kitchen_live_replace_page(station_key):
+        if station_key not in STATIONS:
+            abort(404)
+        file_storage = request.files.get("file") or request.files.get("files")
+        if not file_storage or not (file_storage.filename or "").lower().endswith(".pdf"):
+            return jsonify({"ok": False, "error": "اختر ملف PDF لاستبدال الشاشة الحالية"}), 400
+        with _LOCK:
+            state = _read_state()
+            station = state[station_key]
+            replacement_path = os.path.join(PDF_DIR, f"{station_key}.replacement")
+            try:
+                file_storage.save(replacement_path)
+                _replace_pdf_page(
+                    station_key,
+                    station,
+                    request.form.get("page", station.get("page", 1)),
+                    replacement_path,
+                )
+            except FileNotFoundError:
+                return jsonify({"ok": False, "error": "ارفع ملف القسم أولًا قبل استبدال شاشة منه"}), 404
+            except (OSError, ValueError):
+                return jsonify({"ok": False, "error": "تعذر استبدال الشاشة الحالية بملف PDF"}), 500
+            finally:
+                if os.path.exists(replacement_path):
+                    os.remove(replacement_path)
             state[station_key] = station
             _write_state(state)
             public = _public_station_state(station_key, station)
