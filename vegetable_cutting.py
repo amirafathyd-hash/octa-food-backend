@@ -75,6 +75,10 @@ def _rtl(value):
 
 def _pdf_icon(pdf, kind, x, y, width=68, height=38):
     """Draw a compact vector cutting-method icon without external images."""
+    pdf.saveState()
+    pdf.translate(x, y)
+    pdf.scale(width / 68.0, height / 38.0)
+    x, y, width, height = 0, 0, 68, 38
     green = HexColor("#176047")
     brass = HexColor("#B38636")
     pdf.setStrokeColor(green)
@@ -143,6 +147,40 @@ def _pdf_icon(pdf, kind, x, y, width=68, height=38):
         pdf.line(left, bottom, right - 5, top)
         pdf.setStrokeColor(brass)
         pdf.line(right - 7, top - 2, right + 2, top + 5)
+    pdf.restoreState()
+
+
+def _row_methods(row):
+    methods = row.get("methods") or []
+    if methods:
+        return methods
+    return [{
+        "method": row.get("method") or "غير محدد",
+        "weight_grams": float(row.get("weight_grams") or 0),
+        "icon": row.get("icon") or "knife",
+    }]
+
+
+def _pdf_row_height(row):
+    method_count = len(_row_methods(row))
+    return max(48, 20 + method_count * 19)
+
+
+def _paginate_pdf_rows(rows, available_height):
+    pages = []
+    current_page = []
+    used_height = 0
+    for row in rows:
+        height = _pdf_row_height(row)
+        if current_page and used_height + height > available_height:
+            pages.append(current_page)
+            current_page = []
+            used_height = 0
+        current_page.append((row, height))
+        used_height += height
+    if current_page:
+        pages.append(current_page)
+    return pages
 
 
 def build_cutting_pdf(payload):
@@ -158,9 +196,9 @@ def build_cutting_pdf(payload):
     header_height = 104
     columns_height = 32
     footer_height = 24
-    row_height = 48
-    rows_per_page = int((page_height - (margin * 2) - header_height - columns_height - footer_height) // row_height)
-    page_count = math.ceil(len(rows) / rows_per_page)
+    available_rows_height = page_height - (margin * 2) - header_height - columns_height - footer_height
+    pages = _paginate_pdf_rows(rows, available_rows_height)
+    page_count = len(pages)
     output = io.BytesIO()
     pdf = canvas.Canvas(output, pagesize=(page_width, page_height), pageCompression=1)
     pdf.setTitle(f"Vegetable Cutting - Day {payload.get('day_number', '')}")
@@ -168,9 +206,9 @@ def build_cutting_pdf(payload):
 
     table_left = margin
     table_width = page_width - (margin * 2)
-    icon_width = 92
-    method_width = 170
-    weight_width = 125
+    icon_width = 120
+    method_width = 205
+    weight_width = 120
     ingredient_width = table_width - icon_width - method_width - weight_width
 
     for page_index in range(page_count):
@@ -194,7 +232,7 @@ def build_cutting_pdf(payload):
         pdf.drawString(margin + 22, header_y + 56, f"{len(rows):,}")
         pdf.setFont(_PDF_FONT_REGULAR, 8)
         pdf.setFillColor(HexColor("#CFDED7"))
-        pdf.drawString(margin + 22, header_y + 42, _rtl("صنف وطريقة"))
+        pdf.drawString(margin + 22, header_y + 42, _rtl("صنف مجمّع"))
         pdf.setFillColor(HexColor("#FFFFFF"))
         pdf.setFont(_PDF_FONT_BOLD, 17)
         total_weight = sum(float(row.get("weight_grams") or 0) for row in rows)
@@ -214,11 +252,9 @@ def build_cutting_pdf(payload):
         pdf.drawRightString(table_left + ingredient_width + weight_width + method_width - 12, columns_y + 11, _rtl("طريقة التقطيع"))
         pdf.drawCentredString(table_left + table_width - icon_width / 2, columns_y + 11, _rtl("شكل التقطيع"))
 
-        start = page_index * rows_per_page
-        page_rows = rows[start:start + rows_per_page]
         row_top = columns_y
-        for row_index, row in enumerate(page_rows):
-            row_y = row_top - ((row_index + 1) * row_height)
+        for row_index, (row, row_height) in enumerate(pages[page_index]):
+            row_y = row_top - row_height
             pdf.setFillColor(HexColor("#FFFFFF") if row_index % 2 == 0 else HexColor("#FBFCFA"))
             pdf.rect(table_left, row_y, table_width, row_height, stroke=0, fill=1)
             pdf.setStrokeColor(HexColor("#E7ECE8"))
@@ -228,19 +264,47 @@ def build_cutting_pdf(payload):
             pdf.setFillColor(HexColor("#17211D"))
             pdf.setFont(_PDF_FONT_BOLD, 10.5)
             ingredient = _rtl(row.get("ingredient"))
-            pdf.drawRightString(table_left + ingredient_width - 12, row_y + 18, ingredient[:95])
+            text_y = row_y + (row_height / 2) - 4
+            pdf.drawRightString(table_left + ingredient_width - 12, text_y, ingredient[:95])
 
             pdf.setFillColor(HexColor("#164F3C"))
             pdf.setFont(_PDF_FONT_BOLD, 13)
             weight = float(row.get("weight_grams") or 0)
-            pdf.drawCentredString(table_left + ingredient_width + weight_width / 2, row_y + 17, f"{weight:,.0f}")
+            pdf.drawCentredString(table_left + ingredient_width + weight_width / 2, text_y, f"{weight:,.0f}")
 
-            pdf.setFont(_PDF_FONT_BOLD, 10)
-            method = _rtl(row.get("method"))
-            pdf.drawRightString(table_left + ingredient_width + weight_width + method_width - 12, row_y + 18, method[:55])
+            methods = _row_methods(row)
+            method_left = table_left + ingredient_width + weight_width
+            method_right = method_left + method_width - 12
+            line_gap = 19
+            methods_block_height = len(methods) * line_gap
+            method_y = row_y + (row_height + methods_block_height) / 2 - 14
+            for method_row in methods:
+                pdf.setFont(_PDF_FONT_BOLD, 9.2)
+                pdf.setFillColor(HexColor("#164F3C"))
+                pdf.drawRightString(method_right, method_y, _rtl(method_row.get("method"))[:50])
+                if len(methods) > 1:
+                    pdf.setFont(_PDF_FONT_REGULAR, 7.5)
+                    pdf.setFillColor(HexColor("#718078"))
+                    method_weight = float(method_row.get("weight_grams") or 0)
+                    pdf.drawString(method_left + 10, method_y + 1, f"{method_weight:,.0f} g")
+                method_y -= line_gap
 
-            icon_x = table_left + ingredient_width + weight_width + method_width + (icon_width - 68) / 2
-            _pdf_icon(pdf, row.get("icon") or "knife", icon_x, row_y + 5)
+            icon_left = table_left + ingredient_width + weight_width + method_width
+            if len(methods) == 1:
+                _pdf_icon(pdf, methods[0].get("icon") or "knife", icon_left + 26, row_y + (row_height - 38) / 2)
+            else:
+                icon_w, icon_h, icon_gap = 42, 24, 5
+                icon_rows = math.ceil(len(methods) / 2)
+                icons_height = icon_rows * icon_h + (icon_rows - 1) * icon_gap
+                icons_y = row_y + (row_height + icons_height) / 2 - icon_h
+                for method_index, method_row in enumerate(methods):
+                    icon_col = method_index % 2
+                    icon_row = method_index // 2
+                    icon_x = icon_left + 13 + icon_col * (icon_w + icon_gap)
+                    icon_y = icons_y - icon_row * (icon_h + icon_gap)
+                    _pdf_icon(pdf, method_row.get("icon") or "knife", icon_x, icon_y, icon_w, icon_h)
+
+            row_top = row_y
 
         # Footer and page number
         pdf.setFillColor(HexColor("#87938C"))
@@ -417,15 +481,23 @@ def combine_workbooks(extracted):
     combined = OrderedDict()
     for source in extracted:
         for ingredient, weight, method in source["rows"]:
-            key = (_clean_text(ingredient).casefold(), _clean_text(method).casefold())
+            key = _clean_text(ingredient).casefold()
             if key not in combined:
                 combined[key] = {
                     "ingredient": ingredient,
-                    "method": method,
                     "weight_grams": 0.0,
                     "sources": [],
+                    "methods": OrderedDict(),
                 }
             combined[key]["weight_grams"] += weight
+            method_key = _clean_text(method).casefold()
+            if method_key not in combined[key]["methods"]:
+                combined[key]["methods"][method_key] = {
+                    "method": method,
+                    "weight_grams": 0.0,
+                    "icon": _icon_kind(method),
+                }
+            combined[key]["methods"][method_key]["weight_grams"] += weight
             if source["filename"] not in combined[key]["sources"]:
                 combined[key]["sources"].append(source["filename"])
 
@@ -433,7 +505,12 @@ def combine_workbooks(extracted):
     for index, row in enumerate(combined.values(), start=1):
         row["id"] = index
         row["weight_grams"] = round(row["weight_grams"], 2)
-        row["icon"] = _icon_kind(row["method"])
+        methods = list(row["methods"].values())
+        for method_row in methods:
+            method_row["weight_grams"] = round(method_row["weight_grams"], 2)
+        row["methods"] = methods
+        row["method"] = " / ".join(method_row["method"] for method_row in methods)
+        row["icon"] = methods[0]["icon"] if len(methods) == 1 else "multiple"
         rows.append(row)
     return next(iter(days)), rows
 
