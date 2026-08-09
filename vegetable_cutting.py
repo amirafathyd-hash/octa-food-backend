@@ -51,17 +51,14 @@ _NON_METHODS = {
     "vegetables", "spices & seasonings", "bread & bakery", "filling",
 }
 
-_APP_DIR = os.path.dirname(os.path.abspath(__file__))
-_FONT_DIRS = (
-    os.path.join(_APP_DIR, "fonts"),
-    os.path.join(_APP_DIR, "assets", "fonts"),
-)
+_FONT_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
 _PDF_FONT_REGULAR = "OctaArabic"
 _PDF_FONT_BOLD = "OctaArabicBold"
 
 
 def _find_pdf_font(*names):
-    search_dirs = _FONT_DIRS + (
+    search_dirs = (
+        _FONT_DIR,
         "/usr/share/fonts/truetype/freefont",
         "/usr/share/fonts/truetype/dejavu",
         "/usr/local/share/fonts",
