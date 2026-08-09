@@ -90,6 +90,7 @@ from price_center import (
     price_item_key,
 )
 from receipt_pricing import (
+    build_monthly_receipt_cost_workbook,
     build_receipt_cost_workbook,
     parse_external_receipt_workbook,
     price_receipt_rows,
@@ -2717,6 +2718,30 @@ def price_center_receipt_cost():
         out,
         as_attachment=True,
         download_name=f'Receipt_Cost_{stamp}.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
+@app.route('/api/price-center/monthly-receipt-cost', methods=['POST'])
+def price_center_monthly_receipt_cost():
+    _, err = _require_auth()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    rows = payload.get('rows') or []
+    if not isinstance(rows, list) or not rows:
+        return jsonify({'error': 'لا توجد استلامات خضار في هذا الشهر'}), 400
+    month_label = str(payload.get('month_label') or payload.get('month') or '').strip()
+    try:
+        priced_rows, missing = price_receipt_rows(rows, _active_price_center_rows())
+        out = build_monthly_receipt_cost_workbook(priced_rows, month_label=month_label, missing=missing)
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تجهيز تجميعة الشهر بالأسعار: {exc}'}), 400
+    safe_month = re.sub(r'[^0-9-]+', '-', str(payload.get('month') or datetime.now().strftime('%Y-%m'))).strip('-')
+    return send_file(
+        out,
+        as_attachment=True,
+        download_name=f'Vegetables_Monthly_Cost_{safe_month or datetime.now().strftime("%Y-%m")}.xlsx',
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
 

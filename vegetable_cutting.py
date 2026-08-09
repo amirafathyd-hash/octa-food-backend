@@ -56,17 +56,38 @@ _PDF_FONT_REGULAR = "OctaArabic"
 _PDF_FONT_BOLD = "OctaArabicBold"
 
 
+def _find_pdf_font(*names):
+    search_dirs = (
+        _FONT_DIR,
+        "/usr/share/fonts/truetype/freefont",
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/local/share/fonts",
+        "/Library/Fonts",
+        "/System/Library/Fonts/Supplemental",
+    )
+    for directory in search_dirs:
+        for name in names:
+            path = os.path.join(directory, name)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
 def _register_pdf_fonts():
+    regular_path = _find_pdf_font(
+        "IBMPlexSansArabic-Regular.ttf", "FreeSans.ttf", "DejaVuSans.ttf", "Arial Unicode.ttf", "Arial.ttf",
+    )
+    bold_path = _find_pdf_font(
+        "IBMPlexSansArabic-Bold.ttf", "FreeSansBold.ttf", "DejaVuSans-Bold.ttf", "Arial Bold.ttf",
+    ) or regular_path
+    if not regular_path or not bold_path:
+        raise CuttingWorkbookError(
+            "خط PDF العربي غير متاح على الخادم. أعد نشر الـ backend باستخدام Dockerfile المرفق."
+        )
     if _PDF_FONT_REGULAR not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont(
-            _PDF_FONT_REGULAR,
-            os.path.join(_FONT_DIR, "IBMPlexSansArabic-Regular.ttf"),
-        ))
+        pdfmetrics.registerFont(TTFont(_PDF_FONT_REGULAR, regular_path))
     if _PDF_FONT_BOLD not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont(
-            _PDF_FONT_BOLD,
-            os.path.join(_FONT_DIR, "IBMPlexSansArabic-Bold.ttf"),
-        ))
+        pdfmetrics.registerFont(TTFont(_PDF_FONT_BOLD, bold_path))
 
 
 def _rtl(value):
@@ -533,12 +554,9 @@ def vegetable_cutting_export_pdf():
         output = build_cutting_pdf(payload)
     except (CuttingWorkbookError, TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception:
+    except Exception as exc:
         return jsonify({
-            "error": (
-                "تعذر إنشاء PDF. تأكد من رفع مجلد assets/fonts بالكامل، "
-                "وتحديث requirements.txt، ثم أعد نشر الـ backend."
-            )
+            "error": f"تعذر إنشاء PDF على الخادم: {str(exc)[:180]}"
         }), 500
     day_number = _as_day(payload.get("day_number")) or 1
     return send_file(

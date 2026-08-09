@@ -90,6 +90,9 @@ def price_receipt_rows(receipt_rows, price_rows):
         unit_price = _to_decimal(match.get('order_unit_price')) if match else None
         total = (qty * unit_price) if unit_price is not None else None
         out = {
+            'receipt_date': row.get('receipt_date') or row.get('date') or '',
+            'day_name': row.get('day_name') or row.get('day') or '',
+            'department': row.get('department') or row.get('department_label') or '',
             'item_name': item_name,
             'category': row.get('category') or '',
             'unit': row.get('order_unit') or row.get('unit') or row.get('rec_unit') or '',
@@ -253,6 +256,163 @@ def build_receipt_cost_workbook(priced_rows, title='تقرير الاستلام 
         ws.column_dimensions[get_column_letter(col)].width = width
     ws.freeze_panes = 'A4'
 
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+
+def build_monthly_receipt_cost_workbook(priced_rows, month_label='', missing=None):
+    """Create monthly vegetable receipt details, daily tabs and a priced summary."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    missing = missing or []
+    rows = sorted(
+        priced_rows or [],
+        key=lambda row: (str(row.get('receipt_date') or ''), str(row.get('item_name') or '')),
+    )
+
+    dark = PatternFill('solid', start_color='2B1A13')
+    gold = PatternFill('solid', start_color='D9A83D')
+    soft = PatternFill('solid', start_color='FFF8EA')
+    white = PatternFill('solid', start_color='FFFFFF')
+    missing_fill = PatternFill('solid', start_color='FDEAEA')
+    total_fill = PatternFill('solid', start_color='EAF7EF')
+    thin = Side(style='thin', color='E7D2B8')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    right = Alignment(horizontal='right', vertical='center', wrap_text=True)
+
+    headers = ['التاريخ', 'اليوم', 'القسم', 'الصنف', 'الوحدة', 'المطلوب', 'المستلم', 'سعر الوحدة', 'الإجمالي', 'حالة السعر']
+
+    def write_rows_sheet(ws, sheet_rows, title, show_date=True):
+        ws.sheet_view.rightToLeft = True
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+        ws.cell(1, 1, title)
+        ws.cell(1, 1).fill = dark
+        ws.cell(1, 1).font = Font(name='Tahoma', bold=True, size=16, color='FFFFFF')
+        ws.cell(1, 1).alignment = center
+        ws.row_dimensions[1].height = 34
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(3, col, header)
+            cell.fill = gold
+            cell.font = Font(name='Tahoma', bold=True, size=11, color='1A1A1A')
+            cell.alignment = center
+            cell.border = border
+        start = 4
+        for idx, row in enumerate(sheet_rows, start):
+            has_price = row.get('order_unit_price') is not None
+            fill = soft if idx % 2 else white
+            if not has_price:
+                fill = missing_fill
+            values = [
+                row.get('receipt_date') or '', row.get('day_name') or '', row.get('department') or '',
+                row.get('item_name') or '', row.get('unit') or '',
+                row.get('required') if row.get('required') is not None else '', row.get('received') or 0,
+                row.get('order_unit_price') if has_price else '', '', 'محسوب' if has_price else 'بدون سعر',
+            ]
+            for col, value in enumerate(values, 1):
+                cell = ws.cell(idx, col, value)
+                cell.fill = fill
+                cell.border = border
+                cell.font = Font(name='Tahoma', size=10, bold=col in (6, 7, 8, 9))
+                cell.alignment = right if col == 4 else center
+                if col in (6, 7, 8, 9):
+                    cell.number_format = '#,##0.00'
+            if has_price:
+                ws.cell(idx, 9, f'=G{idx}*H{idx}')
+                ws.cell(idx, 9).number_format = '#,##0.00'
+        total_row = start + len(sheet_rows)
+        ws.cell(total_row, 8, 'الإجمالي').fill = total_fill
+        ws.cell(total_row, 8).font = Font(name='Tahoma', bold=True, size=12)
+        ws.cell(total_row, 8).alignment = center
+        ws.cell(total_row, 9, f'=SUM(I{start}:I{max(start, total_row - 1)})').fill = total_fill
+        ws.cell(total_row, 9).font = Font(name='Tahoma', bold=True, size=12)
+        ws.cell(total_row, 9).alignment = center
+        ws.cell(total_row, 9).number_format = '#,##0.00'
+        for col in range(1, len(headers) + 1):
+            ws.cell(total_row, col).border = border
+        widths = [14, 20, 24, 42, 12, 14, 14, 16, 18, 16]
+        for col, width in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(col)].width = width
+        ws.freeze_panes = 'A4'
+        ws.auto_filter.ref = f'A3:J{max(3, total_row - 1)}'
+        return total_row
+
+    details = wb.create_sheet('تفاصيل الشهر')
+    details_total_row = write_rows_sheet(details, rows, f'تجميعة استلامات الخضار بالأسعار - {month_label}')
+
+    by_date = {}
+    for row in rows:
+        key = str(row.get('receipt_date') or 'بدون تاريخ')
+        by_date.setdefault(key, []).append(row)
+    for receipt_date, day_rows in by_date.items():
+        safe_title = re.sub(r'[\\/*?:\[\]]+', ' ', receipt_date).strip()[:31] or 'بدون تاريخ'
+        daily = wb.create_sheet(safe_title)
+        day_name = day_rows[0].get('day_name') or ''
+        write_rows_sheet(daily, day_rows, f'{receipt_date} - {day_name}'.strip(' -'))
+
+    summary = wb.create_sheet('ملخص الشهر', 0)
+    summary.sheet_view.rightToLeft = True
+    summary.merge_cells('A1:F1')
+    summary['A1'] = f'ملخص شهر {month_label}'
+    summary['A1'].fill = dark
+    summary['A1'].font = Font(name='Tahoma', bold=True, size=16, color='FFFFFF')
+    summary['A1'].alignment = center
+    summary_headers = ['التاريخ', 'اليوم', 'عدد الأصناف', 'إجمالي المطلوب', 'إجمالي المستلم', 'إجمالي التكلفة']
+    for col, header in enumerate(summary_headers, 1):
+        cell = summary.cell(3, col, header)
+        cell.fill = gold
+        cell.font = Font(name='Tahoma', bold=True, size=11)
+        cell.alignment = center
+        cell.border = border
+    summary_start = 4
+    for idx, (receipt_date, day_rows) in enumerate(by_date.items(), summary_start):
+        values = [
+            receipt_date, day_rows[0].get('day_name') or '', len(day_rows),
+            sum(float(row.get('required') or 0) for row in day_rows),
+            sum(float(row.get('received') or 0) for row in day_rows), '',
+        ]
+        for col, value in enumerate(values, 1):
+            cell = summary.cell(idx, col, value)
+            cell.fill = soft if idx % 2 else white
+            cell.border = border
+            cell.font = Font(name='Tahoma', size=10, bold=col >= 3)
+            cell.alignment = center
+            if col >= 4:
+                cell.number_format = '#,##0.00'
+        summary.cell(idx, 6, f'=SUMIF(\'تفاصيل الشهر\'!$A$4:$A${details_total_row - 1},A{idx},\'تفاصيل الشهر\'!$I$4:$I${details_total_row - 1})')
+        summary.cell(idx, 6).number_format = '#,##0.00'
+    total_row = summary_start + len(by_date)
+    summary.cell(total_row, 1, 'إجمالي الشهر')
+    for col in range(1, 7):
+        cell = summary.cell(total_row, col)
+        cell.fill = total_fill
+        cell.border = border
+        cell.font = Font(name='Tahoma', bold=True, size=11)
+        cell.alignment = center
+    for col in range(3, 7):
+        letter = get_column_letter(col)
+        summary.cell(total_row, col, f'=SUM({letter}{summary_start}:{letter}{max(summary_start, total_row - 1)})')
+        summary.cell(total_row, col).number_format = '#,##0.00'
+    for col, width in enumerate([16, 22, 15, 18, 18, 20], 1):
+        summary.column_dimensions[get_column_letter(col)].width = width
+    summary.freeze_panes = 'A4'
+
+    if missing:
+        note_row = total_row + 2
+        summary.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=6)
+        summary.cell(note_row, 1, 'أصناف بدون سعر في مركز الأسعار: ' + '، '.join(missing))
+        summary.cell(note_row, 1).fill = missing_fill
+        summary.cell(note_row, 1).font = Font(name='Tahoma', bold=True, color='B31210')
+        summary.cell(note_row, 1).alignment = right
+
+    try:
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+        wb.calculation.calcMode = 'auto'
+    except Exception:
+        pass
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
