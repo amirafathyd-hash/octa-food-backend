@@ -100,6 +100,7 @@ from vegetable_cutting import vegetable_cutting_bp
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
+BACKEND_RELEASE = 'octa-backend-2026-08-09-v17'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -210,7 +211,7 @@ def _read_upload_log_message(row):
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok'})
+    return jsonify({'status': 'ok', 'release': BACKEND_RELEASE})
 
 
 @app.route('/api/upload-order-preview', methods=['POST'])
