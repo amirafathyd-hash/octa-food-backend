@@ -13,6 +13,8 @@ try:
 except ImportError:  # python-bidi 0.6.11+ exposes the Rust implementation here
     from bidi import get_display
 from flask import Blueprint, jsonify, request, send_file
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A1, A2, landscape
 from reportlab.pdfbase import pdfmetrics
@@ -413,7 +415,7 @@ def _summary_rows(workbook, day_number):
         ingredient_text = _clean_text(ingredient)
         method_text = _clean_text(method)
         if ingredient_text and numeric_weight and _is_cutting_method(method_text):
-            rows.append((ingredient_text, numeric_weight, method_text))
+            rows.append((ingredient_text, numeric_weight, method_text, worksheet.title))
     return rows
 
 
@@ -434,7 +436,7 @@ def _recipe_rows(workbook):
             ingredient_text = _clean_text(ingredient)
             method_text = _clean_text(method)
             if ingredient_text and numeric_weight and _is_cutting_method(method_text):
-                rows.append((ingredient_text, numeric_weight, method_text))
+                rows.append((ingredient_text, numeric_weight, method_text, worksheet.title))
     return rows
 
 
@@ -476,13 +478,14 @@ def combine_workbooks(extracted):
 
     combined = OrderedDict()
     for source in extracted:
-        for ingredient, weight, method in source["rows"]:
+        for ingredient, weight, method, source_sheet in source["rows"]:
             key = _clean_text(ingredient).casefold()
             if key not in combined:
                 combined[key] = {
                     "ingredient": ingredient,
                     "weight_grams": 0.0,
                     "sources": [],
+                    "source_sheets": [],
                     "methods": OrderedDict(),
                 }
             combined[key]["weight_grams"] += weight
@@ -496,6 +499,8 @@ def combine_workbooks(extracted):
             combined[key]["methods"][method_key]["weight_grams"] += weight
             if source["filename"] not in combined[key]["sources"]:
                 combined[key]["sources"].append(source["filename"])
+            if source_sheet not in combined[key]["source_sheets"]:
+                combined[key]["source_sheets"].append(source_sheet)
 
     rows = []
     for index, row in enumerate(combined.values(), start=1):
@@ -509,6 +514,131 @@ def combine_workbooks(extracted):
         row["icon"] = methods[0]["icon"] if len(methods) == 1 else "multiple"
         rows.append(row)
     return next(iter(days)), rows
+
+
+def build_cutting_xlsx(payload):
+    rows = payload.get("rows") or []
+    if not rows:
+        raise CuttingWorkbookError("لا توجد بيانات لإنشاء ملف إكسيل")
+
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "كشف التقطيع"
+    worksheet.sheet_view.rightToLeft = True
+    worksheet.sheet_view.showGridLines = False
+    worksheet.freeze_panes = "A6"
+
+    dark_green = "164F3C"
+    medium_green = "26745A"
+    light_green = "E4EDCC"
+    lime = "B9D94A"
+    white = "FFFFFF"
+    muted = "718078"
+    border_color = "DDE7E1"
+    thin_border = Border(bottom=Side(style="thin", color=border_color))
+
+    worksheet.merge_cells("A1:D1")
+    title_cell = worksheet["A1"]
+    title_cell.value = "كشف تجهيز وتقطيع الخضار"
+    title_cell.font = Font(name="Arial", size=20, bold=True, color=white)
+    title_cell.fill = PatternFill("solid", fgColor=dark_green)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.row_dimensions[1].height = 38
+
+    day_ar = _clean_text(payload.get("day_name_ar")) or f"اليوم {payload.get('day_number', '')}"
+    day_en = _clean_text(payload.get("day_name_en"))
+    worksheet.merge_cells("A2:B2")
+    worksheet["A2"] = f"اليوم: {day_ar} - {day_en}".strip(" -")
+    worksheet["A2"].font = Font(name="Arial", size=12, bold=True, color=dark_green)
+    worksheet["A2"].alignment = Alignment(horizontal="right", vertical="center")
+
+    worksheet["C2"] = "عدد الأصناف"
+    worksheet["D2"] = len(rows)
+    worksheet["C3"] = "إجمالي الكمية (جرام)"
+    worksheet["D3"] = sum(float(row.get("weight_grams") or 0) for row in rows)
+    for cell in (worksheet["C2"], worksheet["C3"]):
+        cell.font = Font(name="Arial", size=10, bold=True, color=muted)
+        cell.alignment = Alignment(horizontal="right")
+    for cell in (worksheet["D2"], worksheet["D3"]):
+        cell.font = Font(name="Arial", size=12, bold=True, color=dark_green)
+        cell.fill = PatternFill("solid", fgColor=light_green)
+        cell.alignment = Alignment(horizontal="center")
+    worksheet["D3"].number_format = "#,##0"
+    worksheet.row_dimensions[2].height = 24
+    worksheet.row_dimensions[3].height = 24
+
+    headers = ["الصنف", "الكمية (جرام)", "طريقة وشكل التقطيع", "تاب مصدر الأرقام"]
+    for column, header in enumerate(headers, start=1):
+        cell = worksheet.cell(row=5, column=column, value=header)
+        cell.font = Font(name="Arial", size=11, bold=True, color=white)
+        cell.fill = PatternFill("solid", fgColor=medium_green)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.row_dimensions[5].height = 30
+
+    first_data_row = 6
+    for row_index, row in enumerate(rows, start=first_data_row):
+        methods = row.get("methods") or []
+        method_text = " | ".join(
+            f'{_clean_text(item.get("method"))} ({float(item.get("weight_grams") or 0):,.0f} g)'
+            for item in methods
+        ) or _clean_text(row.get("method"))
+        values = [
+            _clean_text(row.get("ingredient")),
+            float(row.get("weight_grams") or 0),
+            method_text,
+            "، ".join(_clean_text(name) for name in (row.get("source_sheets") or []) if _clean_text(name)),
+        ]
+        for column, value in enumerate(values, start=1):
+            cell = worksheet.cell(row=row_index, column=column, value=value)
+            cell.font = Font(name="Arial", size=10, color="17211D")
+            cell.alignment = Alignment(
+                horizontal="center" if column == 2 else "right",
+                vertical="center",
+                wrap_text=True,
+            )
+            cell.border = thin_border
+        worksheet.cell(row=row_index, column=2).number_format = "#,##0"
+        worksheet.row_dimensions[row_index].height = 36
+
+    last_data_row = first_data_row + len(rows) - 1
+    table = Table(displayName="VegetableCuttingTable", ref=f"A5:D{last_data_row}")
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium4",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    worksheet.add_table(table)
+
+    total_row = last_data_row + 2
+    worksheet.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=1)
+    worksheet.cell(row=total_row, column=1, value="الإجمالي")
+    worksheet.cell(row=total_row, column=2, value=f"=SUM(B{first_data_row}:B{last_data_row})")
+    for column in range(1, 5):
+        cell = worksheet.cell(row=total_row, column=column)
+        cell.fill = PatternFill("solid", fgColor=light_green)
+        cell.font = Font(name="Arial", size=11, bold=True, color=dark_green)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.cell(row=total_row, column=2).number_format = "#,##0"
+    worksheet.row_dimensions[total_row].height = 26
+
+    worksheet.column_dimensions["A"].width = 34
+    worksheet.column_dimensions["B"].width = 18
+    worksheet.column_dimensions["C"].width = 58
+    worksheet.column_dimensions["D"].width = 32
+    worksheet.auto_filter.ref = f"A5:D{last_data_row}"
+    worksheet.print_title_rows = "1:5"
+    worksheet.page_setup.orientation = "landscape"
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.page_setup.fitToHeight = 0
+    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
+    worksheet.oddFooter.center.text = "OCTA FOOD - VEGETABLE PREP"
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
 
 
 @vegetable_cutting_bp.route("/api/vegetable-cutting/extract", methods=["POST"])
@@ -567,4 +697,24 @@ def vegetable_cutting_export_pdf():
         as_attachment=True,
         download_name=f"Vegetable_Cutting_Day_{day_number}.pdf",
         mimetype="application/pdf",
+    )
+
+
+@vegetable_cutting_bp.route("/api/vegetable-cutting/export-xlsx", methods=["POST"])
+def vegetable_cutting_export_xlsx():
+    payload = request.get_json(silent=True) or {}
+    try:
+        output = build_cutting_xlsx(payload)
+    except (CuttingWorkbookError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({
+            "error": f"تعذر إنشاء ملف إكسيل على الخادم: {str(exc)[:180]}"
+        }), 500
+    day_number = _as_day(payload.get("day_number")) or 1
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"Vegetable_Cutting_Day_{day_number}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
