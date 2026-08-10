@@ -400,18 +400,101 @@ def _read_day_number(workbook):
     raise CuttingWorkbookError("تعذر قراءة رقم اليوم من الخلية R1")
 
 
-def _recipe_rows(workbook):
-    """Read cutting method, ingredient, and weight from A/B/H in recipe tabs."""
-    rows = []
-    ignored_sheets = {
-        "Ordering", "All_Ingredients", "Marination_Ordering",
-        "Cutting_Shapes_Ordering", "Butchery",
+_MAPPING_LAYOUTS = (
+    {
+        "name": "breakfast",
+        "day_column": "AB",
+        "sheet_column": "AA",
+        "min_column": 27,
+        "day_index": 1,
+        "sheet_index": 0,
+    },
+    {
+        "name": "hot_section",
+        "day_column": "AJ",
+        "sheet_column": "AK",
+        "min_column": 36,
+        "day_index": 0,
+        "sheet_index": 1,
+    },
+)
+_MAPPING_MAX_ROW = 40
+_RECIPE_MAX_ROW = 40
+
+
+def _mapped_recipe_sheets(workbook, day_number):
+    """Find the workbook mapping table and return tabs assigned to its active day."""
+    sheet_lookup = {
+        _clean_text(sheet_name).casefold(): sheet_name
+        for sheet_name in workbook.sheetnames
     }
-    for worksheet in workbook.worksheets:
-        if worksheet.title in ignored_sheets:
-            continue
+    preferred = ("All_Ingredients", "Ordering", "Marination_Ordering")
+    candidates = [workbook[name] for name in preferred if name in workbook.sheetnames]
+    if not candidates:
+        candidates = list(workbook.worksheets)
+
+    best = None
+    for worksheet in candidates:
+        for layout in _MAPPING_LAYOUTS:
+            valid_pairs = []
+            selected_sheets = []
+            seen_selected = set()
+            for values in worksheet.iter_rows(
+                min_row=1,
+                max_row=_MAPPING_MAX_ROW,
+                min_col=layout["min_column"],
+                max_col=layout["min_column"] + 1,
+                values_only=True,
+            ):
+                mapped_day = _as_day(values[layout["day_index"]])
+                mapped_name = _clean_text(values[layout["sheet_index"]])
+                actual_name = sheet_lookup.get(mapped_name.casefold())
+                if not mapped_day or not actual_name:
+                    continue
+                valid_pairs.append((mapped_day, actual_name))
+                selected_key = actual_name.casefold()
+                if mapped_day == day_number and selected_key not in seen_selected:
+                    selected_sheets.append(actual_name)
+                    seen_selected.add(selected_key)
+
+            candidate = {
+                "score": len(valid_pairs),
+                "control_sheet": worksheet.title,
+                "layout": layout,
+                "selected_sheets": selected_sheets,
+            }
+            if best is None or candidate["score"] > best["score"]:
+                best = candidate
+
+    if not best or best["score"] == 0:
+        raise CuttingWorkbookError(
+            "تعذر العثور على جدول ربط الأيام بالتابات في AA/AB أو AJ/AK حتى الصف 40"
+        )
+    if not best["selected_sheets"]:
+        layout = best["layout"]
+        raise CuttingWorkbookError(
+            f"لا توجد تابات مرتبطة باليوم {day_number} في العمودين "
+            f'{layout["day_column"]}/{layout["sheet_column"]} حتى الصف 40'
+        )
+    return best["selected_sheets"], {
+        "type": best["layout"]["name"],
+        "control_sheet": best["control_sheet"],
+        "day_column": best["layout"]["day_column"],
+        "sheet_column": best["layout"]["sheet_column"],
+    }
+
+
+def _recipe_rows(workbook, recipe_sheet_names):
+    """Read A/B/H through row 40 from the recipe tabs assigned to the active day."""
+    rows = []
+    for sheet_name in recipe_sheet_names:
+        worksheet = workbook[sheet_name]
         for row in worksheet.iter_rows(
-            min_row=1, min_col=1, max_col=8, values_only=True
+            min_row=1,
+            max_row=_RECIPE_MAX_ROW,
+            min_col=1,
+            max_col=8,
+            values_only=True,
         ):
             method, ingredient, weight = row[0], row[1], row[7]
             numeric_weight = _as_weight(weight)
@@ -435,12 +518,15 @@ def extract_workbook(file_storage):
 
     try:
         day_number, day_sheet = _read_day_number(workbook)
-        rows = _recipe_rows(workbook)
+        recipe_sheets, mapping = _mapped_recipe_sheets(workbook, day_number)
+        rows = _recipe_rows(workbook, recipe_sheets)
         return {
             "filename": file_storage.filename or "workbook.xlsm",
             "day_number": day_number,
             "day_sheet": day_sheet,
-            "mode": "recipe_tabs_a_b_h",
+            "mode": "mapped_recipe_tabs_a_b_h",
+            "mapping": mapping,
+            "selected_sheets": recipe_sheets,
             "rows": rows,
         }
     finally:
@@ -448,34 +534,22 @@ def extract_workbook(file_storage):
 
 
 def combine_workbooks(extracted):
-    days = {item["day_number"] for item in extracted}
-    if len(days) != 1:
-        details = "، ".join(
-            f'{item["filename"]}: يوم {item["day_number"]}' for item in extracted
-        )
-        raise CuttingWorkbookError(f"الملفان ليسا لنفس يوم التشغيل ({details})")
-
     combined = OrderedDict()
     for source in extracted:
         for ingredient, weight, method, source_sheet in source["rows"]:
-            key = _clean_text(ingredient).casefold()
+            ingredient_key = _clean_text(ingredient).casefold()
+            method_key = _clean_text(method).casefold()
+            key = (ingredient_key, method_key)
             if key not in combined:
                 combined[key] = {
                     "ingredient": ingredient,
+                    "method": method,
+                    "icon": _icon_kind(method),
                     "weight_grams": 0.0,
                     "sources": [],
                     "source_sheets": [],
-                    "methods": OrderedDict(),
                 }
             combined[key]["weight_grams"] += weight
-            method_key = _clean_text(method).casefold()
-            if method_key not in combined[key]["methods"]:
-                combined[key]["methods"][method_key] = {
-                    "method": method,
-                    "weight_grams": 0.0,
-                    "icon": _icon_kind(method),
-                }
-            combined[key]["methods"][method_key]["weight_grams"] += weight
             if source["filename"] not in combined[key]["sources"]:
                 combined[key]["sources"].append(source["filename"])
             if source_sheet not in combined[key]["source_sheets"]:
@@ -485,14 +559,13 @@ def combine_workbooks(extracted):
     for index, row in enumerate(combined.values(), start=1):
         row["id"] = index
         row["weight_grams"] = round(row["weight_grams"], 2)
-        methods = list(row["methods"].values())
-        for method_row in methods:
-            method_row["weight_grams"] = round(method_row["weight_grams"], 2)
-        row["methods"] = methods
-        row["method"] = " / ".join(method_row["method"] for method_row in methods)
-        row["icon"] = methods[0]["icon"] if len(methods) == 1 else "multiple"
+        row["methods"] = [{
+            "method": row["method"],
+            "weight_grams": row["weight_grams"],
+            "icon": row["icon"],
+        }]
         rows.append(row)
-    return next(iter(days)), rows
+    return extracted[0]["day_number"], rows
 
 
 def build_cutting_xlsx(payload):
