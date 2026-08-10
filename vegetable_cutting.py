@@ -400,26 +400,8 @@ def _read_day_number(workbook):
     raise CuttingWorkbookError("تعذر قراءة رقم اليوم من الخلية R1")
 
 
-def _summary_rows(workbook, day_number):
-    if "Cutting_Shapes_Ordering" not in workbook.sheetnames:
-        return None
-    worksheet = workbook["Cutting_Shapes_Ordering"]
-    rows = []
-    # The prepared output block is F:I: day, ingredient, weight, cutting method.
-    for day_value, ingredient, weight, method in worksheet.iter_rows(
-        min_row=3, min_col=6, max_col=9, values_only=True
-    ):
-        if _as_day(day_value) != day_number:
-            continue
-        numeric_weight = _as_weight(weight)
-        ingredient_text = _clean_text(ingredient)
-        method_text = _clean_text(method)
-        if ingredient_text and numeric_weight and _is_cutting_method(method_text):
-            rows.append((ingredient_text, numeric_weight, method_text, worksheet.title))
-    return rows
-
-
 def _recipe_rows(workbook):
+    """Read cutting method, ingredient, and weight from A/B/H in recipe tabs."""
     rows = []
     ignored_sheets = {
         "Ordering", "All_Ingredients", "Marination_Ordering",
@@ -453,15 +435,12 @@ def extract_workbook(file_storage):
 
     try:
         day_number, day_sheet = _read_day_number(workbook)
-        rows = _summary_rows(workbook, day_number)
-        extraction_mode = "summary" if rows is not None else "recipes"
-        if rows is None:
-            rows = _recipe_rows(workbook)
+        rows = _recipe_rows(workbook)
         return {
             "filename": file_storage.filename or "workbook.xlsm",
             "day_number": day_number,
             "day_sheet": day_sheet,
-            "mode": extraction_mode,
+            "mode": "recipe_tabs_a_b_h",
             "rows": rows,
         }
     finally:
