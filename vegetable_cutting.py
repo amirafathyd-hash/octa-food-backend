@@ -298,8 +298,8 @@ def build_cutting_pdf(payload):
             pdf.setFillColor(HexColor("#164F3C"))
             pdf.setFont(_PDF_FONT_BOLD, 11.5)
             pdf.drawRightString(method_right, method_y, _rtl(method_row.get("method"))[:52])
-            pdf.setFillColor(HexColor("#718078"))
-            pdf.setFont(_PDF_FONT_REGULAR, 9)
+            pdf.setFillColor(HexColor("#38594C"))
+            pdf.setFont(_PDF_FONT_BOLD, 10.5)
             method_weight = float(method_row.get("weight_grams") or 0)
             pdf.drawString(cutting_left + 14, method_y + 1, f"{method_weight:,.0f} g")
             method_y -= line_gap
@@ -424,6 +424,7 @@ def build_cutting_png(payload):
 
     regular = ImageFont.truetype(regular_path, 25)
     small = ImageFont.truetype(regular_path, 21)
+    small_bold = ImageFont.truetype(bold_path, 22)
     bold = ImageFont.truetype(bold_path, 27)
     title_font = ImageFont.truetype(bold_path, 48)
     subtitle_font = ImageFont.truetype(regular_path, 25)
@@ -505,7 +506,7 @@ def build_cutting_png(payload):
         line_y = y + (row_height - len(methods) * 34) / 2 + 17
         for method in methods:
             method_weight = f'{float(method.get("weight_grams") or 0):,.0f} g'
-            draw.text((table_left + 24, line_y), method_weight, font=small, fill=muted, anchor="lm")
+            draw.text((table_left + 24, line_y), method_weight, font=small_bold, fill=dark_green, anchor="lm")
             rtl_text((weight_left - 24, line_y), method.get("method"), regular, anchor="rm")
             line_y += 34
         y = row_bottom
