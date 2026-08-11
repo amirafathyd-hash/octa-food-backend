@@ -7,6 +7,8 @@ import os
 import re
 
 import openpyxl
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from PIL import Image, ImageDraw, ImageFont
 import arabic_reshaper
 try:
     from bidi.algorithm import get_display
@@ -54,7 +56,7 @@ _NON_METHODS = {
 DAY_NO_COL = 36       # AJ
 SHEET_NAME_COL = 37   # AK
 
-_FONT_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
+_FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 _PDF_FONT_REGULAR = "OctaArabic"
 _PDF_FONT_BOLD = "OctaArabicBold"
 
@@ -310,6 +312,199 @@ def build_cutting_pdf(payload):
     pdf.showPage()
 
     pdf.save()
+    output.seek(0)
+    return output
+
+
+def build_cutting_xlsx(payload):
+    rows = payload.get("rows") or []
+    if not rows:
+        raise CuttingWorkbookError("لا توجد بيانات لإنشاء ملف Excel")
+    if len(rows) > 500:
+        raise CuttingWorkbookError("عدد الصفوف أكبر من الحد المسموح")
+
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Vegetable Cutting"
+    worksheet.sheet_view.rightToLeft = True
+    worksheet.freeze_panes = "A5"
+
+    dark_green = "123D2E"
+    lime = "B8D83E"
+    light_green = "EFF5F1"
+    white = "FFFFFF"
+    border_side = Side(style="thin", color="CCD8D1")
+
+    worksheet.merge_cells("A1:E1")
+    title_cell = worksheet["A1"]
+    title_cell.value = "كشف تقطيع الخضار"
+    title_cell.fill = PatternFill("solid", fgColor=dark_green)
+    title_cell.font = Font(color=white, bold=True, size=18)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.row_dimensions[1].height = 34
+
+    worksheet.merge_cells("A2:E2")
+    day_number = payload.get("day_number") or ""
+    day_ar = _clean_text(payload.get("day_name_ar")) or f"اليوم {day_number}"
+    day_en = _clean_text(payload.get("day_name_en"))
+    worksheet["A2"] = f"{day_ar} - {day_en}" if day_en else day_ar
+    worksheet["A2"].font = Font(color=dark_green, bold=True, size=12)
+    worksheet["A2"].alignment = Alignment(horizontal="center", vertical="center")
+
+    headers = (
+        "الصنف", "إجمالي الوزن (جرام)", "طريقة التقطيع",
+        "وزن الطريقة (جرام)", "المصدر",
+    )
+    for column, value in enumerate(headers, start=1):
+        cell = worksheet.cell(row=4, column=column, value=value)
+        cell.fill = PatternFill("solid", fgColor=lime)
+        cell.font = Font(color=dark_green, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = Border(
+            left=border_side, right=border_side,
+            top=border_side, bottom=border_side,
+        )
+
+    output_row = 5
+    for item in rows:
+        methods = _row_methods(item)
+        sources = "، ".join(_clean_text(value) for value in (item.get("sources") or []) if value)
+        for method in methods:
+            values = (
+                _clean_text(item.get("ingredient")),
+                float(item.get("weight_grams") or 0),
+                _clean_text(method.get("method")),
+                float(method.get("weight_grams") or 0),
+                sources,
+            )
+            for column, value in enumerate(values, start=1):
+                cell = worksheet.cell(row=output_row, column=column, value=value)
+                cell.fill = PatternFill("solid", fgColor=white if output_row % 2 else light_green)
+                cell.alignment = Alignment(
+                    horizontal="right" if column in (1, 3, 5) else "center",
+                    vertical="center", wrap_text=True,
+                )
+                cell.border = Border(
+                    left=border_side, right=border_side,
+                    top=border_side, bottom=border_side,
+                )
+                if column in (2, 4):
+                    cell.number_format = '#,##0.00'
+            output_row += 1
+
+    worksheet.auto_filter.ref = f"A4:E{max(output_row - 1, 4)}"
+    for column, width in {"A": 34, "B": 21, "C": 30, "D": 21, "E": 34}.items():
+        worksheet.column_dimensions[column].width = width
+    worksheet.print_title_rows = "1:4"
+    worksheet.page_setup.orientation = "landscape"
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def build_cutting_png(payload):
+    rows = payload.get("rows") or []
+    if not rows:
+        raise CuttingWorkbookError("لا توجد بيانات لإنشاء الصورة")
+    if len(rows) > 500:
+        raise CuttingWorkbookError("عدد الصفوف أكبر من الحد المسموح")
+
+    regular_path = _find_pdf_font(
+        "IBMPlexSansArabic-Regular.ttf", "FreeSans.ttf", "DejaVuSans.ttf",
+    )
+    bold_path = _find_pdf_font(
+        "IBMPlexSansArabic-Bold.ttf", "FreeSansBold.ttf", "DejaVuSans-Bold.ttf",
+    ) or regular_path
+    if not regular_path or not bold_path:
+        raise CuttingWorkbookError("الخط العربي غير متاح على الخادم")
+
+    regular = ImageFont.truetype(regular_path, 25)
+    small = ImageFont.truetype(regular_path, 21)
+    bold = ImageFont.truetype(bold_path, 27)
+    title_font = ImageFont.truetype(bold_path, 48)
+    subtitle_font = ImageFont.truetype(regular_path, 25)
+
+    width = 1800
+    margin = 52
+    header_height = 170
+    columns_height = 66
+    footer_height = 54
+    row_heights = [max(76, 30 + len(_row_methods(row)) * 34) for row in rows]
+    height = margin + header_height + columns_height + sum(row_heights) + footer_height + margin
+    if height > 50000:
+        raise CuttingWorkbookError("التقرير أكبر من الحد المسموح للصورة")
+
+    dark_green = "#123D2E"
+    medium_green = "#176047"
+    lime = "#B8D83E"
+    pale = "#F1F6F3"
+    grid = "#CCD8D1"
+    muted = "#6D7B74"
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    def rtl_text(xy, value, font, fill=dark_green, anchor="ra"):
+        draw.text(xy, _rtl(value), font=font, fill=fill, anchor=anchor)
+
+    table_left = margin
+    table_right = width - margin
+    ingredient_left = 1110
+    weight_left = 835
+
+    draw.rounded_rectangle(
+        (margin, margin, width - margin, margin + header_height - 12),
+        radius=30, fill=dark_green,
+    )
+    rtl_text((width - margin - 40, margin + 58), "كشف تقطيع الخضار", title_font, "white")
+    day_number = payload.get("day_number") or ""
+    day_ar = payload.get("day_name_ar") or f"اليوم {day_number}"
+    day_en = _clean_text(payload.get("day_name_en"))
+    rtl_text((width - margin - 42, margin + 116), day_ar, subtitle_font, lime)
+    draw.text((margin + 42, margin + 105), day_en, font=subtitle_font, fill="white", anchor="la")
+
+    y = margin + header_height
+    draw.rectangle((table_left, y, table_right, y + columns_height), fill=lime)
+    rtl_text((table_right - 24, y + columns_height / 2), "الصنف", bold, anchor="rm")
+    rtl_text(((weight_left + ingredient_left) / 2, y + columns_height / 2), "إجمالي الوزن", bold, anchor="mm")
+    rtl_text((weight_left - 24, y + columns_height / 2), "طريقة التقطيع والوزن", bold, anchor="rm")
+    y += columns_height
+
+    for index, (row, row_height) in enumerate(zip(rows, row_heights)):
+        row_bottom = y + row_height
+        draw.rectangle(
+            (table_left, y, table_right, row_bottom),
+            fill="white" if index % 2 == 0 else pale,
+            outline=grid,
+        )
+        draw.line((weight_left, y, weight_left, row_bottom), fill=grid, width=2)
+        draw.line((ingredient_left, y, ingredient_left, row_bottom), fill=grid, width=2)
+
+        rtl_text((table_right - 24, y + row_height / 2), row.get("ingredient"), bold, anchor="rm")
+        draw.text(
+            ((weight_left + ingredient_left) / 2, y + row_height / 2),
+            f'{float(row.get("weight_grams") or 0):,.0f} g',
+            font=bold, fill=medium_green, anchor="mm",
+        )
+
+        methods = _row_methods(row)
+        line_y = y + (row_height - len(methods) * 34) / 2 + 17
+        for method in methods:
+            method_weight = f'{float(method.get("weight_grams") or 0):,.0f} g'
+            draw.text((table_left + 24, line_y), method_weight, font=small, fill=muted, anchor="lm")
+            rtl_text((weight_left - 24, line_y), method.get("method"), regular, anchor="rm")
+            line_y += 34
+        y = row_bottom
+
+    draw.rectangle((table_left, y, table_right, y + footer_height), fill=dark_green)
+    draw.text((table_left + 24, y + footer_height / 2), "OCTA FOOD - VEGETABLE PREP", font=small, fill="white", anchor="lm")
+    rtl_text((table_right - 24, y + footer_height / 2), f"عدد الأصناف: {len(rows)}", small, "white", "rm")
+
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
     output.seek(0)
     return output
 
@@ -610,4 +805,44 @@ def vegetable_cutting_export_pdf():
         as_attachment=True,
         download_name=f"Vegetable_Cutting_Day_{day_number}.pdf",
         mimetype="application/pdf",
+    )
+
+
+@vegetable_cutting_bp.route("/api/vegetable-cutting/export-xlsx", methods=["POST"])
+def vegetable_cutting_export_xlsx():
+    payload = request.get_json(silent=True) or {}
+    try:
+        output = build_cutting_xlsx(payload)
+    except (CuttingWorkbookError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({
+            "error": f"تعذر إنشاء ملف Excel على الخادم: {str(exc)[:180]}"
+        }), 500
+    day_number = _as_day(payload.get("day_number")) or 1
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"Vegetable_Cutting_Day_{day_number}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@vegetable_cutting_bp.route("/api/vegetable-cutting/export-png", methods=["POST"])
+def vegetable_cutting_export_png():
+    payload = request.get_json(silent=True) or {}
+    try:
+        output = build_cutting_png(payload)
+    except (CuttingWorkbookError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({
+            "error": f"تعذر إنشاء الصورة على الخادم: {str(exc)[:180]}"
+        }), 500
+    day_number = _as_day(payload.get("day_number")) or 1
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"Vegetable_Cutting_Day_{day_number}.png",
+        mimetype="image/png",
     )
