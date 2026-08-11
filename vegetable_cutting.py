@@ -13,8 +13,6 @@ try:
 except ImportError:  # python-bidi 0.6.11+ exposes the Rust implementation here
     from bidi import get_display
 from flask import Blueprint, jsonify, request, send_file
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.worksheet.table import Table, TableStyleInfo
 from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A1, A2, landscape
 from reportlab.pdfbase import pdfmetrics
@@ -53,17 +51,17 @@ _NON_METHODS = {
     "vegetables", "spices & seasonings", "bread & bakery", "filling",
 }
 
-_APP_DIR = os.path.dirname(os.path.abspath(__file__))
-_FONT_DIRS = (
-    os.path.join(_APP_DIR, "fonts"),
-    os.path.join(_APP_DIR, "assets", "fonts"),
-)
+DAY_NO_COL = 36       # AJ
+SHEET_NAME_COL = 37   # AK
+
+_FONT_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
 _PDF_FONT_REGULAR = "OctaArabic"
 _PDF_FONT_BOLD = "OctaArabicBold"
 
 
 def _find_pdf_font(*names):
-    search_dirs = _FONT_DIRS + (
+    search_dirs = (
+        _FONT_DIR,
         "/usr/share/fonts/truetype/freefont",
         "/usr/share/fonts/truetype/dejavu",
         "/usr/local/share/fonts",
@@ -400,108 +398,86 @@ def _read_day_number(workbook):
     raise CuttingWorkbookError("تعذر قراءة رقم اليوم من الخلية R1")
 
 
-_MAPPING_LAYOUTS = (
-    {
-        "name": "breakfast",
-        "day_column": "AB",
-        "sheet_column": "AA",
-        "min_column": 27,
-        "day_index": 1,
-        "sheet_index": 0,
-    },
-    {
-        "name": "hot_section",
-        "day_column": "AJ",
-        "sheet_column": "AK",
-        "min_column": 36,
-        "day_index": 0,
-        "sheet_index": 1,
-    },
-)
-_MAPPING_MAX_ROW = 40
-_RECIPE_MAX_ROW = 40
-
-
-def _mapped_recipe_sheets(workbook, day_number):
-    """Find the workbook mapping table and return tabs assigned to its active day."""
-    sheet_lookup = {
-        _clean_text(sheet_name).casefold(): sheet_name
-        for sheet_name in workbook.sheetnames
-    }
-    preferred = ("All_Ingredients", "Ordering", "Marination_Ordering")
-    candidates = [workbook[name] for name in preferred if name in workbook.sheetnames]
-    if not candidates:
-        candidates = list(workbook.worksheets)
-
-    best = None
-    for worksheet in candidates:
-        for layout in _MAPPING_LAYOUTS:
-            valid_pairs = []
-            selected_sheets = []
-            seen_selected = set()
-            for values in worksheet.iter_rows(
-                min_row=1,
-                max_row=_MAPPING_MAX_ROW,
-                min_col=layout["min_column"],
-                max_col=layout["min_column"] + 1,
-                values_only=True,
-            ):
-                mapped_day = _as_day(values[layout["day_index"]])
-                mapped_name = _clean_text(values[layout["sheet_index"]])
-                actual_name = sheet_lookup.get(mapped_name.casefold())
-                if not mapped_day or not actual_name:
-                    continue
-                valid_pairs.append((mapped_day, actual_name))
-                selected_key = actual_name.casefold()
-                if mapped_day == day_number and selected_key not in seen_selected:
-                    selected_sheets.append(actual_name)
-                    seen_selected.add(selected_key)
-
-            candidate = {
-                "score": len(valid_pairs),
-                "control_sheet": worksheet.title,
-                "layout": layout,
-                "selected_sheets": selected_sheets,
-            }
-            if best is None or candidate["score"] > best["score"]:
-                best = candidate
-
-    if not best or best["score"] == 0:
-        raise CuttingWorkbookError(
-            "تعذر العثور على جدول ربط الأيام بالتابات في AA/AB أو AJ/AK حتى الصف 40"
-        )
-    if not best["selected_sheets"]:
-        layout = best["layout"]
-        raise CuttingWorkbookError(
-            f"لا توجد تابات مرتبطة باليوم {day_number} في العمودين "
-            f'{layout["day_column"]}/{layout["sheet_column"]} حتى الصف 40'
-        )
-    return best["selected_sheets"], {
-        "type": best["layout"]["name"],
-        "control_sheet": best["control_sheet"],
-        "day_column": best["layout"]["day_column"],
-        "sheet_column": best["layout"]["sheet_column"],
-    }
-
-
-def _recipe_rows(workbook, recipe_sheet_names):
-    """Read A/B/H through row 40 from the recipe tabs assigned to the active day."""
+def _summary_rows(workbook, day_number):
+    if "Cutting_Shapes_Ordering" not in workbook.sheetnames:
+        return None
+    worksheet = workbook["Cutting_Shapes_Ordering"]
     rows = []
-    for sheet_name in recipe_sheet_names:
-        worksheet = workbook[sheet_name]
+    # The prepared output block is F:I: day, ingredient, weight, cutting method.
+    for day_value, ingredient, weight, method in worksheet.iter_rows(
+        min_row=3, min_col=6, max_col=9, values_only=True
+    ):
+        if _as_day(day_value) != day_number:
+            continue
+        numeric_weight = _as_weight(weight)
+        ingredient_text = _clean_text(ingredient)
+        method_text = _clean_text(method)
+        if ingredient_text and numeric_weight and _is_cutting_method(method_text):
+            rows.append((ingredient_text, numeric_weight, method_text))
+    return rows
+
+
+def _day_recipe_sheet_names(workbook, day_number):
+    """Return recipe tabs assigned to ``day_number`` in All_Ingredients.
+
+    The Tokyo workbook keeps the day-to-tab mapping in AJ:AK.  The mapping
+    currently extends well past row 40 (day 6 starts around row 77), so this
+    must always follow the worksheet's actual last row instead of a fixed
+    range.
+
+    ``None`` means the workbook has no AJ:AK mapping (for example the
+    breakfast workbook), while an empty list means a mapping exists but does
+    not contain the requested day.
+    """
+    if "All_Ingredients" not in workbook.sheetnames:
+        return None
+
+    worksheet = workbook["All_Ingredients"]
+    sheet_names = []
+    seen = set()
+    for row_number in range(1, worksheet.max_row + 1):
+        if _as_day(worksheet.cell(row=row_number, column=DAY_NO_COL).value) != day_number:
+            continue
+        sheet_name = _clean_text(
+            worksheet.cell(row=row_number, column=SHEET_NAME_COL).value
+        )
+        if not sheet_name or sheet_name in seen or sheet_name not in workbook.sheetnames:
+            continue
+        seen.add(sheet_name)
+        sheet_names.append(sheet_name)
+    return sheet_names
+
+
+def _recipe_rows(workbook, day_number):
+    rows = []
+    ignored_sheets = {
+        "Ordering", "All_Ingredients", "Marination_Ordering",
+        "Cutting_Shapes_Ordering", "Butchery",
+    }
+    day_sheet_names = _day_recipe_sheet_names(workbook, day_number)
+    if day_sheet_names == []:
+        raise CuttingWorkbookError(
+            f"لا توجد تابات مرتبطة باليوم {day_number} في العمودين AJ/AK"
+        )
+
+    worksheets = (
+        [workbook[sheet_name] for sheet_name in day_sheet_names]
+        if day_sheet_names is not None
+        else [
+            worksheet for worksheet in workbook.worksheets
+            if worksheet.title not in ignored_sheets
+        ]
+    )
+    for worksheet in worksheets:
         for row in worksheet.iter_rows(
-            min_row=1,
-            max_row=_RECIPE_MAX_ROW,
-            min_col=1,
-            max_col=8,
-            values_only=True,
+            min_row=1, min_col=1, max_col=8, values_only=True
         ):
             method, ingredient, weight = row[0], row[1], row[7]
             numeric_weight = _as_weight(weight)
             ingredient_text = _clean_text(ingredient)
             method_text = _clean_text(method)
             if ingredient_text and numeric_weight and _is_cutting_method(method_text):
-                rows.append((ingredient_text, numeric_weight, method_text, worksheet.title))
+                rows.append((ingredient_text, numeric_weight, method_text))
     return rows
 
 
@@ -518,15 +494,15 @@ def extract_workbook(file_storage):
 
     try:
         day_number, day_sheet = _read_day_number(workbook)
-        recipe_sheets, mapping = _mapped_recipe_sheets(workbook, day_number)
-        rows = _recipe_rows(workbook, recipe_sheets)
+        rows = _summary_rows(workbook, day_number)
+        extraction_mode = "summary" if rows is not None else "recipes"
+        if rows is None:
+            rows = _recipe_rows(workbook, day_number)
         return {
             "filename": file_storage.filename or "workbook.xlsm",
             "day_number": day_number,
             "day_sheet": day_sheet,
-            "mode": "mapped_recipe_tabs_a_b_h",
-            "mapping": mapping,
-            "selected_sheets": recipe_sheets,
+            "mode": extraction_mode,
             "rows": rows,
         }
     finally:
@@ -534,163 +510,48 @@ def extract_workbook(file_storage):
 
 
 def combine_workbooks(extracted):
+    days = {item["day_number"] for item in extracted}
+    if len(days) != 1:
+        details = "، ".join(
+            f'{item["filename"]}: يوم {item["day_number"]}' for item in extracted
+        )
+        raise CuttingWorkbookError(f"الملفان ليسا لنفس يوم التشغيل ({details})")
+
     combined = OrderedDict()
     for source in extracted:
-        for ingredient, weight, method, source_sheet in source["rows"]:
-            ingredient_key = _clean_text(ingredient).casefold()
-            method_key = _clean_text(method).casefold()
-            key = (ingredient_key, method_key)
+        for ingredient, weight, method in source["rows"]:
+            key = _clean_text(ingredient).casefold()
             if key not in combined:
                 combined[key] = {
                     "ingredient": ingredient,
-                    "method": method,
-                    "icon": _icon_kind(method),
                     "weight_grams": 0.0,
                     "sources": [],
-                    "source_sheets": [],
+                    "methods": OrderedDict(),
                 }
             combined[key]["weight_grams"] += weight
+            method_key = _clean_text(method).casefold()
+            if method_key not in combined[key]["methods"]:
+                combined[key]["methods"][method_key] = {
+                    "method": method,
+                    "weight_grams": 0.0,
+                    "icon": _icon_kind(method),
+                }
+            combined[key]["methods"][method_key]["weight_grams"] += weight
             if source["filename"] not in combined[key]["sources"]:
                 combined[key]["sources"].append(source["filename"])
-            if source_sheet not in combined[key]["source_sheets"]:
-                combined[key]["source_sheets"].append(source_sheet)
 
     rows = []
     for index, row in enumerate(combined.values(), start=1):
         row["id"] = index
         row["weight_grams"] = round(row["weight_grams"], 2)
-        row["methods"] = [{
-            "method": row["method"],
-            "weight_grams": row["weight_grams"],
-            "icon": row["icon"],
-        }]
+        methods = list(row["methods"].values())
+        for method_row in methods:
+            method_row["weight_grams"] = round(method_row["weight_grams"], 2)
+        row["methods"] = methods
+        row["method"] = " / ".join(method_row["method"] for method_row in methods)
+        row["icon"] = methods[0]["icon"] if len(methods) == 1 else "multiple"
         rows.append(row)
-    return extracted[0]["day_number"], rows
-
-
-def build_cutting_xlsx(payload):
-    rows = payload.get("rows") or []
-    if not rows:
-        raise CuttingWorkbookError("لا توجد بيانات لإنشاء ملف إكسيل")
-
-    workbook = openpyxl.Workbook()
-    worksheet = workbook.active
-    worksheet.title = "كشف التقطيع"
-    worksheet.sheet_view.rightToLeft = True
-    worksheet.sheet_view.showGridLines = False
-    worksheet.freeze_panes = "A6"
-
-    dark_green = "164F3C"
-    medium_green = "26745A"
-    light_green = "E4EDCC"
-    lime = "B9D94A"
-    white = "FFFFFF"
-    muted = "718078"
-    border_color = "DDE7E1"
-    thin_border = Border(bottom=Side(style="thin", color=border_color))
-
-    worksheet.merge_cells("A1:D1")
-    title_cell = worksheet["A1"]
-    title_cell.value = "كشف تجهيز وتقطيع الخضار"
-    title_cell.font = Font(name="Arial", size=20, bold=True, color=white)
-    title_cell.fill = PatternFill("solid", fgColor=dark_green)
-    title_cell.alignment = Alignment(horizontal="center", vertical="center")
-    worksheet.row_dimensions[1].height = 38
-
-    day_ar = _clean_text(payload.get("day_name_ar")) or f"اليوم {payload.get('day_number', '')}"
-    day_en = _clean_text(payload.get("day_name_en"))
-    worksheet.merge_cells("A2:B2")
-    worksheet["A2"] = f"اليوم: {day_ar} - {day_en}".strip(" -")
-    worksheet["A2"].font = Font(name="Arial", size=12, bold=True, color=dark_green)
-    worksheet["A2"].alignment = Alignment(horizontal="right", vertical="center")
-
-    worksheet["C2"] = "عدد الأصناف"
-    worksheet["D2"] = len(rows)
-    worksheet["C3"] = "إجمالي الكمية (جرام)"
-    worksheet["D3"] = sum(float(row.get("weight_grams") or 0) for row in rows)
-    for cell in (worksheet["C2"], worksheet["C3"]):
-        cell.font = Font(name="Arial", size=10, bold=True, color=muted)
-        cell.alignment = Alignment(horizontal="right")
-    for cell in (worksheet["D2"], worksheet["D3"]):
-        cell.font = Font(name="Arial", size=12, bold=True, color=dark_green)
-        cell.fill = PatternFill("solid", fgColor=light_green)
-        cell.alignment = Alignment(horizontal="center")
-    worksheet["D3"].number_format = "#,##0"
-    worksheet.row_dimensions[2].height = 24
-    worksheet.row_dimensions[3].height = 24
-
-    headers = ["الصنف", "الكمية (جرام)", "طريقة وشكل التقطيع", "تاب مصدر الأرقام"]
-    for column, header in enumerate(headers, start=1):
-        cell = worksheet.cell(row=5, column=column, value=header)
-        cell.font = Font(name="Arial", size=11, bold=True, color=white)
-        cell.fill = PatternFill("solid", fgColor=medium_green)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-    worksheet.row_dimensions[5].height = 30
-
-    first_data_row = 6
-    for row_index, row in enumerate(rows, start=first_data_row):
-        methods = row.get("methods") or []
-        method_text = " | ".join(
-            f'{_clean_text(item.get("method"))} ({float(item.get("weight_grams") or 0):,.0f} g)'
-            for item in methods
-        ) or _clean_text(row.get("method"))
-        values = [
-            _clean_text(row.get("ingredient")),
-            float(row.get("weight_grams") or 0),
-            method_text,
-            "، ".join(_clean_text(name) for name in (row.get("source_sheets") or []) if _clean_text(name)),
-        ]
-        for column, value in enumerate(values, start=1):
-            cell = worksheet.cell(row=row_index, column=column, value=value)
-            cell.font = Font(name="Arial", size=10, color="17211D")
-            cell.alignment = Alignment(
-                horizontal="center" if column == 2 else "right",
-                vertical="center",
-                wrap_text=True,
-            )
-            cell.border = thin_border
-        worksheet.cell(row=row_index, column=2).number_format = "#,##0"
-        worksheet.row_dimensions[row_index].height = 36
-
-    last_data_row = first_data_row + len(rows) - 1
-    table = Table(displayName="VegetableCuttingTable", ref=f"A5:D{last_data_row}")
-    table.tableStyleInfo = TableStyleInfo(
-        name="TableStyleMedium4",
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=True,
-        showColumnStripes=False,
-    )
-    worksheet.add_table(table)
-
-    total_row = last_data_row + 2
-    worksheet.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=1)
-    worksheet.cell(row=total_row, column=1, value="الإجمالي")
-    worksheet.cell(row=total_row, column=2, value=f"=SUM(B{first_data_row}:B{last_data_row})")
-    for column in range(1, 5):
-        cell = worksheet.cell(row=total_row, column=column)
-        cell.fill = PatternFill("solid", fgColor=light_green)
-        cell.font = Font(name="Arial", size=11, bold=True, color=dark_green)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-    worksheet.cell(row=total_row, column=2).number_format = "#,##0"
-    worksheet.row_dimensions[total_row].height = 26
-
-    worksheet.column_dimensions["A"].width = 34
-    worksheet.column_dimensions["B"].width = 18
-    worksheet.column_dimensions["C"].width = 58
-    worksheet.column_dimensions["D"].width = 32
-    worksheet.auto_filter.ref = f"A5:D{last_data_row}"
-    worksheet.print_title_rows = "1:5"
-    worksheet.page_setup.orientation = "landscape"
-    worksheet.page_setup.fitToWidth = 1
-    worksheet.page_setup.fitToHeight = 0
-    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
-    worksheet.oddFooter.center.text = "OCTA FOOD - VEGETABLE PREP"
-
-    output = io.BytesIO()
-    workbook.save(output)
-    output.seek(0)
-    return output
+    return next(iter(days)), rows
 
 
 @vegetable_cutting_bp.route("/api/vegetable-cutting/extract", methods=["POST"])
@@ -749,24 +610,4 @@ def vegetable_cutting_export_pdf():
         as_attachment=True,
         download_name=f"Vegetable_Cutting_Day_{day_number}.pdf",
         mimetype="application/pdf",
-    )
-
-
-@vegetable_cutting_bp.route("/api/vegetable-cutting/export-xlsx", methods=["POST"])
-def vegetable_cutting_export_xlsx():
-    payload = request.get_json(silent=True) or {}
-    try:
-        output = build_cutting_xlsx(payload)
-    except (CuttingWorkbookError, TypeError, ValueError) as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({
-            "error": f"تعذر إنشاء ملف إكسيل على الخادم: {str(exc)[:180]}"
-        }), 500
-    day_number = _as_day(payload.get("day_number")) or 1
-    return send_file(
-        output,
-        as_attachment=True,
-        download_name=f"Vegetable_Cutting_Day_{day_number}.xlsx",
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
