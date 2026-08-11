@@ -56,6 +56,14 @@ _NON_METHODS = {
 DAY_NO_COL = 36       # AJ
 SHEET_NAME_COL = 37   # AK
 
+# Each workbook family keeps its day-to-recipe-tab map in a different place.
+# Main Tokyo ordering: All_Ingredients!AJ:AK = day, sheet name.
+# Tokyo breakfast: Ordering!AA:AB = sheet name, day.
+DAY_SHEET_MAPPINGS = (
+    ("All_Ingredients", DAY_NO_COL, SHEET_NAME_COL),
+    ("Ordering", 28, 27),
+)
+
 _FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 _PDF_FONT_REGULAR = "OctaArabic"
 _PDF_FONT_BOLD = "OctaArabicBold"
@@ -552,6 +560,16 @@ def _as_weight(value):
     return number
 
 
+def _rounded_grams(value):
+    """Match Excel's displayed whole-gram operational rounding.
+
+    Kitchen staff copy the visible whole grams per recipe row.  Rounding each
+    positive row before aggregation keeps ingredient totals equal to the sum
+    of the method weights shown in the report (for example 78 + 150 = 228).
+    """
+    return float(math.floor(float(value) + 0.5))
+
+
 def _is_cutting_method(value):
     method = _clean_text(value)
     if not method or method.casefold() in _NON_METHODS:
@@ -625,46 +643,61 @@ def _summary_rows(workbook, day_number):
 
 
 def _day_recipe_sheet_names(workbook, day_number):
-    """Return recipe tabs assigned to ``day_number`` in All_Ingredients.
+    """Return only recipe tabs explicitly assigned to ``day_number``.
 
-    The Tokyo workbook keeps the day-to-tab mapping in AJ:AK.  The mapping
-    currently extends well past row 40 (day 6 starts around row 77), so this
-    must always follow the worksheet's actual last row instead of a fixed
-    range.
+    The main Tokyo workbook keeps the map in ``All_Ingredients!AJ:AK`` while
+    the breakfast workbook keeps it (in reverse order) in ``Ordering!AA:AB``.
+    Both maps can extend well past row 40, so they must follow the worksheet's
+    actual last row instead of a fixed range.
 
-    ``None`` means the workbook has no AJ:AK mapping (for example the
-    breakfast workbook), while an empty list means a mapping exists but does
-    not contain the requested day.
+    ``None`` means the workbook has no recognized mapping, while an empty list
+    means a mapping exists but contains no valid recipe tab for the requested
+    day.  Never fall back to every recipe tab when a recognized map exists.
     """
-    if "All_Ingredients" not in workbook.sheetnames:
-        return None
-
-    worksheet = workbook["All_Ingredients"]
     sheet_names = []
     seen = set()
-    for row_number in range(1, worksheet.max_row + 1):
-        if _as_day(worksheet.cell(row=row_number, column=DAY_NO_COL).value) != day_number:
+    mapping_found = False
+    actual_sheet_names = {
+        _clean_text(name).casefold(): name for name in workbook.sheetnames
+    }
+
+    for mapping_sheet, day_column, name_column in DAY_SHEET_MAPPINGS:
+        if mapping_sheet not in workbook.sheetnames:
             continue
-        sheet_name = _clean_text(
-            worksheet.cell(row=row_number, column=SHEET_NAME_COL).value
-        )
-        if not sheet_name or sheet_name in seen or sheet_name not in workbook.sheetnames:
-            continue
-        seen.add(sheet_name)
-        sheet_names.append(sheet_name)
-    return sheet_names
+        worksheet = workbook[mapping_sheet]
+        for row_number in range(1, worksheet.max_row + 1):
+            mapped_day = _as_day(
+                worksheet.cell(row=row_number, column=day_column).value
+            )
+            sheet_name = _clean_text(
+                worksheet.cell(row=row_number, column=name_column).value
+            )
+            if not mapped_day or not sheet_name:
+                continue
+            mapping_found = True
+            if mapped_day != day_number:
+                continue
+            normalized_name = sheet_name.casefold()
+            actual_name = actual_sheet_names.get(normalized_name)
+            if normalized_name in seen or not actual_name:
+                continue
+            seen.add(normalized_name)
+            sheet_names.append(actual_name)
+
+    return sheet_names if mapping_found else None
 
 
-def _recipe_rows(workbook, day_number):
+def _recipe_rows(workbook, day_number, day_sheet_names=None):
     rows = []
     ignored_sheets = {
         "Ordering", "All_Ingredients", "Marination_Ordering",
         "Cutting_Shapes_Ordering", "Butchery",
     }
-    day_sheet_names = _day_recipe_sheet_names(workbook, day_number)
+    if day_sheet_names is None:
+        day_sheet_names = _day_recipe_sheet_names(workbook, day_number)
     if day_sheet_names == []:
         raise CuttingWorkbookError(
-            f"لا توجد تابات مرتبطة باليوم {day_number} في العمودين AJ/AK"
+            f"لا توجد تابات وصفات صالحة مرتبطة باليوم {day_number} في خريطة الملف"
         )
 
     worksheets = (
@@ -703,13 +736,16 @@ def extract_workbook(file_storage):
         day_number, day_sheet = _read_day_number(workbook)
         rows = _summary_rows(workbook, day_number)
         extraction_mode = "summary" if rows is not None else "recipes"
+        selected_sheets = []
         if rows is None:
-            rows = _recipe_rows(workbook, day_number)
+            selected_sheets = _day_recipe_sheet_names(workbook, day_number)
+            rows = _recipe_rows(workbook, day_number, selected_sheets)
         return {
             "filename": file_storage.filename or "workbook.xlsm",
             "day_number": day_number,
             "day_sheet": day_sheet,
             "mode": extraction_mode,
+            "selected_sheets": selected_sheets or [],
             "rows": rows,
         }
     finally:
@@ -727,6 +763,7 @@ def combine_workbooks(extracted):
     combined = OrderedDict()
     for source in extracted:
         for ingredient, weight, method in source["rows"]:
+            weight = _rounded_grams(weight)
             key = _clean_text(ingredient).casefold()
             if key not in combined:
                 combined[key] = {
@@ -793,6 +830,7 @@ def vegetable_cutting_extract():
                 "day_number": item["day_number"],
                 "day_cell": f'{item["day_sheet"]}!R1',
                 "extraction_mode": item["mode"],
+                "selected_sheets": item.get("selected_sheets") or [],
                 "matched_rows": len(item["rows"]),
             }
             for item in extracted
