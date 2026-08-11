@@ -448,7 +448,18 @@ def build_cutting_png(payload):
     draw = ImageDraw.Draw(image)
 
     def rtl_text(xy, value, font, fill=dark_green, anchor="ra"):
-        draw.text(xy, _rtl(value), font=font, fill=fill, anchor=anchor)
+        text = _clean_text(value)
+        try:
+            # Pillow on the deployed Docker image has libraqm.  Give it the
+            # original Unicode text so Arabic is shaped exactly once.
+            draw.text(
+                xy, text, font=font, fill=fill, anchor=anchor,
+                direction="rtl", language="ar",
+            )
+        except (KeyError, TypeError, ValueError):
+            # Environments without libraqm still work using presentation
+            # forms prepared by arabic-reshaper/python-bidi.
+            draw.text(xy, _rtl(text), font=font, fill=fill, anchor=anchor)
 
     table_left = margin
     table_right = width - margin
