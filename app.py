@@ -5123,6 +5123,58 @@ FRUIT_CATEGORY_LABELS = {'فاكهة', 'فاكهه', 'فواكه'}
 PRODUCE_CATEGORY_LABELS = VEGETABLE_CATEGORY_LABELS | FRUIT_CATEGORY_LABELS
 
 
+def _is_bakery_category(value):
+    """Match only bakery rows from Daily Ordering Summary categories."""
+    category = re.sub(r'[\s_\-&/]+', '', str(value or '').strip().casefold())
+    return (
+        'مخبوز' in category
+        or 'bakery' in category
+        or category in {'bread', 'breadandbakery'}
+    )
+
+
+def _build_bakery_image_workbook_from_summary(wb, summary_sheet='Summary'):
+    """Build an image-only workbook containing bakery rows from Summary.
+
+    The original Daily Ordering workbook and its Summary tab are never edited.
+    This temporary workbook exists only long enough for the PNG exporter to
+    create the additional bakery-only image inside the ZIP.
+    """
+    if summary_sheet not in wb.sheetnames:
+        return None
+    source = wb[summary_sheet]
+    image_workbook = openpyxl.Workbook()
+    target = image_workbook.active
+    target.title = 'Bakery Only'
+
+    target.sheet_view.rightToLeft = source.sheet_view.rightToLeft
+    target.freeze_panes = source.freeze_panes
+    for column_letter, dimension in source.column_dimensions.items():
+        target.column_dimensions[column_letter].width = dimension.width
+
+    output_row = 1
+    for source_row in range(1, source.max_row + 1):
+        if source_row > 1 and not _is_bakery_category(source.cell(source_row, 2).value):
+            continue
+        for column in range(1, source.max_column + 1):
+            source_cell = source.cell(source_row, column)
+            target_cell = target.cell(output_row, column, source_cell.value)
+            if source_cell.has_style:
+                target_cell.font = copy(source_cell.font)
+                target_cell.fill = copy(source_cell.fill)
+                target_cell.border = copy(source_cell.border)
+                target_cell.alignment = copy(source_cell.alignment)
+                target_cell.number_format = source_cell.number_format
+                target_cell.protection = copy(source_cell.protection)
+        target.row_dimensions[output_row].height = source.row_dimensions[source_row].height
+        output_row += 1
+
+    if output_row == 2:
+        return None
+    target.auto_filter.ref = f'A1:{get_column_letter(source.max_column)}{output_row - 1}'
+    return image_workbook
+
+
 def _read_vegetable_rows(file_storage, sheet_name):
     """بترجع صفوف الأصناف المصنّفة 'خضروات'/'خضراوات' بس من شيت المحطة،
     بنفس أعمدة A (الاسم) + B (الفئة) + D (الوزن اليومي) + L (طلب اليوم) +
@@ -5367,11 +5419,28 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
                 app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
                 zf.writestr('images/تعذر_توليد_الصور.txt',
                              f'حصل خطأ أثناء توليد الصور: {e}')
+            try:
+                bakery_image_wb = _build_bakery_image_workbook_from_summary(wb_daily)
+                if bakery_image_wb:
+                    add_workbook_images_to_zip(
+                        zf,
+                        bakery_image_wb,
+                        today,
+                        prefix='DailyOrdering_',
+                        day_num_override=_bakery_sheet_day_override(day_num_override),
+                    )
+            except Exception as e:
+                app.logger.exception('تعذر توليد صورة المخبوزات من Daily Ordering Summary')
+                zf.writestr(
+                    'images/تعذر_توليد_صورة_المخبوزات.txt',
+                    f'حصل خطأ أثناء توليد صورة المخبوزات فقط: {e}',
+                )
     zip_buf.seek(0)
     return zip_buf
 
 
-def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_override=None, vegetable_summary_rows=None):
+def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_override=None,
+                               vegetable_summary_rows=None, bakery_summary_image=False):
     """زي _build_daily_ordering_zip بالظبط بس لملف واحد بس (مش اتنين) — مستخدمة
     في زرار "Daily Ordering" أو "Vegetables" لوحدهم، عشان صور التابات PNG
     تفضل متضافة زي ما كانت أول ما الزرارين كانوا مدموجين في واحد."""
@@ -5404,6 +5473,23 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
             app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
             zf.writestr('images/تعذر_توليد_الصور.txt',
                          f'حصل خطأ أثناء توليد الصور: {e}')
+        if bakery_summary_image:
+            try:
+                bakery_image_wb = _build_bakery_image_workbook_from_summary(wb)
+                if bakery_image_wb:
+                    add_workbook_images_to_zip(
+                        zf,
+                        bakery_image_wb,
+                        today,
+                        prefix=image_prefix,
+                        day_num_override=_bakery_sheet_day_override(day_num_override),
+                    )
+            except Exception as e:
+                app.logger.exception('تعذر توليد صورة المخبوزات من Daily Ordering Summary')
+                zf.writestr(
+                    'images/تعذر_توليد_صورة_المخبوزات.txt',
+                    f'حصل خطأ أثناء توليد صورة المخبوزات فقط: {e}',
+                )
     zip_buf.seek(0)
     return zip_buf
 
@@ -5416,6 +5502,13 @@ def _inventory_sheet_day_override(day_num_override):
     if day_num_override:
         return day_num_override
     return None
+
+
+def _bakery_sheet_day_override(day_num_override):
+    if isinstance(day_num_override, dict):
+        day_num = day_num_override.get('Summary') or next(iter(day_num_override.values()), None)
+        return {'Bakery Only': day_num} if day_num else None
+    return day_num_override
 
 
 def _vegetable_summary_rows_from_station_data(vegetable_data):
@@ -6115,7 +6208,14 @@ def auto_detect_stations():
         # (لسه بيرجع zip مش xlsx خام، عشان صور التابات متضاعش زي الأول).
         only = request.args.get('only')
         if only == 'daily':
-            zip_buf = _build_single_workbook_zip(wb_daily, today, 'Daily_Ordering', 'DailyOrdering_', day_num_override)
+            zip_buf = _build_single_workbook_zip(
+                wb_daily,
+                today,
+                'Daily_Ordering',
+                'DailyOrdering_',
+                day_num_override,
+                bakery_summary_image=True,
+            )
             return send_file(zip_buf, as_attachment=True,
                               download_name=f'Daily_Ordering_{today}.zip',
                               mimetype='application/zip')
