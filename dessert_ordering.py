@@ -31,6 +31,29 @@ def _norm(value):
     return " ".join(str(value or "").strip().lower().split())
 
 
+def _meal_match_keys(value):
+    text = _norm(value)
+    if not text:
+        return set()
+    without_parentheses = _norm(re.sub(r"\([^)]*\)", " ", text))
+    cleaned = _norm(re.sub(r"[^\w\u0600-\u06FF]+", " ", without_parentheses))
+    keys = {item for item in (text, without_parentheses, cleaned) if item}
+
+    # Daily files and recipe templates sometimes differ only by an English
+    # singular/plural suffix (for example Profiterole / Profiteroles).
+    # Treat both forms as the same meal without weakening Arabic matching.
+    if cleaned and re.fullmatch(r"[a-z0-9_ ]+", cleaned):
+        words = cleaned.split()
+        last = words[-1]
+        if last.endswith("ies") and len(last) > 3:
+            keys.add(" ".join(words[:-1] + [last[:-3] + "y"]))
+        elif last.endswith("s") and not last.endswith("ss") and len(last) > 1:
+            keys.add(" ".join(words[:-1] + [last[:-1]]))
+        else:
+            keys.add(" ".join(words[:-1] + [last + "s"]))
+    return keys
+
+
 def _as_number(value):
     if value is None or value == "":
         return None
@@ -165,16 +188,22 @@ def _write_counts(template_path, uploaded_rows, day_no=None):
     for item in uploaded_rows:
         count = item["count"]
         for label in (item.get("meal_name"), item.get("arabic_name")):
-            key = _norm(label)
-            if key:
+            for key in _meal_match_keys(label):
                 by_name[key].append(count)
     for slot in slots:
-        queue = by_name.get(_norm(slot["meal_name"]))
-        if queue:
-            count = queue.popleft()
+        count = None
+        for key in _meal_match_keys(slot["meal_name"]):
+            queue = by_name.get(key)
+            if queue:
+                count = queue.popleft()
+                break
+        if count is not None:
             ws[f"AG{slot['row']}"] = count
             matched.append({"row": slot["row"], "meal_name": slot["meal_name"], "count": count})
         else:
+            # Never carry a stale count from a previous upload when the meal
+            # is absent or its name cannot be matched in the selected day.
+            ws[f"AG{slot['row']}"] = 0
             unmatched.append(slot["meal_name"])
 
     safety_sheets = []
