@@ -554,7 +554,7 @@ def tokyo_ordering_update_from_day_file():
 @app.route('/api/tokyo-production/process-day', methods=['POST'])
 def tokyo_production_process_day():
     """يرفع ملف تشغيل يوم واحد ويُرجع حزمة الإنتاج الكاملة بنفس جداول
-    ملف توكيو: PDF القسم الساخن + PDF التتبيلات + نسخة XLSM محدّثة."""
+    ملف توكيو: PDF القسم الساخن + نسخة XLSM محدّثة."""
     if not os.path.exists(TOKYO_TEMPLATE_PATH):
         return jsonify({'error': 'ملف توكيو الرئيسي غير موجود على السيرفر'}), 404
     uploaded = request.files.get('file')

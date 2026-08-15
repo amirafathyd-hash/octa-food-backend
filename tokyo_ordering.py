@@ -526,6 +526,63 @@ def _read_repeat_update(wb, file_storage):
     return day_no, totals, report
 
 
+def _prepared_update_columns(ws):
+    """Detect the totals layout used by the bilingual ``Update`` pivot.
+
+    The current export has one Count/Grams pair per package and only a final
+    ``Grand Total (Count)`` column.  Total grams therefore must be the sum of
+    all package Grams columns; treating the last Grams column as count and the
+    final Count column as grams reverses and truncates every production input.
+    Older exports with explicit Total Count/Total Grams columns remain
+    supported through the same header-based detection.
+    """
+    for header_row in range(1, min(ws.max_row, 25) + 1):
+        labels = {
+            column: str(ws.cell(header_row, column).value or '').strip().casefold()
+            for column in range(1, ws.max_column + 1)
+        }
+        count_columns = [
+            column for column, label in labels.items()
+            if label in {'count', 'العدد'}
+        ]
+        grams_columns = [
+            column for column, label in labels.items()
+            if label in {'gram', 'grams', 'جرام', 'الجرامات'}
+        ]
+        if not count_columns or not grams_columns:
+            continue
+        name_column = next(
+            (
+                column for column, label in labels.items()
+                if label in {'row labels', 'اسم الوجبة', 'الوجبة'}
+            ),
+            1,
+        )
+        total_count_column = next(
+            (
+                column for column, label in labels.items()
+                if 'total' in label and 'count' in label
+            ),
+            None,
+        )
+        total_grams_column = next(
+            (
+                column for column, label in labels.items()
+                if 'total' in label and ('gram' in label or 'جرام' in label)
+            ),
+            None,
+        )
+        return {
+            'header_row': header_row,
+            'name_column': name_column,
+            'count_columns': count_columns,
+            'grams_columns': grams_columns,
+            'total_count_column': total_count_column,
+            'total_grams_column': total_grams_column,
+        }
+    raise ValueError('تعذر تحديد أعمدة Count و Grams داخل شيت Update')
+
+
 def read_day_file_payload(file_storage):
     """بتقرا شيت 'Update' من ملف يوم واحد (زي Octa_Food_Sat_...xlsx) وترجع:
     (day_no, {اسم الصنف: (Total Count, Total Grams)}, input_report)
@@ -541,6 +598,8 @@ def read_day_file_payload(file_storage):
             return raw_result
         raise ValueError("الملف لا يحتوي على شيت Update ولا أعمدة ابديت تكرار المطلوبة")
     ws = wb['Update']
+
+    update_columns = _prepared_update_columns(ws)
 
     day_labels = [
         str(ws[cell].value or '').replace('ـ', '').strip()
@@ -561,13 +620,27 @@ def read_day_file_payload(file_storage):
         )
 
     arabic_totals = {}
-    for r in range(10, ws.max_row + 1):
-        name = ws.cell(row=r, column=1).value
+    for r in range(update_columns['header_row'] + 1, ws.max_row + 1):
+        name = ws.cell(row=r, column=update_columns['name_column']).value
         if not name:
             continue
         name = str(name).strip()
-        count = ws.cell(row=r, column=12).value   # L = Total Count
-        grams = ws.cell(row=r, column=13).value   # M = Total Grams
+        if not name or name == '-':
+            continue
+        total_count_column = update_columns['total_count_column']
+        total_grams_column = update_columns['total_grams_column']
+        count = (
+            ws.cell(row=r, column=total_count_column).value
+            if total_count_column else
+            sum(_number(ws.cell(row=r, column=column).value)
+                for column in update_columns['count_columns'])
+        )
+        grams = (
+            ws.cell(row=r, column=total_grams_column).value
+            if total_grams_column else
+            sum(_number(ws.cell(row=r, column=column).value)
+                for column in update_columns['grams_columns'])
+        )
         count = count if isinstance(count, (int, float)) else None
         grams = grams if isinstance(grams, (int, float)) else None
         if count is None and grams is None:
@@ -604,6 +677,7 @@ def read_day_file_payload(file_storage):
         'source_meals': len(arabic_totals),
         'target_recipes': len(meals),
         'ignored_meals': 0,
+        'totals_layout': 'header_detected',
     }
 
 

@@ -1,7 +1,7 @@
-"""Create the two daily Tokyo production PDFs from the original workbook.
+"""Create the daily Tokyo Hot Section PDF from the original workbook.
 
 The ranges and ordering below mirror the workbook's own VBA PDF modules:
-BatchPDF, SpecialTablesPDF, ActualsPDF, GarnishPDF and MarinationPDF.
+BatchPDF, SpecialTablesPDF, ActualsPDF and GarnishPDF.
 LibreOffice is used only as the spreadsheet renderer/calculation engine; the
 recipe cells, formulas, formatting and print tables remain those of the source
 Tokyo workbook.
@@ -340,7 +340,6 @@ def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str |
     recalculated = _run_soffice(calculation_source, recalculated_dir, 'xlsx')
     values = load_workbook(recalculated, data_only=False, read_only=False)
     hot_sheets = _day_sheets(values, 'All_Ingredients', day_no)
-    marination_sheets = _day_sheets(values, 'Marination_Ordering', day_no)
     values.close()
 
     blocks = []
@@ -362,30 +361,21 @@ def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str |
     if not blocks:
         raise RuntimeError('لا توجد أي جداول Hot Section قابلة للطباعة لليوم المختار')
 
-    mar_book = root / 'marination.xlsx'
-    mar_book, mar_count = _make_block_workbook(
-        recalculated, recalculated, mar_book, day_no, 'marination', marination_sheets
-    )
-    mar_pdf_part = _run_soffice(mar_book, root / 'pdf', 'pdf')
-
     day_name = DAY_NAMES.get(day_no, f'Day {day_no}')
     hot_pdf = _merge_pdfs(blocks, root / f'Tokyo_Hot_Section_Day{day_no}.pdf')
-    mar_pdf = _merge_pdfs([mar_pdf_part], root / f'Tokyo_Marination_Day{day_no}.pdf')
     final_xlsm = root / f'Tokyo_Ordering_Updated_Day{day_no}.xlsm'
     shutil.copyfile(updated_xlsm, final_xlsm)
 
     zip_path = root / f'Tokyo_Production_{day_name}_Day{day_no}.zip'
     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(hot_pdf, hot_pdf.name)
-        archive.write(mar_pdf, mar_pdf.name)
         archive.write(final_xlsm, final_xlsm.name)
 
     report = {
         **match_report,
         'input': input_report,
         'hot_sheets': len(hot_sheets),
-        'marination_sheets': len(marination_sheets),
-        'pages': {**counts, 'hot_total': sum(counts.values()), 'marination': mar_count},
-        'files': [hot_pdf.name, mar_pdf.name, final_xlsm.name],
+        'pages': {**counts, 'hot_total': sum(counts.values())},
+        'files': [hot_pdf.name, final_xlsm.name],
     }
     return str(zip_path), str(final_xlsm), report
