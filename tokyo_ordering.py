@@ -41,6 +41,8 @@ SHEET_INPUT_ALIASES = {
     'Mached Potato(3)': ['Mashed potato', 'Mashed potatoes', 'بطاطس مهروسة'],
     'Potato Wedges': ['Potato wedges', 'بطاطس ويدجز'],
     'Oven Vegetables (3)': ['Sauteed vegetables', 'خضار سوتيه'],
+    'Beef Burger': ['Smoky Beef Burger', 'Beef burger', 'برجر سموكي لحم'],
+    'Smoky Beef Burger': ['Beef Burger', 'Beef burger', 'برجر سموكي لحم'],
 }
 
 # The website's "Repeat Update" export contains one row per package/size.

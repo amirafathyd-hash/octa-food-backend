@@ -54,6 +54,7 @@ _RENAMED_MEALS = {
     'Fish with cream': 'Salmon with cream',
     'Lemon Fish': 'Lemon Shrimp',
     'Curry Fish': 'Curry Shrimp',
+    'Smoky Beef Burger': 'Beef Burger',
 }
 _RENAMED_ARABIC = {
     'Blankwet Fish': 'سمك بلانكويت',
@@ -61,6 +62,22 @@ _RENAMED_ARABIC = {
     'Lemon Fish': 'سمك بالليمون',
     'Curry Fish': 'سمك بالكاري والكريمة',
 }
+
+# Menu packages follow the latest Tokyo name, while an active server may
+# still hold the immediately previous workbook until the replacement upload
+# succeeds.  Resolve the two legitimate burger tab names in either direction
+# so integrity protection does not deadlock the template upgrade.
+_TEMPLATE_SHEET_ALIASES = {
+    'Smoky Beef Burger': ('Smoky Beef Burger', 'Beef Burger'),
+    'Beef Burger': ('Beef Burger', 'Smoky Beef Burger'),
+}
+
+
+def _resolve_template_sheet_name(sheet_name, available_names):
+    for candidate in _TEMPLATE_SHEET_ALIASES.get(sheet_name, (sheet_name,)):
+        if candidate in available_names:
+            return candidate
+    return None
 
 
 def _load_live_meal_portions():
@@ -184,7 +201,7 @@ def get_template_integrity():
         sheet_name
         for items in MENU_PACKAGES.values()
         for _, sheet_name in items
-        if sheet_name not in recipe_sheets
+        if not _resolve_template_sheet_name(sheet_name, recipe_sheets)
     })
     if missing_package_sheets:
         errors.append('وجبات غير متطابقة مع ملف الإكسل: ' + ', '.join(missing_package_sheets))
@@ -419,13 +436,14 @@ def list_menu_packages():
     for day_key, items in MENU_PACKAGES.items():
         day_items = []
         for menu_name, sheet_name in items:
-            info = MEAL_PORTIONS.get(sheet_name)
+            resolved_sheet = _resolve_template_sheet_name(sheet_name, MEAL_PORTIONS)
+            info = MEAL_PORTIONS.get(resolved_sheet) if resolved_sheet else None
             if not info:
                 continue  # لو الشيت اتشال من الملف الأصلي مستقبلًا
-            mapped_sheets.add(sheet_name)
+            mapped_sheets.add(resolved_sheet)
             day_items.append({
                 'menu_name': menu_name,
-                'sheet_name': sheet_name,
+                'sheet_name': resolved_sheet,
                 'arabic_name': info[1],
                 'portion_g': info[0],
             })
