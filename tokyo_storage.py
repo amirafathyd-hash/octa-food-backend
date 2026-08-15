@@ -11,6 +11,7 @@ import shutil
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BUNDLED_TEMPLATE_PATH = os.path.join(APP_DIR, 'tokyo_ordering_template.xlsm')
 BUNDLED_BASELINE_PATH = os.path.join(APP_DIR, 'tokyo_template_baseline.json')
+BUNDLED_DESSERT_TEMPLATE_PATH = os.path.join(APP_DIR, 'data', 'Tokyo_Dessert_Ordering.xlsm')
 
 
 def _persistent_dir():
@@ -23,6 +24,7 @@ def _persistent_dir():
 TOKYO_STORAGE_DIR = _persistent_dir()
 TOKYO_TEMPLATE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'tokyo_ordering_template.xlsm')
 TOKYO_BASELINE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'tokyo_template_baseline.json')
+DESSERT_TEMPLATE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'Tokyo_Dessert_Ordering.xlsm')
 
 
 def ensure_tokyo_storage():
@@ -31,6 +33,7 @@ def ensure_tokyo_storage():
     migrations = (
         (BUNDLED_TEMPLATE_PATH, TOKYO_TEMPLATE_PATH),
         (BUNDLED_BASELINE_PATH, TOKYO_BASELINE_PATH),
+        (BUNDLED_DESSERT_TEMPLATE_PATH, DESSERT_TEMPLATE_PATH),
     )
     for bundled_path, persistent_path in migrations:
         if not os.path.exists(persistent_path) and os.path.exists(bundled_path):

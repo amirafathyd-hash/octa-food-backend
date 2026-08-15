@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -8,9 +9,8 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from tokyo_storage import DESSERT_TEMPLATE_PATH
 
-
-DESSERT_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "Tokyo_Dessert_Ordering.xlsm")
 
 MEAL_HEADER_KEYS = {"meal name", "meal", "اسم الوجبة", "الصنف"}
 COUNT_HEADER_KEYS = {"total count", "count", "عدد", "العدد", "إجمالي العدد"}
@@ -95,7 +95,14 @@ def read_uploaded_meal_counts(file_storage):
                 count = _as_number(ws.cell(row=row, column=count_col).value)
                 if not meal or count is None:
                     continue
-                rows.append({"meal_name": str(meal).strip(), "count": count})
+                if _norm(meal) in {"totals", "grand total", "الإجمالي", "الاجمالي"}:
+                    continue
+                arabic = ws.cell(row=row, column=meal_col + 1).value if meal_col < ws.max_column else None
+                rows.append({
+                    "meal_name": str(meal).strip(),
+                    "arabic_name": str(arabic).strip() if arabic else "",
+                    "count": count,
+                })
             if rows:
                 return {"rows": rows, "day_no": day_no, "day_name": day_name}
 
@@ -108,7 +115,14 @@ def read_uploaded_meal_counts(file_storage):
                 meal = ws.cell(row=row, column=meal_col).value
                 count = _as_number(ws.cell(row=row, column=count_col).value)
                 if meal and count is not None:
-                    rows.append({"meal_name": str(meal).strip(), "count": count})
+                    if _norm(meal) in {"totals", "grand total", "الإجمالي", "الاجمالي"}:
+                        continue
+                    arabic = ws.cell(row=row, column=meal_col + 1).value if meal_col < ws.max_column else None
+                    rows.append({
+                        "meal_name": str(meal).strip(),
+                        "arabic_name": str(arabic).strip() if arabic else "",
+                        "count": count,
+                    })
             if rows:
                 return {"rows": rows, "day_no": day_no, "day_name": day_name}
     finally:
@@ -118,39 +132,50 @@ def read_uploaded_meal_counts(file_storage):
     raise ValueError("مش لاقي أعمدة Meal name / Total Count في ملف الرفع")
 
 
-def _target_meal_slots(ws):
+def _target_meal_slots(ws, day_no=None):
+    target_rows = None
+    if day_no is not None:
+        target_rows = []
+        for row in range(3, ws.max_row + 1):
+            row_day = _as_number(ws[f"AB{row}"].value)
+            if row_day is None or int(row_day) != int(day_no):
+                continue
+            count_ref = _extract_ag_reference(ws[f"AC{row}"].value)
+            if count_ref:
+                match = re.search(r"(\d+)$", count_ref)
+                if match:
+                    target_rows.append(int(match.group(1)))
     slots = []
-    for row in range(2, ws.max_row + 1):
+    rows = target_rows if target_rows is not None else range(2, ws.max_row + 1)
+    for row in rows:
         meal = ws[f"AF{row}"].value
         if meal:
             slots.append({"row": row, "meal_name": str(meal).strip()})
     return slots
 
 
-def _write_counts(template_path, uploaded_rows):
+def _write_counts(template_path, uploaded_rows, day_no=None):
     wb = load_workbook(template_path, data_only=False, keep_vba=True)
     ws = wb["Ordering"]
-    slots = _target_meal_slots(ws)
+    slots = _target_meal_slots(ws, day_no)
 
     matched = []
     unmatched = []
-
-    if len(uploaded_rows) == len(slots):
-        for slot, item in zip(slots, uploaded_rows):
-            ws[f"AG{slot['row']}"] = item["count"]
-            matched.append({"row": slot["row"], "meal_name": slot["meal_name"], "count": item["count"]})
-    else:
-        by_name = defaultdict(deque)
-        for item in uploaded_rows:
-            by_name[_norm(item["meal_name"])].append(item["count"])
-        for slot in slots:
-            queue = by_name.get(_norm(slot["meal_name"]))
-            if queue:
-                count = queue.popleft()
-                ws[f"AG{slot['row']}"] = count
-                matched.append({"row": slot["row"], "meal_name": slot["meal_name"], "count": count})
-            else:
-                unmatched.append(slot["meal_name"])
+    by_name = defaultdict(deque)
+    for item in uploaded_rows:
+        count = item["count"]
+        for label in (item.get("meal_name"), item.get("arabic_name")):
+            key = _norm(label)
+            if key:
+                by_name[key].append(count)
+    for slot in slots:
+        queue = by_name.get(_norm(slot["meal_name"]))
+        if queue:
+            count = queue.popleft()
+            ws[f"AG{slot['row']}"] = count
+            matched.append({"row": slot["row"], "meal_name": slot["meal_name"], "count": count})
+        else:
+            unmatched.append(slot["meal_name"])
 
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
     _sync_ordering_counts_to_recipe_sheets(wb)
@@ -177,7 +202,8 @@ def _sync_ordering_counts_to_recipe_sheets(wb):
         count_ref = _extract_ag_reference(ws[f"AC{row}"].value)
         count = ws[count_ref].value if count_ref else ws[f"AC{row}"].value
         if count not in (None, ""):
-            wb[sheet_name]["V1"] = count
+            safety = _as_number(wb[sheet_name]["S14"].value) or 0
+            wb[sheet_name]["V1"] = float(count) + float(safety)
 
 
 def _apply_edits_to_workbook(wb, edits):
@@ -679,7 +705,9 @@ def update_dessert_ordering_from_upload(file_storage, template_path=DESSERT_TEMP
         raise FileNotFoundError("ملف Tokyo_Dessert_Ordering.xlsm غير موجود في data")
     upload_data = read_uploaded_meal_counts(file_storage)
     uploaded_rows = upload_data["rows"]
-    updated_xlsm, report = _write_counts(template_path, uploaded_rows)
+    updated_xlsm, report = _write_counts(
+        template_path, uploaded_rows, upload_data.get("day_no")
+    )
     if upload_data.get("day_no"):
         wb = load_workbook(updated_xlsm, data_only=False, keep_vba=True)
         wb["Ordering"]["R1"] = upload_data["day_no"]
@@ -690,6 +718,9 @@ def update_dessert_ordering_from_upload(file_storage, template_path=DESSERT_TEMP
     recalculated_xlsx = recalc_with_ordering_aggregates(updated_xlsm)
     state = extract_dashboard_state(recalculated_xlsx)
     state.update(extract_workbook_state(recalculated_xlsx))
+    # Commit only after calculation succeeds. The persistent master now keeps
+    # this update across worker restarts and future code deployments.
+    shutil.copy2(updated_xlsm, template_path)
     report["matched_count"] = len(report["matched"])
     report["unmatched_count"] = len(report["unmatched"])
     return state, report
