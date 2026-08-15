@@ -98,8 +98,8 @@ from receipt_pricing import (
 )
 from kitchen_live import register_kitchen_live_routes
 from vegetable_cutting import vegetable_cutting_bp
+from tokyo_storage import TOKYO_TEMPLATE_PATH
 
-TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
 BACKEND_RELEASE = 'octa-backend-2026-08-09-v18'
 

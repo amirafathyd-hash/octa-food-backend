@@ -24,9 +24,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from openpyxl import load_workbook
 from pycel import ExcelCompiler
+from tokyo_storage import TOKYO_BASELINE_PATH, TOKYO_TEMPLATE_PATH
 
-TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
-TOKYO_BASELINE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_template_baseline.json')
 PORTIONS_PATH = os.path.join(os.path.dirname(__file__), 'meal_portions_data.json')
 PACKAGES_PATH = os.path.join(os.path.dirname(__file__), 'menu_packages.json')
 EXPECTED_TEMPLATE_SHA256 = '0e110f2f45330cce3c1aea0f2f86542323614f3329e64ed935dc0be71ddb5d18'
