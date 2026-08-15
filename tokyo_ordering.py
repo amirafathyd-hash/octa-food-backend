@@ -37,12 +37,36 @@ SHEET_INPUT_ALIASES = {
     'Laham Oriental': ['Oriental beef with nuts rice', 'لحم أوريانتل'],
     'Beef Oriental rice': ['Oriental beef with nuts rice', 'الأرز بالمكسرات'],
     'Chicken Caesar Salad': ['Caesar salad', 'سلطة السيزر'],
-    'Chicken Fajita': ['Chicken Fajita sandwich served with oat bread', 'ساندوتش فاهيتا الدجاج بخبز الشوفان'],
+    'Chicken Fajita': [
+        'Chicken Fajita Sandwich on Oat Bread',
+        'Chicken Fajita sandwich served with oat bread',
+        'Chicken Bell Pepper Sandwich',
+        'ساندوتش فاهيتا الدجاج بخبز الشوفان',
+        'ساندوتش الدجاج بالفلفل الرومي',
+    ],
     'Mached Potato(3)': ['Mashed potato', 'Mashed potatoes', 'بطاطس مهروسة'],
     'Potato Wedges': ['Potato wedges', 'بطاطس ويدجز'],
     'Oven Vegetables (3)': ['Sauteed vegetables', 'خضار سوتيه'],
     'Beef Burger': ['Smoky Beef Burger', 'Beef burger', 'برجر سموكي لحم'],
     'Smoky Beef Burger': ['Beef Burger', 'Beef burger', 'برجر سموكي لحم'],
+}
+
+# Some operational products are different menu rows but feed one Tokyo
+# recipe.  Each inner tuple contains alternate Arabic/English labels for one
+# source row; choose one label from every tuple, then add the source rows.
+# This avoids counting the bilingual aliases of the same row twice.
+SHEET_INPUT_GROUPS = {
+    'Chicken Fajita': [
+        (
+            'Chicken Fajita Sandwich on Oat Bread',
+            'Chicken Fajita sandwich served with oat bread',
+            'ساندوتش فاهيتا الدجاج بخبز الشوفان',
+        ),
+        (
+            'Chicken Bell Pepper Sandwich',
+            'ساندوتش الدجاج بالفلفل الرومي',
+        ),
+    ],
 }
 
 # The website's "Repeat Update" export contains one row per package/size.
@@ -753,6 +777,50 @@ def _normalize_meal_name(s):
     return re.sub(r'\s+', ' ', s).strip()
 
 
+def _lookup_meal_value(candidates, meals_by_name, norm_lookup):
+    """Return the first matching bilingual label for one source meal."""
+    for candidate in candidates:
+        normalized = _normalize_meal_name(candidate)
+        if candidate in meals_by_name:
+            return meals_by_name[candidate], candidate
+        if normalized in norm_lookup:
+            return norm_lookup[normalized], candidate
+    return None, None
+
+
+def _aggregate_recipe_inputs(sheet_name, meals_by_name, norm_lookup):
+    """Add distinct menu rows that intentionally feed one recipe sheet."""
+    # Raw repeat-update imports are already aggregated under the target sheet.
+    direct, direct_name = _lookup_meal_value(
+        (sheet_name,), meals_by_name, norm_lookup
+    )
+    if direct is not None:
+        return direct, direct_name
+
+    groups = SHEET_INPUT_GROUPS.get(sheet_name)
+    if not groups:
+        return _lookup_meal_value(
+            SHEET_INPUT_ALIASES.get(sheet_name, ()), meals_by_name, norm_lookup
+        )
+
+    total_count = 0.0
+    total_grams = 0.0
+    matched_names = []
+    for aliases in groups:
+        value, matched_name = _lookup_meal_value(
+            aliases, meals_by_name, norm_lookup
+        )
+        if value is None:
+            continue
+        count, grams = value
+        total_count += _number(count)
+        total_grams += _number(grams)
+        matched_names.append(matched_name)
+    if not matched_names:
+        return None, None
+    return (total_count, total_grams), ' + '.join(matched_names)
+
+
 def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
                             safety_overrides=None, zero_missing=False):
     """بتاخد قاموس {اسم الصنف: (count, grams)} من ملف يوم واحد، وتحدّث بيه
@@ -802,17 +870,9 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
         key = str(meal_name or '').strip()
         norm_key = _normalize_meal_name(key)
 
-        found = None
-        matched_input = None
-        candidates = [sheet_name, *SHEET_INPUT_ALIASES.get(sheet_name, [])]
-        for candidate in candidates:
-            normalized = _normalize_meal_name(candidate)
-            if candidate in meals_by_name:
-                found, matched_input = meals_by_name[candidate], candidate
-                break
-            if normalized in norm_lookup:
-                found, matched_input = norm_lookup[normalized], candidate
-                break
+        found, matched_input = _aggregate_recipe_inputs(
+            sheet_name, meals_by_name, norm_lookup
+        )
 
         if found is None and sheet_name:
             english_keys = [k for k in meals_by_name if any('a' <= ch.lower() <= 'z' for ch in str(k))]
