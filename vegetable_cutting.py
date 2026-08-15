@@ -755,6 +755,13 @@ def extract_workbook(file_storage):
 
     try:
         day_number, day_sheet = _read_day_number(workbook)
+        workbook_type = (
+            "main"
+            if "All_Ingredients" in workbook.sheetnames
+            else "breakfast"
+            if "Ordering" in workbook.sheetnames
+            else "unknown"
+        )
         rows = _summary_rows(workbook, day_number)
         extraction_mode = "summary" if rows is not None else "recipes"
         selected_sheets = []
@@ -765,6 +772,7 @@ def extract_workbook(file_storage):
             "filename": file_storage.filename or "workbook.xlsm",
             "day_number": day_number,
             "day_sheet": day_sheet,
+            "workbook_type": workbook_type,
             "mode": extraction_mode,
             "selected_sheets": selected_sheets or [],
             "rows": rows,
@@ -775,11 +783,31 @@ def extract_workbook(file_storage):
 
 def combine_workbooks(extracted):
     days = {item["day_number"] for item in extracted}
-    if len(days) != 1:
+    main_days = {
+        item["day_number"] for item in extracted
+        if item.get("workbook_type") == "main"
+    }
+    breakfast_days = {
+        item["day_number"] for item in extracted
+        if item.get("workbook_type") == "breakfast"
+    }
+
+    # The breakfast workbook numbers the same operating day one step before
+    # the main Tokyo ordering workbook (for example main day 4 = breakfast
+    # day 3).  Continue accepting older files where both numbers are equal,
+    # but reject every other mismatch so unrelated operating days cannot mix.
+    shifted_pair = (
+        len(main_days) == 1
+        and len(breakfast_days) == 1
+        and next(iter(main_days)) == next(iter(breakfast_days)) + 1
+    )
+    if len(days) != 1 and not shifted_pair:
         details = "، ".join(
             f'{item["filename"]}: يوم {item["day_number"]}' for item in extracted
         )
         raise CuttingWorkbookError(f"الملفان ليسا لنفس يوم التشغيل ({details})")
+
+    operation_day = next(iter(main_days)) if main_days else extracted[0]["day_number"]
 
     combined = OrderedDict()
     for source in extracted:
@@ -816,7 +844,7 @@ def combine_workbooks(extracted):
         row["method"] = " / ".join(method_row["method"] for method_row in methods)
         row["icon"] = methods[0]["icon"] if len(methods) == 1 else "multiple"
         rows.append(row)
-    return next(iter(days)), rows
+    return operation_day, rows
 
 
 @vegetable_cutting_bp.route("/api/vegetable-cutting/extract", methods=["POST"])
