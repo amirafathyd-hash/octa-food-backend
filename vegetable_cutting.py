@@ -482,10 +482,27 @@ def build_cutting_png(payload):
             box = draw.textbbox((0, 0), _rtl(text), font=font)
         return box[2] - box[0]
 
+    # Keep every method weight in one fixed vertical column.  Method labels
+    # start immediately after it, so mixed Arabic/English labels no longer
+    # push each number to a different horizontal position.
+    method_labels = [
+        method.get("method")
+        for row in rows
+        for method in _row_methods(row)
+        if method.get("method")
+    ]
+    widest_method = max(
+        (rtl_width(label, method_font) for label in method_labels),
+        default=0,
+    )
+
     table_left = margin
     table_right = width - margin
     ingredient_left = 1110
     weight_left = 835
+    method_right = weight_left - 24
+    method_text_left = max(table_left + 235, method_right - widest_method)
+    method_weight_right = method_text_left - 24
 
     draw.rounded_rectangle(
         (margin, margin, width - margin, margin + header_height - 12),
@@ -527,12 +544,7 @@ def build_cutting_png(payload):
         for method in methods:
             method_weight = f'{float(method.get("weight_grams") or 0):,.0f} g'
             method_text = method.get("method")
-            method_right = weight_left - 24
-            rtl_text((method_right, line_y), method_text, method_font, anchor="rm")
-            method_weight_right = max(
-                table_left + 145,
-                method_right - rtl_width(method_text, method_font) - 24,
-            )
+            rtl_text((method_text_left, line_y), method_text, method_font, anchor="lm")
             draw.text(
                 (method_weight_right, line_y), method_weight,
                 font=small_bold, fill=dark_green, anchor="rm",
