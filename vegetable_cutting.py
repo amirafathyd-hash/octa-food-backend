@@ -471,38 +471,13 @@ def build_cutting_png(payload):
             # forms prepared by arabic-reshaper/python-bidi.
             draw.text(xy, _rtl(text), font=font, fill=fill, anchor=anchor)
 
-    def rtl_width(value, font):
-        text = _clean_text(value)
-        try:
-            box = draw.textbbox(
-                (0, 0), text, font=font,
-                direction="rtl", language="ar",
-            )
-        except (KeyError, TypeError, ValueError):
-            box = draw.textbbox((0, 0), _rtl(text), font=font)
-        return box[2] - box[0]
-
-    # Keep every method weight in one fixed vertical column.  Method labels
-    # start immediately after it, so mixed Arabic/English labels no longer
-    # push each number to a different horizontal position.
-    method_labels = [
-        method.get("method")
-        for row in rows
-        for method in _row_methods(row)
-        if method.get("method")
-    ]
-    widest_method = max(
-        (rtl_width(label, method_font) for label in method_labels),
-        default=0,
-    )
-
     table_left = margin
     table_right = width - margin
     ingredient_left = 1110
     weight_left = 835
-    method_right = weight_left - 24
-    method_text_left = max(table_left + 235, method_right - widest_method)
-    method_weight_right = method_text_left - 24
+    method_weight_divider = table_left + 245
+    method_weight_center = (table_left + method_weight_divider) / 2
+    method_center = (method_weight_divider + weight_left) / 2
 
     draw.rounded_rectangle(
         (margin, margin, width - margin, margin + header_height - 12),
@@ -519,7 +494,12 @@ def build_cutting_png(payload):
     draw.rectangle((table_left, y, table_right, y + columns_height), fill=lime)
     rtl_text((table_right - 24, y + columns_height / 2), "الصنف", bold, anchor="rm")
     rtl_text(((weight_left + ingredient_left) / 2, y + columns_height / 2), "إجمالي الوزن", bold, anchor="mm")
-    rtl_text((weight_left - 24, y + columns_height / 2), "طريقة التقطيع والوزن", bold, anchor="rm")
+    rtl_text((method_center, y + columns_height / 2), "طريقة التقطيع", bold, anchor="mm")
+    rtl_text((method_weight_center, y + columns_height / 2), "الوزن", bold, anchor="mm")
+    draw.line(
+        (method_weight_divider, y, method_weight_divider, y + columns_height),
+        fill=grid, width=2,
+    )
     y += columns_height
 
     for index, (row, row_height) in enumerate(zip(rows, row_heights)):
@@ -531,6 +511,10 @@ def build_cutting_png(payload):
         )
         draw.line((weight_left, y, weight_left, row_bottom), fill=grid, width=2)
         draw.line((ingredient_left, y, ingredient_left, row_bottom), fill=grid, width=2)
+        draw.line(
+            (method_weight_divider, y, method_weight_divider, row_bottom),
+            fill=grid, width=2,
+        )
 
         rtl_text((table_right - 24, y + row_height / 2), row.get("ingredient"), bold, anchor="rm")
         draw.text(
@@ -544,10 +528,10 @@ def build_cutting_png(payload):
         for method in methods:
             method_weight = f'{float(method.get("weight_grams") or 0):,.0f} g'
             method_text = method.get("method")
-            rtl_text((method_text_left, line_y), method_text, method_font, anchor="lm")
+            rtl_text((weight_left - 24, line_y), method_text, method_font, anchor="rm")
             draw.text(
-                (method_weight_right, line_y), method_weight,
-                font=small_bold, fill=dark_green, anchor="rm",
+                (method_weight_center, line_y), method_weight,
+                font=small_bold, fill=dark_green, anchor="mm",
             )
             line_y += 34
         y = row_bottom
