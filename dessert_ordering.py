@@ -177,11 +177,27 @@ def _write_counts(template_path, uploaded_rows, day_no=None):
         else:
             unmatched.append(slot["meal_name"])
 
+    safety_sheets = []
+    if day_no is not None:
+        for row in range(3, ws.max_row + 1):
+            row_day = _as_number(ws[f"AB{row}"].value)
+            sheet_name = str(ws[f"AA{row}"].value or "").strip()
+            if row_day is None or int(row_day) != int(day_no):
+                continue
+            if sheet_name and sheet_name in wb.sheetnames:
+                wb[sheet_name]["S14"] = 0
+                safety_sheets.append(sheet_name)
+
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
     _sync_ordering_counts_to_recipe_sheets(wb)
     wb.save(out_path)
     wb.close()
-    return out_path, {"matched": matched, "unmatched": unmatched, "uploaded_count": len(uploaded_rows)}
+    return out_path, {
+        "matched": matched,
+        "unmatched": unmatched,
+        "uploaded_count": len(uploaded_rows),
+        "safety_sheets": safety_sheets,
+    }
 
 
 def _extract_ag_reference(value):
@@ -202,8 +218,10 @@ def _sync_ordering_counts_to_recipe_sheets(wb):
         count_ref = _extract_ag_reference(ws[f"AC{row}"].value)
         count = ws[count_ref].value if count_ref else ws[f"AC{row}"].value
         if count not in (None, ""):
-            safety = _as_number(wb[sheet_name]["S14"].value) or 0
-            wb[sheet_name]["V1"] = float(count) + float(safety)
+            # V1 is the raw requested count. The workbook already calculates
+            # Corrected Conversion Factor through S15 = S13 + S14 (Safety).
+            # Adding Safety here would make every recipe receive it twice.
+            wb[sheet_name]["V1"] = count
 
 
 def _apply_edits_to_workbook(wb, edits):
@@ -827,4 +845,5 @@ def recalculate_dessert_with_edits(edits, template_path=DESSERT_TEMPLATE_PATH):
     recalculated_xlsx = recalc_with_ordering_aggregates(out_path)
     state = extract_dashboard_state(recalculated_xlsx)
     state.update(extract_workbook_state(recalculated_xlsx))
+    shutil.copy2(out_path, template_path)
     return state
