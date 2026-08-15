@@ -433,7 +433,8 @@ def build_cutting_png(payload):
     regular = ImageFont.truetype(regular_path, 25)
     small = ImageFont.truetype(regular_path, 21)
     small_bold = ImageFont.truetype(bold_path, 22)
-    method_font = ImageFont.truetype(bold_path, 29)
+    method_font = ImageFont.truetype(regular_path, 26)
+    method_weight_font = ImageFont.truetype(regular_path, 23)
     bold = ImageFont.truetype(bold_path, 27)
     title_font = ImageFont.truetype(bold_path, 48)
     subtitle_font = ImageFont.truetype(regular_path, 25)
@@ -443,7 +444,11 @@ def build_cutting_png(payload):
     header_height = 170
     columns_height = 66
     footer_height = 54
-    row_heights = [max(76, 30 + len(_row_methods(row)) * 34) for row in rows]
+    method_line_height = 44
+    row_heights = [
+        max(76, 28 + len(_row_methods(row)) * method_line_height)
+        for row in rows
+    ]
     height = margin + header_height + columns_height + sum(row_heights) + footer_height + margin
     if height > 50000:
         raise CuttingWorkbookError("التقرير أكبر من الحد المسموح للصورة")
@@ -524,16 +529,26 @@ def build_cutting_png(payload):
         )
 
         methods = _row_methods(row)
-        line_y = y + (row_height - len(methods) * 34) / 2 + 17
-        for method in methods:
+        line_y = (
+            y
+            + (row_height - len(methods) * method_line_height) / 2
+            + method_line_height / 2
+        )
+        for method_index, method in enumerate(methods):
             method_weight = f'{float(method.get("weight_grams") or 0):,.0f} g'
             method_text = method.get("method")
             rtl_text((weight_left - 24, line_y), method_text, method_font, anchor="rm")
             draw.text(
                 (method_weight_center, line_y), method_weight,
-                font=small_bold, fill=dark_green, anchor="mm",
+                font=method_weight_font, fill=dark_green, anchor="mm",
             )
-            line_y += 34
+            if method_index < len(methods) - 1:
+                separator_y = line_y + method_line_height / 2
+                draw.line(
+                    (table_left, separator_y, weight_left, separator_y),
+                    fill=grid, width=1,
+                )
+            line_y += method_line_height
         y = row_bottom
 
     draw.rectangle((table_left, y, table_right, y + footer_height), fill=dark_green)
