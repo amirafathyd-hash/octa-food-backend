@@ -403,7 +403,25 @@ def read_current_inputs(template_path):
     return [days[k] for k in sorted(days.keys(), key=int)]
 
 
-DAY_NAME_TO_NO = {v: k for k, v in DAY_NAMES.items()}
+DAY_NAME_TO_NO = {
+    # Arabic labels used by the older daily exports.
+    'السبت': 1,
+    'الأحد': 2,
+    'الاحد': 2,
+    'الاثنين': 3,
+    'الإثنين': 3,
+    'الثلاثاء': 4,
+    'الأربعاء': 5,
+    'الاربعاء': 5,
+    'الخميس': 6,
+    # English labels used in A6 by the newer bilingual exports.
+    'saturday': 1,
+    'sunday': 2,
+    'monday': 3,
+    'tuesday': 4,
+    'wednesday': 5,
+    'thursday': 6,
+}
 
 
 def _number(value):
@@ -524,10 +542,23 @@ def read_day_file_payload(file_storage):
         raise ValueError("الملف لا يحتوي على شيت Update ولا أعمدة ابديت تكرار المطلوبة")
     ws = wb['Update']
 
-    day_label = str(ws['A6'].value or '').strip()
-    day_no = DAY_NAME_TO_NO.get(day_label)
+    day_labels = [
+        str(ws[cell].value or '').replace('ـ', '').strip()
+        for cell in ('A6', 'B6')
+    ]
+    day_no = next(
+        (
+            DAY_NAME_TO_NO.get(day_label.casefold())
+            for day_label in day_labels
+            if DAY_NAME_TO_NO.get(day_label.casefold())
+        ),
+        None,
+    )
     if not day_no:
-        raise ValueError(f"مش عارف أحدد اليوم من الخلية A6 (لقيت: '{day_label}')")
+        found_labels = " / ".join(label or "فارغ" for label in day_labels)
+        raise ValueError(
+            f"مش عارف أحدد اليوم من الخليتين A6/B6 (لقيت: '{found_labels}')"
+        )
 
     arabic_totals = {}
     for r in range(10, ws.max_row + 1):
