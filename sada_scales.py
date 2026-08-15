@@ -101,6 +101,15 @@ def _clean_base_text(value):
     return _strip_batch(text)
 
 
+def _clean_output_name(value):
+    """Remove parenthetical scale qualifiers without changing the meal name."""
+    text = str(value or '')
+    text = re.sub(r'[\(\[][^\)\]]+[\)\]]', ' ', text)
+    text = _strip_batch(text)
+    text = re.sub(r'\s+([،,])', r'\1', text)
+    return re.sub(r'\s+', ' ', text).strip(' -—')
+
+
 def _display_name_with_batch(item_name, batch):
     name = str(item_name or '').strip()
     batch = str(batch or '').strip()
@@ -330,6 +339,23 @@ def _build_tokyo_value_index(wb, day_no):
 
 
 def _resolve_planned_value(item, value_index, diagnostics):
+    # A bare meal name in the scales log represents the ready meal.  Tokyo
+    # stores that cooking target in the protein column for composed recipes.
+    # Prefer it, while retaining the simple value as a fallback for genuinely
+    # simple recipes that do not have a protein total.
+    if item.get('component') == 'simple':
+        protein_item = dict(item)
+        protein_item['component'] = 'protein'
+        protein_item['key'] = _candidate_key(
+            item.get('base') or '',
+            item.get('batch') or '',
+            'protein',
+            '',
+        )
+        protein_value = _resolve_planned_value(protein_item, value_index, diagnostics)
+        if protein_value is not None:
+            return protein_value
+
     planned = value_index.get(item['key'])
     if planned is not None:
         return planned
@@ -389,9 +415,13 @@ def _build_weight_index(entries):
         batch = str(row.get('batch_no') or '').strip()
         if not batch:
             batch = _batch_from_any_text(item_name, rtl_template=True)
-        base = _base_for_template_name(item_name)
-        component = _component_for_template_name(item_name)
-        detail = _extract_parenthetical_detail(item_name)
+        # Parenthetical labels such as (قبل الطبخ), (جزر) and (ذرة) are scale
+        # qualifiers, not separate Sada output meals.  Remove them before
+        # grouping so all readings return to the base meal and batch.
+        clean_name = _clean_output_name(item_name)
+        base = _base_for_template_name(clean_name)
+        component = _component_for_template_name(clean_name)
+        detail = ''
         try:
             weight = float(row.get('weight') or 0)
         except (TypeError, ValueError):
@@ -402,7 +432,7 @@ def _build_weight_index(entries):
         index[key] = round(index.get(key, 0) + weight, 3)
         rows[key] = {
             'key': key,
-            'item_name': _display_name_with_batch(item_name, batch),
+            'item_name': _display_name_with_batch(clean_name, batch),
             'base': base,
             'batch': batch,
             'component': component,

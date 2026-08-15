@@ -433,6 +433,7 @@ def build_cutting_png(payload):
     regular = ImageFont.truetype(regular_path, 25)
     small = ImageFont.truetype(regular_path, 21)
     small_bold = ImageFont.truetype(bold_path, 22)
+    method_font = ImageFont.truetype(bold_path, 29)
     bold = ImageFont.truetype(bold_path, 27)
     title_font = ImageFont.truetype(bold_path, 48)
     subtitle_font = ImageFont.truetype(regular_path, 25)
@@ -469,6 +470,17 @@ def build_cutting_png(payload):
             # Environments without libraqm still work using presentation
             # forms prepared by arabic-reshaper/python-bidi.
             draw.text(xy, _rtl(text), font=font, fill=fill, anchor=anchor)
+
+    def rtl_width(value, font):
+        text = _clean_text(value)
+        try:
+            box = draw.textbbox(
+                (0, 0), text, font=font,
+                direction="rtl", language="ar",
+            )
+        except (KeyError, TypeError, ValueError):
+            box = draw.textbbox((0, 0), _rtl(text), font=font)
+        return box[2] - box[0]
 
     table_left = margin
     table_right = width - margin
@@ -514,8 +526,17 @@ def build_cutting_png(payload):
         line_y = y + (row_height - len(methods) * 34) / 2 + 17
         for method in methods:
             method_weight = f'{float(method.get("weight_grams") or 0):,.0f} g'
-            draw.text((table_left + 24, line_y), method_weight, font=small_bold, fill=dark_green, anchor="lm")
-            rtl_text((weight_left - 24, line_y), method.get("method"), regular, anchor="rm")
+            method_text = method.get("method")
+            method_right = weight_left - 24
+            rtl_text((method_right, line_y), method_text, method_font, anchor="rm")
+            method_weight_right = max(
+                table_left + 145,
+                method_right - rtl_width(method_text, method_font) - 24,
+            )
+            draw.text(
+                (method_weight_right, line_y), method_weight,
+                font=small_bold, fill=dark_green, anchor="rm",
+            )
             line_y += 34
         y = row_bottom
 

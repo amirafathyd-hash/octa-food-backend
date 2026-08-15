@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import secrets
@@ -7,9 +8,13 @@ import uuid
 from datetime import date, datetime, timezone
 
 from flask import Blueprint, after_this_request, jsonify, request, send_file
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from db import execute_with_retry, get_client
 from invoice_export import build_invoices_workbook, parse_invoice_full
+from veg_comparison import _compare
 
 
 invoice_receipts_bp = Blueprint('invoice_receipts', __name__)
@@ -22,6 +27,11 @@ WORKER_TOKEN = os.environ.get(
 MAX_FILE_BYTES = int(os.environ.get('INVOICE_RECEIPT_MAX_MB', '20')) * 1024 * 1024
 
 _auth_checker = None
+
+DEPARTMENTS = {
+    'hot': 'قسم الخضار الساخن',
+    'salad': 'قسم خضار السلطة',
+}
 
 
 def configure_invoice_receipts(auth_checker):
@@ -84,8 +94,18 @@ def _normalize_saved_record(record):
         normalized_item['item'] = _clean_known_pdf_text(normalized_item.get('item'))
         items.append(normalized_item)
     parsed['items'] = items
+    department = str(parsed.get('receipt_department') or record.get('department') or '').strip().lower()
+    record['department'] = department if department in DEPARTMENTS else 'general'
+    record['department_label'] = DEPARTMENTS.get(record['department'], 'غير محدد')
     record['parsed_data'] = parsed
     return record
+
+
+def _valid_department(value, required=False):
+    department = str(value or '').strip().lower()
+    if department in DEPARTMENTS:
+        return department
+    return None if required else ''
 
 
 def _next_month(month):
@@ -128,7 +148,11 @@ def _filtered_query(payload=None):
 
 def _list_records(payload=None):
     rows = execute_with_retry(_filtered_query(payload)).data or []
-    return [_normalize_saved_record(row) for row in rows]
+    records = [_normalize_saved_record(row) for row in rows]
+    department = _valid_department((payload or request.args).get('department'))
+    if department:
+        records = [row for row in records if row.get('department') == department]
+    return records
 
 
 @invoice_receipts_bp.route('/api/invoice-receipts/link-status', methods=['GET'])
@@ -162,6 +186,10 @@ def invoice_receipts_upload():
         return jsonify({'error': 'اختار فاتورة PDF واحدة على الأقل'}), 400
     if len(files) > 30:
         return jsonify({'error': 'الحد الأقصى 30 فاتورة في المرة الواحدة'}), 400
+
+    department = _valid_department(request.form.get('department'), required=True)
+    if not department:
+        return jsonify({'error': 'حدد قسم الفواتير: الخضار الساخن أو خضار السلطة'}), 400
 
     uploader_name = (request.form.get('uploader_name') or '').strip()[:120]
     note = (request.form.get('note') or '').strip()[:500]
@@ -197,11 +225,13 @@ def invoice_receipts_upload():
                 temp_path = tmp.name
 
             parsed = parse_invoice_full(temp_path, original_name)
+            parsed['receipt_department'] = department
+            parsed['receipt_department_label'] = DEPARTMENTS[department]
             # Supabase Storage rejects some Arabic/custom-font characters in
             # object keys. Keep the original display name in the database, and
             # use a stable ASCII-only object key internally.
             storage_path = (
-                f'{receipt_date[0:4]}/{receipt_date[5:7]}/{receipt_date[8:10]}/'
+                f'{department}/{receipt_date[0:4]}/{receipt_date[5:7]}/{receipt_date[8:10]}/'
                 f'{uuid.uuid4().hex}.pdf'
             )
             sb.storage.from_(BUCKET_NAME).upload(
@@ -232,6 +262,8 @@ def invoice_receipts_upload():
                 'invoice_date': record.get('invoice_date'),
                 'invoice_no': record.get('invoice_no'),
                 'supplier_name': record.get('supplier_name'),
+                'department': department,
+                'department_label': DEPARTMENTS[department],
                 'total': parsed.get('total') or 0,
                 'items_count': len(parsed.get('items') or []),
             })
@@ -292,6 +324,209 @@ def invoice_receipts_pdf(receipt_id):
         return jsonify({'error': f'تعذر تحميل ملف PDF: {exc}'}), 500
 
 
+def _records_to_invoices(records):
+    invoices = []
+    for record in sorted(records, key=lambda item: (item.get('receipt_date') or '', item.get('created_at') or '')):
+        parsed = dict(record.get('parsed_data') or {})
+        parsed['fileName'] = record.get('file_name') or parsed.get('fileName') or 'invoice.pdf'
+        invoice_date = record.get('invoice_date') or parsed.get('date') or ''
+        parsed['date'] = record.get('receipt_date') or invoice_date
+        parsed['receiptDate'] = record.get('receipt_date')
+        notes = [str(parsed.get('notes') or '').strip(), str(record.get('note') or '').strip()]
+        if invoice_date:
+            notes.insert(0, f'تاريخ الفاتورة: {invoice_date}')
+        parsed['notes'] = ' | '.join(part for part in notes if part)
+        invoices.append(parsed)
+    return invoices
+
+
+def _latest_vegetable_receipt(receipt_date, department):
+    rows = execute_with_retry(
+        get_client().table('upload_log')
+        .select('id,message,created_at')
+        .eq('file_type', 'vegetables_receipt')
+        .order('created_at', desc=True)
+        .limit(1000)
+    ).data or []
+    for row in rows:
+        try:
+            payload = json.loads(row.get('message') or '{}')
+        except (TypeError, ValueError):
+            continue
+        payload_department = str(payload.get('department') or 'general').strip().lower()
+        payload_date = _valid_iso_date(payload.get('selected_date'))
+        if payload_department == department and payload_date == receipt_date and payload.get('rows'):
+            payload['log_id'] = row.get('id')
+            return payload
+    return None
+
+
+def _receipt_comparison_items(payload, receipt_date):
+    items = []
+    for row in payload.get('rows') or []:
+        name = str(row.get('items') or row.get('item') or row.get('name') or '').strip()
+        if not name:
+            continue
+        quantity = row.get('received')
+        if quantity in (None, ''):
+            continue
+        items.append({
+            'name': name,
+            'qty': quantity,
+            'unit': row.get('order_unit') or row.get('unit') or '',
+            'date': receipt_date,
+            'source': DEPARTMENTS.get(payload.get('department'), 'استلام الخضروات'),
+        })
+    return items
+
+
+def _invoice_comparison_items(records, receipt_date):
+    items = []
+    for record in records:
+        parsed = record.get('parsed_data') or {}
+        for row in parsed.get('items') or []:
+            qty = row.get('qty') or 0
+            total = row.get('total')
+            if total in (None, ''):
+                try:
+                    total = float(row.get('unitPrice') or 0) * float(qty or 0)
+                except (TypeError, ValueError):
+                    total = 0
+            items.append({
+                'name': row.get('item') or '',
+                'qty': qty,
+                'unit': row.get('unit') or '',
+                'total': total,
+                'date': record.get('invoice_date') or receipt_date,
+                'source': record.get('file_name') or 'invoice.pdf',
+            })
+    return items
+
+
+def _build_department_comparison_workbook(rows, stats, department_label, receipt_date):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = 'المقارنة'
+    sheet.sheet_view.rightToLeft = True
+    sheet.sheet_view.showGridLines = False
+    sheet.freeze_panes = 'A7'
+
+    red, dark, white = 'EC1510', '3B221B', 'FFFFFF'
+    line = Side(style='thin', color='E7D8D2')
+    border = Border(bottom=line)
+    status_colors = {
+        'مطابق': 'DDF3E5', 'زيادة في الفاتورة': 'FFF0BF', 'عجز في الفاتورة': 'FFD9D5',
+        'غير موجود في الفاتورة': 'F7C7C3', 'غير موجود في الأوردر': 'FCE3B5',
+        'مراجعة المطابقة': 'E6D9FF', 'مراجعة اسم الفاتورة': 'E6D9FF', 'اختلاف وحدة': 'E6D9FF',
+    }
+    headers = ['#', 'تاريخ الاستلام', 'تاريخ الفاتورة', 'صنف الاستلام', 'صنف الفاتورة المطابق',
+               'وحدة الاستلام', 'وحدة الفاتورة', 'كمية الاستلام', 'كمية الفاتورة', 'الفرق',
+               'سعر الوحدة', 'إجمالي الفاتورة', 'دقة المطابقة %', 'الحالة', 'مصدر الاستلام', 'مصدر الفاتورة']
+    keys = ['order_date', 'invoice_date', 'order_item', 'invoice_item', 'order_unit', 'invoice_unit',
+            'order_qty', 'invoice_qty', 'difference', 'unit_price', 'invoice_total', 'score', 'status',
+            'order_source', 'invoice_source']
+
+    sheet.merge_cells('A1:P1')
+    sheet['A1'] = f'مقارنة {department_label} بالفواتير — {receipt_date}'
+    sheet['A1'].fill = PatternFill('solid', fgColor=red)
+    sheet['A1'].font = Font(color=white, bold=True, size=16)
+    sheet['A1'].alignment = Alignment(horizontal='center', vertical='center')
+    sheet.row_dimensions[1].height = 30
+    summary_values = [('إجمالي الصفوف', stats.get('rows', len(rows))), ('مطابق', stats.get('matched', 0)),
+                      ('فروق', stats.get('differences', 0)), ('ناقص', stats.get('missing', 0)),
+                      ('زيادة', stats.get('extra', 0)), ('مراجعة', stats.get('review', 0))]
+    for idx, (label, value) in enumerate(summary_values):
+        col = idx * 2 + 1
+        sheet.cell(3, col, label).font = Font(bold=True, color=dark)
+        sheet.cell(3, col + 1, value).font = Font(bold=True, color=red)
+        sheet.cell(3, col).alignment = sheet.cell(3, col + 1).alignment = Alignment(horizontal='center')
+    for col, header in enumerate(headers, 1):
+        cell = sheet.cell(6, col, header)
+        cell.fill = PatternFill('solid', fgColor=dark)
+        cell.font = Font(color=white, bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    for idx, row in enumerate(rows, 1):
+        excel_row = idx + 6
+        for col, value in enumerate([idx] + [row.get(key, '') for key in keys], 1):
+            cell = sheet.cell(excel_row, col, value)
+            cell.border = border
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=col in (4, 5, 15, 16))
+            if col in (8, 9, 10, 11, 12):
+                cell.number_format = '#,##0.000'
+        status = str(row.get('status') or '')
+        sheet.cell(excel_row, 14).fill = PatternFill('solid', fgColor=status_colors.get(status, white))
+        sheet.cell(excel_row, 14).font = Font(bold=True, color=dark)
+
+    total_row = len(rows) + 8
+    sheet.cell(total_row, 10, 'إجمالي قيمة الفواتير').font = Font(bold=True, color=dark)
+    sheet.cell(total_row, 10).fill = PatternFill('solid', fgColor='FFF1F0')
+    sheet.cell(total_row, 12, f'=SUM(L7:L{max(7, len(rows) + 6)})')
+    sheet.cell(total_row, 12).font = Font(bold=True, color=red)
+    sheet.cell(total_row, 12).number_format = '#,##0.000'
+    sheet.auto_filter.ref = f'A6:P{max(6, len(rows) + 6)}'
+    for col, width in enumerate([7, 15, 15, 30, 30, 13, 13, 14, 14, 12, 14, 16, 14, 22, 25, 25], 1):
+        sheet.column_dimensions[get_column_letter(col)].width = width
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+@invoice_receipts_bp.route('/api/invoice-receipts/automatic-export', methods=['POST'])
+def invoice_receipts_automatic_export():
+    err = _require_worker_token()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    ids = payload.get('ids') or []
+    department = _valid_department(payload.get('department'), required=True)
+    receipt_date = _valid_iso_date(payload.get('receipt_date'))
+    export_kind = str(payload.get('kind') or '').strip().lower()
+    if not ids or len(ids) > 30 or not department or not receipt_date:
+        return jsonify({'error': 'بيانات التجميع التلقائي غير مكتملة'}), 400
+    records = _list_records({'ids': ids, 'department': department})
+    if not records:
+        return jsonify({'error': 'لم يتم العثور على فواتير القسم المرفوعة'}), 404
+
+    safe_label = f'{department}-{receipt_date}'
+    if export_kind == 'invoices':
+        workbook_path = build_invoices_workbook(_records_to_invoices(records))
+
+        @after_this_request
+        def cleanup_auto_invoices(response):
+            try:
+                os.unlink(workbook_path)
+            except OSError:
+                pass
+            return response
+
+        return send_file(
+            workbook_path,
+            as_attachment=True,
+            download_name=f'Invoices_{safe_label}.xlsx',
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+
+    if export_kind != 'comparison':
+        return jsonify({'error': 'نوع الملف التلقائي غير صحيح'}), 400
+    receipt = _latest_vegetable_receipt(receipt_date, department)
+    if not receipt:
+        return jsonify({'error': f'لا يوجد استلام مسجل لـ {DEPARTMENTS[department]} بتاريخ {receipt_date}'}), 404
+    order_items = _receipt_comparison_items(receipt, receipt_date)
+    invoice_items = _invoice_comparison_items(records, receipt_date)
+    if not order_items:
+        return jsonify({'error': 'سجل الاستلام لا يحتوي على كميات مستلمة صالحة للمقارنة'}), 400
+    rows, stats = _compare(order_items, invoice_items)
+    output = _build_department_comparison_workbook(rows, stats, DEPARTMENTS[department], receipt_date)
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f'Comparison_{safe_label}.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
 @invoice_receipts_bp.route('/api/invoice-receipts/export', methods=['POST'])
 def invoice_receipts_export():
     _, err = _require_admin()
@@ -302,20 +537,7 @@ def invoice_receipts_export():
         records = _list_records(payload)
         if not records:
             return jsonify({'error': 'لا توجد فواتير في الاختيار الحالي'}), 404
-        invoices = []
-        for record in sorted(records, key=lambda item: (item.get('receipt_date') or '', item.get('created_at') or '')):
-            parsed = dict(record.get('parsed_data') or {})
-            parsed['fileName'] = record.get('file_name') or parsed.get('fileName') or 'invoice.pdf'
-            invoice_date = record.get('invoice_date') or parsed.get('date') or ''
-            parsed['date'] = record.get('receipt_date') or invoice_date
-            parsed['receiptDate'] = record.get('receipt_date')
-            notes = [str(parsed.get('notes') or '').strip(), str(record.get('note') or '').strip()]
-            if invoice_date:
-                notes.insert(0, f'تاريخ الفاتورة: {invoice_date}')
-            parsed['notes'] = ' | '.join(part for part in notes if part)
-            invoices.append(parsed)
-
-        workbook_path = build_invoices_workbook(invoices)
+        workbook_path = build_invoices_workbook(_records_to_invoices(records))
 
         @after_this_request
         def cleanup(response):
@@ -325,7 +547,8 @@ def invoice_receipts_export():
                 pass
             return response
 
-        label = payload.get('date') or payload.get('month') or 'selected'
+        period_label = payload.get('date') or payload.get('month') or 'selected'
+        label = '-'.join(part for part in (payload.get('department'), period_label) if part)
         label = re.sub(r'[^0-9A-Za-z_-]+', '-', str(label))
         return send_file(
             workbook_path,

@@ -283,7 +283,7 @@ def build_monthly_receipt_cost_workbook(priced_rows, month_label='', missing=Non
     center = Alignment(horizontal='center', vertical='center', wrap_text=True)
     right = Alignment(horizontal='right', vertical='center', wrap_text=True)
 
-    headers = ['التاريخ', 'اليوم', 'القسم', 'الصنف', 'الوحدة', 'المطلوب', 'المستلم', 'سعر الوحدة', 'الإجمالي', 'حالة السعر']
+    headers = ['التاريخ', 'اليوم', 'الصنف', 'القسم', 'الوحدة', 'المطلوب', 'المستلم', 'سعر الوحدة', 'الإجمالي', 'حالة السعر']
 
     def write_rows_sheet(ws, sheet_rows, title, show_date=True):
         ws.sheet_view.rightToLeft = True
@@ -306,8 +306,8 @@ def build_monthly_receipt_cost_workbook(priced_rows, month_label='', missing=Non
             if not has_price:
                 fill = missing_fill
             values = [
-                row.get('receipt_date') or '', row.get('day_name') or '', row.get('department') or '',
-                row.get('item_name') or '', row.get('unit') or '',
+                row.get('receipt_date') or '', row.get('day_name') or '', row.get('item_name') or '',
+                row.get('department') or '', row.get('unit') or '',
                 row.get('required') if row.get('required') is not None else '', row.get('received') or 0,
                 row.get('order_unit_price') if has_price else '', '', 'محسوب' if has_price else 'بدون سعر',
             ]
@@ -316,7 +316,7 @@ def build_monthly_receipt_cost_workbook(priced_rows, month_label='', missing=Non
                 cell.fill = fill
                 cell.border = border
                 cell.font = Font(name='Tahoma', size=10, bold=col in (6, 7, 8, 9))
-                cell.alignment = right if col == 4 else center
+                cell.alignment = right if col == 3 else center
                 if col in (6, 7, 8, 9):
                     cell.number_format = '#,##0.00'
             if has_price:
@@ -332,7 +332,7 @@ def build_monthly_receipt_cost_workbook(priced_rows, month_label='', missing=Non
         ws.cell(total_row, 9).number_format = '#,##0.00'
         for col in range(1, len(headers) + 1):
             ws.cell(total_row, col).border = border
-        widths = [14, 20, 24, 42, 12, 14, 14, 16, 18, 16]
+        widths = [14, 20, 42, 24, 12, 14, 14, 16, 18, 16]
         for col, width in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(col)].width = width
         ws.freeze_panes = 'A4'
@@ -352,7 +352,9 @@ def build_monthly_receipt_cost_workbook(priced_rows, month_label='', missing=Non
         day_name = day_rows[0].get('day_name') or ''
         write_rows_sheet(daily, day_rows, f'{receipt_date} - {day_name}'.strip(' -'))
 
-    summary = wb.create_sheet('ملخص الشهر', 0)
+    # Keep the detailed priced rows as the first sheet so opening the monthly
+    # file immediately shows each date, its items, unit price and line total.
+    summary = wb.create_sheet('ملخص الشهر')
     summary.sheet_view.rightToLeft = True
     summary.merge_cells('A1:F1')
     summary['A1'] = f'ملخص شهر {month_label}'
