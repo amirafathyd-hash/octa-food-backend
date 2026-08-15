@@ -160,7 +160,7 @@ RAW_TOKYO_COMPONENT_MAP = {
         ('BBQ Chicken Skewers', 'protein'),
     ],
     'beef burger': [
-        ('Beef Burger', 'count'),
+        ('Smoky Beef Burger', 'count'),
     ],
     'blankwet fish with saffron rice': [
         ('Blankwet Fish', 'protein'),
@@ -314,7 +314,7 @@ def _infer_raw_tokyo_components(normalized_name, day_no=None):
         ('curry chicken', 'Coconut Chicken', 'protein'),
         ('lamb zurbian', 'Beef Zurbian', 'protein'),
         ('lamb mkhtoum', 'Mkhtoum Lahm', 'protein'),
-        ('beef burger', 'Beef Burger', 'count'),
+        ('beef burger', 'Smoky Beef Burger', 'count'),
         ('chicken fajita', 'Chicken Fajita', 'count'),
         ('chicken mandi', 'Chicken Mandi (1)', 'protein'),
         ('almond chicken', 'Almond Chicken', 'protein'),
