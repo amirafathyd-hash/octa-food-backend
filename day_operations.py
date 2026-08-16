@@ -22,6 +22,8 @@ from decision_station import (
 )
 from tokyo_ordering import merge_day_into_template, read_day_file_payload
 from tokyo_production_reports import build_tokyo_day_package
+from rice_ordering import build_rice_day_files
+from rice_storage import RICE_TEMPLATE_PATH
 
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
@@ -30,7 +32,7 @@ DAY_OPS_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), 'data', 'day_ops_
 DAY_OPS_TEMPLATES = {
     'breakfast': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Tokyo_Breakfast.xlsm'),
     'dessert': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Tokyo_Dessert_Ordering.xlsm'),
-    'rice': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Rice_Ordering_Sheet.xlsm'),
+    'rice': RICE_TEMPLATE_PATH,
     'sauce': os.path.join(DAY_OPS_TEMPLATE_DIR, 'Tokyo_Sauce.xlsm'),
     'tokyo': os.path.join(DAY_OPS_TEMPLATE_DIR, 'tokyo_ordering_template.xlsm'),
 }
@@ -617,7 +619,7 @@ def _merge_tokyo_component_counts(counts, tokyo_totals):
 
         rice_sheet = _match_sheet_name(station_lookups['rice'], wanted)
         if rice_sheet:
-            counts['rice'][name] += _count_value(pair)
+            counts['rice'][name] += _count_value(pair, prefer='grams')
             added['rice'].append(name)
             continue
 
@@ -842,7 +844,32 @@ def _generate_station_pdfs(day_label, dont_use_rows, file_storage=None):
 
     rice_template = DAY_OPS_TEMPLATES['rice']
     rice_edits, rice_unmatched = _match_template_sheets(rice_template, counts['rice'], target_cell='Z1')
-    if rice_edits:
+    if file_storage is not None:
+        try:
+            file_storage.seek(0)
+            xlsx_path, pdf_path, rice_report = build_rice_day_files(
+                file_storage,
+                template_path=rice_template,
+            )
+            outputs.append((f'Day{day_no}_Rice_Batches.pdf', pdf_path))
+            image_sources.append(('Rice', xlsx_path))
+            reports.append({
+                'station': 'rice',
+                **(rice_report or {}),
+            })
+        except Exception as exc:
+            reports.append({
+                'station': 'rice',
+                'matched_count': 0,
+                'unmatched': rice_unmatched,
+                'error': str(exc),
+            })
+        finally:
+            try:
+                file_storage.seek(0)
+            except Exception:
+                pass
+    elif rice_edits:
         try:
             xlsx_path = _updated_template_workbook(rice_template, rice_edits, day_no=day_no)
             pdf_path = _export_visible_sheet_pdf(xlsx_path, 'Ordering')

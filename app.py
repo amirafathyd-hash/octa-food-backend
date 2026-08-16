@@ -80,6 +80,13 @@ from sauce_ordering import (
     replace_sauce_template,
     update_sauce_counts_from_upload,
 )
+from rice_ordering import (
+    build_rice_day_files,
+    build_rice_manual_files,
+    get_rice_template_state,
+    package_rice_files,
+    replace_rice_template,
+)
 from xlsx_to_images import add_workbook_images_to_zip
 from veg_screenshot_ocr import extract_vegetable_rows
 from invoice_receipts_api import invoice_receipts_bp, configure_invoice_receipts
@@ -994,6 +1001,71 @@ def sauce_ordering_template():
         return jsonify({'ok': True, 'state': get_sauce_template_state()})
     except Exception as e:
         app.logger.exception('sauce_ordering_template failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rice-ordering/template', methods=['GET'])
+def rice_ordering_template():
+    try:
+        day_no = request.args.get('day_no')
+        return jsonify({'ok': True, 'state': get_rice_template_state(day_no=day_no)})
+    except Exception as e:
+        app.logger.exception('rice_ordering_template failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rice-ordering/process-day', methods=['POST'])
+def rice_ordering_process_day():
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف اليوم باسم file'}), 400
+    try:
+        excel_path, pdf_path, report = build_rice_day_files(uploaded)
+        package = package_rice_files(excel_path, pdf_path, report['day_no'])
+        response = send_file(
+            package,
+            as_attachment=True,
+            download_name=f"Day{report['day_no']}_Rice.zip",
+            mimetype='application/zip',
+        )
+        response.headers['X-Rice-Report'] = json.dumps(report, ensure_ascii=True)[:7000]
+        return response
+    except Exception as e:
+        app.logger.exception('rice_ordering_process_day failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rice-ordering/export-manual', methods=['POST'])
+def rice_ordering_export_manual():
+    payload = request.get_json(silent=True) or {}
+    try:
+        excel_path, pdf_path, report = build_rice_manual_files(
+            payload.get('day_no'), payload.get('items') or []
+        )
+        package = package_rice_files(excel_path, pdf_path, report['day_no'])
+        response = send_file(
+            package,
+            as_attachment=True,
+            download_name=f"Day{report['day_no']}_Rice.zip",
+            mimetype='application/zip',
+        )
+        response.headers['X-Rice-Report'] = json.dumps(report, ensure_ascii=True)[:7000]
+        return response
+    except Exception as e:
+        app.logger.exception('rice_ordering_export_manual failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rice-ordering/replace-template', methods=['POST'])
+def rice_ordering_replace_template():
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف الشيت الأساسي باسم file'}), 400
+    try:
+        state, report = replace_rice_template(uploaded)
+        return jsonify({'ok': True, 'state': state, 'report': report})
+    except Exception as e:
+        app.logger.exception('rice_ordering_replace_template failed')
         return jsonify({'error': str(e)}), 500
 
 
