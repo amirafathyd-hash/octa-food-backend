@@ -97,19 +97,9 @@ SHEET_INPUT_ALIASES = {
 # recipe.  Each inner tuple contains alternate Arabic/English labels for one
 # source row; choose one label from every tuple, then add the source rows.
 # This avoids counting the bilingual aliases of the same row twice.
-SHEET_INPUT_GROUPS = {
-    'Chicken Fajita': [
-        (
-            'Chicken Fajita Sandwich on Oat Bread',
-            'Chicken Fajita sandwich served with oat bread',
-            'ساندوتش فاهيتا الدجاج بخبز الشوفان',
-        ),
-        (
-            'Chicken Bell Pepper Sandwich',
-            'ساندوتش الدجاج بالفلفل الرومي',
-        ),
-    ],
-}
+TOKYO_RECIPE_GROUPS_PATH = os.path.join(
+    os.path.dirname(__file__), 'data', 'tokyo_recipe_input_groups.json'
+)
 
 # The website's "Repeat Update" export contains one row per package/size.
 # Each menu meal must be split into the exact Tokyo recipe tabs it drives.
@@ -167,6 +157,30 @@ RAW_TOKYO_COMPONENT_MAP = {
     ],
     'bbq chicken sandwich in ciabatta bread': [
         ('BBQ Chicken', 'count'),
+    ],
+    'bbq chicken sandwich with ciabatta bread': [
+        ('BBQ Chicken', 'count'),
+    ],
+    'grilled chicken sandwich': [
+        ('BBQ Chicken', 'count'),
+    ],
+    'asian chicken sandwich with oat bread': [
+        ('Asian Chicken Sandwich', 'count'),
+    ],
+    'asian chicken sandwich served with oat bread': [
+        ('Asian Chicken Sandwich', 'count'),
+    ],
+    'chicken awsal sandwich': [
+        ('Asian Chicken Sandwich', 'count'),
+    ],
+    'philadelphia beef sandwich with oat bread': [
+        ('Beef philly cheese steak', 'count'),
+    ],
+    'classic beef sandwich': [
+        ('Beef philly cheese steak', 'count'),
+    ],
+    'classic meat sandwich': [
+        ('Beef philly cheese steak', 'count'),
     ],
     'creamy pink chicken with mexican rice': [
         ('Pink Chicken', 'protein'),
@@ -840,17 +854,52 @@ def _lookup_meal_value(candidates, meals_by_name, norm_lookup):
     return None, None
 
 
+def _load_recipe_input_groups():
+    """Load the single audited registry for recipes fed by multiple meals.
+
+    Every item in ``groups`` represents one distinct operational meal.  The
+    aliases inside that item are only bilingual/spelling labels for that same
+    meal, so exactly one alias is selected and the item cannot be counted
+    twice.
+    """
+    try:
+        with open(TOKYO_RECIPE_GROUPS_PATH, 'r', encoding='utf-8') as stream:
+            payload = json.load(stream)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError('تعذر تحميل ملف ربط وصفات توكيو المركزي') from exc
+
+    recipes = payload.get('recipes') if isinstance(payload, dict) else None
+    if not isinstance(recipes, dict):
+        raise ValueError('ملف ربط وصفات توكيو المركزي غير صحيح')
+
+    result = {}
+    for sheet_name, recipe in recipes.items():
+        raw_groups = recipe.get('groups') if isinstance(recipe, dict) else None
+        if not isinstance(raw_groups, list) or not raw_groups:
+            continue
+        groups = []
+        for group in raw_groups:
+            aliases = group.get('aliases') if isinstance(group, dict) else None
+            clean_aliases = tuple(
+                str(alias).strip() for alias in (aliases or [])
+                if str(alias or '').strip()
+            )
+            if clean_aliases:
+                groups.append(clean_aliases)
+        if groups:
+            result[str(sheet_name).strip()] = groups
+    return result
+
+
 def _aggregate_recipe_inputs(sheet_name, meals_by_name, norm_lookup):
     """Add distinct menu rows that intentionally feed one recipe sheet."""
-    # Raw repeat-update imports are already aggregated under the target sheet.
-    direct, direct_name = _lookup_meal_value(
-        (sheet_name,), meals_by_name, norm_lookup
-    )
-    if direct is not None:
-        return direct, direct_name
-
-    groups = SHEET_INPUT_GROUPS.get(sheet_name)
+    groups = _load_recipe_input_groups().get(sheet_name)
     if not groups:
+        direct, direct_name = _lookup_meal_value(
+            (sheet_name,), meals_by_name, norm_lookup
+        )
+        if direct is not None:
+            return direct, direct_name
         return _lookup_meal_value(
             SHEET_INPUT_ALIASES.get(sheet_name, ()), meals_by_name, norm_lookup
         )
@@ -868,9 +917,21 @@ def _aggregate_recipe_inputs(sheet_name, meals_by_name, norm_lookup):
         total_count += _number(count)
         total_grams += _number(grams)
         matched_names.append(matched_name)
-    if not matched_names:
-        return None, None
-    return (total_count, total_grams), ' + '.join(matched_names)
+    if matched_names:
+        return (total_count, total_grams), ' + '.join(matched_names)
+
+    # Raw repeat-update imports are already aggregated under the target sheet.
+    # This fallback must come after the group lookup so a prepared daily file
+    # cannot skip the second equivalent meal merely because a target label is
+    # also present.
+    direct, direct_name = _lookup_meal_value(
+        (sheet_name,), meals_by_name, norm_lookup
+    )
+    if direct is not None:
+        return direct, direct_name
+    return _lookup_meal_value(
+        SHEET_INPUT_ALIASES.get(sheet_name, ()), meals_by_name, norm_lookup
+    )
 
 
 def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
