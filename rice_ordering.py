@@ -246,12 +246,20 @@ def _arabic_title_png(text, font_size, width, height, color):
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.truetype(ARABIC_BOLD_PATH, font_size)
     visual_text = get_display(arabic_reshaper.reshape(str(text or '')))
-    bounds = draw.textbbox((0, 0), visual_text, font=font)
+    # ``get_display`` has already converted the logical RTL text into visual
+    # glyph order.  Force Pillow/Raqm to draw that result as LTR so servers
+    # with libraqm do not apply bidi a second time and reverse the words.
+    text_options = {'font': font, 'direction': 'ltr'}
+    try:
+        bounds = draw.textbbox((0, 0), visual_text, **text_options)
+    except (KeyError, TypeError):
+        text_options.pop('direction', None)
+        bounds = draw.textbbox((0, 0), visual_text, **text_options)
     text_width = bounds[2] - bounds[0]
     text_height = bounds[3] - bounds[1]
     x = max(0, (width - text_width) / 2 - bounds[0])
     y = max(0, (height - text_height) / 2 - bounds[1])
-    draw.text((x, y), visual_text, font=font, fill=color)
+    draw.text((x, y), visual_text, fill=color, **text_options)
     output = tempfile.NamedTemporaryFile(suffix='.png', delete=False).name
     canvas.save(output, 'PNG')
     return output
