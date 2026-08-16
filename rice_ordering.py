@@ -14,7 +14,12 @@ import zipfile
 from datetime import datetime
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, TwoCellAnchor
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from PIL import Image as PILImage, ImageDraw, ImageFont
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 from rice_storage import RICE_TEMPLATE_PATH
 from tokyo_ordering import read_day_file_payload
@@ -32,6 +37,7 @@ BUNDLED_FONTS_DIRS = (
     os.path.join(APP_DIR, 'fonts'),
     os.path.join(APP_DIR, 'data', 'fonts'),
 )
+ARABIC_BOLD_PATH = os.path.join(APP_DIR, 'fonts', 'IBMPlexSansArabic-Bold.ttf')
 
 
 def _number(value):
@@ -232,6 +238,35 @@ def _english_title(value, fallback):
     return (parts[0] if parts else text).strip() or fallback
 
 
+def _arabic_title_png(text, font_size, width, height, color):
+    """Render shaped Arabic to PNG so PDF export cannot substitute the font."""
+    if not os.path.exists(ARABIC_BOLD_PATH):
+        raise FileNotFoundError('خط العناوين العربية غير موجود داخل مجلد fonts')
+    canvas = PILImage.new('RGBA', (width, height), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.truetype(ARABIC_BOLD_PATH, font_size)
+    visual_text = get_display(arabic_reshaper.reshape(str(text or '')))
+    bounds = draw.textbbox((0, 0), visual_text, font=font)
+    text_width = bounds[2] - bounds[0]
+    text_height = bounds[3] - bounds[1]
+    x = max(0, (width - text_width) / 2 - bounds[0])
+    y = max(0, (height - text_height) / 2 - bounds[1])
+    draw.text((x, y), visual_text, font=font, fill=color)
+    output = tempfile.NamedTemporaryFile(suffix='.png', delete=False).name
+    canvas.save(output, 'PNG')
+    return output
+
+
+def _place_title_image(ws, path, from_col, from_row, to_col, to_row):
+    image = XLImage(path)
+    image.anchor = TwoCellAnchor(
+        editAs='twoCell',
+        _from=AnchorMarker(col=from_col, row=from_row),
+        to=AnchorMarker(col=to_col, row=to_row),
+    )
+    ws.add_image(image)
+
+
 def _build_pdf_source(calculated_path, day_no):
     source = load_workbook(calculated_path, data_only=True, read_only=False)
     report = Workbook()
@@ -263,19 +298,22 @@ def _build_pdf_source(calculated_path, day_no):
             # Balance the title between an empty left column and the Day cell
             # so it is visually centred across the whole printed page.
             ws.merge_cells('B1:F1')
-            ws['B1'] = arabic_title
-            ws['B1'].font = Font(name=ARABIC_FONT, bold=True, size=19)
+            ws['B1'] = ''
             ws['B1'].alignment = Alignment(horizontal='center', vertical='center', readingOrder=2)
+            top_title_image = _arabic_title_png(arabic_title, 35, 1000, 72, '#111111')
+            _place_title_image(ws, top_title_image, 1, 0, 6, 1)
             ws['G1'] = f'Day {int(day_no)}'
             ws['G1'].font = Font(name=LATIN_FONT, bold=True, size=15)
             ws['G1'].alignment = Alignment(horizontal='right', vertical='center')
             ws.row_dimensions[1].height = 38
 
             ws.merge_cells('A3:G3')
-            ws['A3'] = f'{arabic_title}   {batch_index} / {batch_count}'
+            ws['A3'] = ''
             ws['A3'].fill = brown
-            ws['A3'].font = Font(name=ARABIC_FONT, color='FFFFFF', bold=True, size=14)
             ws['A3'].alignment = Alignment(horizontal='center', vertical='center', readingOrder=2)
+            batch_title = f'{arabic_title} — الدفعة {batch_index} من {batch_count}'
+            batch_title_image = _arabic_title_png(batch_title, 28, 1500, 54, '#FFFFFF')
+            _place_title_image(ws, batch_title_image, 0, 2, 7, 3)
             ws.row_dimensions[3].height = 27
 
             ws.merge_cells('A4:G4')
