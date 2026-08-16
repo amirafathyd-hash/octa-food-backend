@@ -92,11 +92,22 @@ def _detect_day_no(ws):
 
 
 def _find_update_table(ws):
-    for row in range(1, min(ws.max_row, 40) + 1):
-        label = _norm(ws.cell(row=row, column=1).value)
-        total_count = _norm(ws.cell(row=row - 1, column=12).value) if row > 1 else ""
-        if label == "row labels" and total_count == "total count":
-            return row + 1, 1, 12
+    max_row = min(ws.max_row, 40)
+    max_col = min(ws.max_column, 40)
+    for row in range(1, max_row + 1):
+        for col in range(1, max_col + 1):
+            if _norm(ws.cell(row=row, column=col).value) != "row labels":
+                continue
+            for header_row in (row - 1, row):
+                if header_row < 1:
+                    continue
+                for count_col in range(1, max_col + 1):
+                    if _norm(ws.cell(row=header_row, column=count_col).value) == "total count":
+                        # In the current daily sheet, Row Labels is visually
+                        # merged over A:B and its stored value is in B, while
+                        # the English meal name starts in A.
+                        meal_col = max(1, col - 1)
+                        return row + 1, meal_col, count_col
     return 10, 1, 12
 
 
@@ -156,9 +167,9 @@ def read_uploaded_meal_counts(file_storage):
 
 
 def _target_meal_slots(ws, day_no=None):
-    target_rows = None
+    target_specs = None
     if day_no is not None:
-        target_rows = []
+        target_specs = []
         for row in range(3, ws.max_row + 1):
             row_day = _as_number(ws[f"AB{row}"].value)
             if row_day is None or int(row_day) != int(day_no):
@@ -167,13 +178,23 @@ def _target_meal_slots(ws, day_no=None):
             if count_ref:
                 match = re.search(r"(\d+)$", count_ref)
                 if match:
-                    target_rows.append(int(match.group(1)))
+                    target_specs.append({
+                        "row": int(match.group(1)),
+                        "sheet_name": str(ws[f"AA{row}"].value or "").strip(),
+                    })
     slots = []
-    rows = target_rows if target_rows is not None else range(2, ws.max_row + 1)
-    for row in rows:
-        meal = ws[f"AF{row}"].value
+    specs = target_specs if target_specs is not None else (
+        {"row": row, "sheet_name": ""} for row in range(2, ws.max_row + 1)
+    )
+    for spec in specs:
+        row = spec["row"]
+        meal = ws[f"AF{row}"].value or spec["sheet_name"]
         if meal:
-            slots.append({"row": row, "meal_name": str(meal).strip()})
+            slots.append({
+                "row": row,
+                "meal_name": str(meal).strip(),
+                "sheet_name": spec["sheet_name"],
+            })
     return slots
 
 
@@ -192,7 +213,8 @@ def _write_counts(template_path, uploaded_rows, day_no=None):
                 by_name[key].append(count)
     for slot in slots:
         count = None
-        for key in _meal_match_keys(slot["meal_name"]):
+        slot_keys = _meal_match_keys(slot["meal_name"]) | _meal_match_keys(slot.get("sheet_name"))
+        for key in slot_keys:
             queue = by_name.get(key)
             if queue:
                 count = queue.popleft()
@@ -201,9 +223,6 @@ def _write_counts(template_path, uploaded_rows, day_no=None):
             ws[f"AG{slot['row']}"] = count
             matched.append({"row": slot["row"], "meal_name": slot["meal_name"], "count": count})
         else:
-            # Never carry a stale count from a previous upload when the meal
-            # is absent or its name cannot be matched in the selected day.
-            ws[f"AG{slot['row']}"] = 0
             unmatched.append(slot["meal_name"])
 
     safety_sheets = []
@@ -218,7 +237,7 @@ def _write_counts(template_path, uploaded_rows, day_no=None):
                 safety_sheets.append(sheet_name)
 
     out_path = tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False).name
-    _sync_ordering_counts_to_recipe_sheets(wb)
+    _sync_ordering_counts_to_recipe_sheets(wb, day_no)
     wb.save(out_path)
     wb.close()
     return out_path, {
@@ -236,11 +255,18 @@ def _extract_ag_reference(value):
     return text if text.startswith("AG") else None
 
 
-def _sync_ordering_counts_to_recipe_sheets(wb):
+def _sync_ordering_counts_to_recipe_sheets(wb, day_no=None):
     if "Ordering" not in wb.sheetnames:
         return
     ws = wb["Ordering"]
+    selected_day = _as_number(day_no)
+    if selected_day is None:
+        selected_day = _as_number(ws["R1"].value)
+    selected_day = int(selected_day) if selected_day is not None else None
     for row in range(3, ws.max_row + 1):
+        row_day = _as_number(ws[f"AB{row}"].value)
+        if selected_day is not None and (row_day is None or int(row_day) != selected_day):
+            continue
         sheet_name = ws[f"AA{row}"].value
         if not sheet_name or sheet_name not in wb.sheetnames:
             continue
