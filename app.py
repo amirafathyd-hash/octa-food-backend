@@ -1020,7 +1020,12 @@ def rice_ordering_process_day():
     if not uploaded:
         return jsonify({'error': 'ارفع ملف اليوم باسم file'}), 400
     try:
-        excel_path, pdf_path, report = build_rice_day_files(uploaded)
+        safety_items = json.loads(request.form.get('safety_items') or '[]')
+        excel_path, pdf_path, report = build_rice_day_files(
+            uploaded,
+            safety_items=safety_items,
+            expected_day_no=request.form.get('day_no'),
+        )
         package = package_rice_files(excel_path, pdf_path, report['day_no'])
         response = send_file(
             package,

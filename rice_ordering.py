@@ -65,7 +65,9 @@ def _mapping_rows(wb, day_no=None):
             'sheet': sheet_name,
             'day_no': mapped_day,
             'formula': str(ws[f'AC{row}'].value or ''),
-            'safety_grams': _number(ws[f'AD{row}'].value),
+            # Safety is never taken from the master workbook.  The selected
+            # day's value is supplied explicitly by the dashboard per recipe.
+            'safety_grams': 0.0,
         })
     return mappings
 
@@ -157,8 +159,10 @@ def _write_inputs(day_no, inputs, template_path=RICE_TEMPLATE_PATH):
             raise ValueError('شيت الأرز الأساسي لا يحتوي على Ordering')
         wb['Ordering']['R1'] = int(day_no)
         values = {str(item.get('sheet') or ''): max(0.0, _number(item.get('input_grams'))) for item in inputs}
+        safety_values = {str(item.get('sheet') or ''): max(0.0, _number(item.get('safety_grams'))) for item in inputs}
         for mapping in _mapping_rows(wb, day_no):
             wb[mapping['sheet']]['Z1'] = values.get(mapping['sheet'], 0.0)
+            wb['Ordering'][f'AD{mapping["row"]}'] = safety_values.get(mapping['sheet'], 0.0)
         wb.calculation.fullCalcOnLoad = True
         wb.calculation.forceFullCalc = True
         wb.calculation.calcMode = 'auto'
@@ -361,13 +365,21 @@ def _files_from_inputs(day_no, inputs, template_path=RICE_TEMPLATE_PATH):
     return calculated, pdf_path, report
 
 
-def build_rice_day_files(file_storage, template_path=RICE_TEMPLATE_PATH):
+def build_rice_day_files(file_storage, template_path=RICE_TEMPLATE_PATH, safety_items=None, expected_day_no=None):
     day_no, meals, input_report = read_day_file_payload(file_storage)
+    if expected_day_no is not None and int(_number(expected_day_no)) != int(day_no):
+        raise ValueError(f'ملف اليوم يخص يوم {day_no} بينما اليوم المختار في لوحة الأرز هو {int(_number(expected_day_no))}')
     wb = load_workbook(template_path, data_only=False, keep_vba=True)
     try:
         inputs, missing = _compute_day_grams(wb, day_no, meals)
     finally:
         wb.close()
+    safety_lookup = {
+        str(item.get('sheet') or ''): max(0.0, _number(item.get('safety_grams')))
+        for item in (safety_items or [])
+    }
+    for item in inputs:
+        item['safety_grams'] = safety_lookup.get(item['sheet'], 0.0)
     excel_path, pdf_path, report = _files_from_inputs(day_no, inputs, template_path)
     report.update({'input_report': input_report, 'missing_sources': missing, 'inputs': inputs})
     return excel_path, pdf_path, report
@@ -386,7 +398,11 @@ def build_rice_manual_files(day_no, items, template_path=RICE_TEMPLATE_PATH):
     for item in items or []:
         sheet = str(item.get('sheet') or '')
         if sheet in allowed:
-            inputs.append({'sheet': sheet, 'input_grams': max(0.0, _number(item.get('input_grams')))})
+            inputs.append({
+                'sheet': sheet,
+                'input_grams': max(0.0, _number(item.get('input_grams'))),
+                'safety_grams': max(0.0, _number(item.get('safety_grams'))),
+            })
     return _files_from_inputs(day_no, inputs, template_path)
 
 
