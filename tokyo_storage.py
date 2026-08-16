@@ -13,6 +13,7 @@ BUNDLED_TEMPLATE_PATH = os.path.join(APP_DIR, 'tokyo_ordering_template.xlsm')
 BUNDLED_BASELINE_PATH = os.path.join(APP_DIR, 'tokyo_template_baseline.json')
 BUNDLED_DESSERT_TEMPLATE_PATH = os.path.join(APP_DIR, 'data', 'Tokyo_Dessert_Ordering.xlsm')
 DESSERT_TEMPLATE_REVISION = '20260816-day3-profiterole'
+TOKYO_TEMPLATE_REVISION = '20260816-w3-day4-explicit-mapping'
 
 
 def _persistent_dir():
@@ -27,6 +28,7 @@ TOKYO_TEMPLATE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'tokyo_ordering_template.x
 TOKYO_BASELINE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'tokyo_template_baseline.json')
 DESSERT_TEMPLATE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'Tokyo_Dessert_Ordering.xlsm')
 DESSERT_REVISION_PATH = os.path.join(TOKYO_STORAGE_DIR, '.dessert-template-revision')
+TOKYO_REVISION_PATH = os.path.join(TOKYO_STORAGE_DIR, '.tokyo-template-revision')
 
 
 def _dessert_revision():
@@ -50,6 +52,23 @@ def _install_dessert_revision():
         stream.write(DESSERT_TEMPLATE_REVISION)
 
 
+def _install_tokyo_revision():
+    try:
+        with open(TOKYO_REVISION_PATH, 'r', encoding='utf-8') as stream:
+            installed = stream.read().strip()
+    except OSError:
+        installed = ''
+    if installed == TOKYO_TEMPLATE_REVISION or not os.path.exists(BUNDLED_TEMPLATE_PATH):
+        return
+    # Install the approved W3 master once. The marker prevents refreshes and
+    # worker restarts from replacing a newer workbook uploaded by the user.
+    shutil.copy2(BUNDLED_TEMPLATE_PATH, TOKYO_TEMPLATE_PATH)
+    if os.path.exists(BUNDLED_BASELINE_PATH):
+        shutil.copy2(BUNDLED_BASELINE_PATH, TOKYO_BASELINE_PATH)
+    with open(TOKYO_REVISION_PATH, 'w', encoding='utf-8') as stream:
+        stream.write(TOKYO_TEMPLATE_REVISION)
+
+
 def ensure_tokyo_storage():
     """Create persistent storage and seed it once from the deployed bundle."""
     os.makedirs(TOKYO_STORAGE_DIR, exist_ok=True)
@@ -61,6 +80,7 @@ def ensure_tokyo_storage():
     for bundled_path, persistent_path in migrations:
         if not os.path.exists(persistent_path) and os.path.exists(bundled_path):
             shutil.copy2(bundled_path, persistent_path)
+    _install_tokyo_revision()
     _install_dessert_revision()
     return TOKYO_TEMPLATE_PATH, TOKYO_BASELINE_PATH
 

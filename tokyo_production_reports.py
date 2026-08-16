@@ -322,7 +322,10 @@ def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str |
         day_no,
         meals,
         safety_overrides=safety_overrides,
-        zero_missing=input_report.get('kind') == 'repeat_update',
+        # A daily upload is a complete snapshot for that Tokyo day. Clearing
+        # missing rows prevents values from the previous run surviving a
+        # refresh and appearing in the new production PDF.
+        zero_missing=True,
     )
     updated_xlsm = Path(updated_xlsm)
 

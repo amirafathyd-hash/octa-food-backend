@@ -13,7 +13,6 @@ import os
 import re
 import json
 from datetime import datetime
-from difflib import SequenceMatcher
 from openpyxl import load_workbook
 
 DAY_NAMES = {1: 'السبت', 2: 'الأحد', 3: 'الاثنين', 4: 'الثلاثاء', 5: 'الأربعاء', 6: 'الخميس'}
@@ -49,6 +48,49 @@ SHEET_INPUT_ALIASES = {
     'Oven Vegetables (3)': ['Sauteed vegetables', 'خضار سوتيه'],
     'Beef Burger': ['Smoky Beef Burger', 'Beef burger', 'برجر سموكي لحم'],
     'Smoky Beef Burger': ['Beef Burger', 'Beef burger', 'برجر سموكي لحم'],
+    # Day 4: the prepared Update pivot exposes the menu labels, while the
+    # Tokyo workbook uses component recipe tabs. Keep these links explicit;
+    # fuzzy matching can silently connect similar but unrelated recipes.
+    'Chicken Steak Sauce': [
+        'Chicken steak with mashed potatoes',
+        'Chicken steak with sauteed vegetables',
+        'ستيك دجاج',
+    ],
+    'Chicken Steak Topping': [
+        'Chicken steak with mashed potatoes',
+        'Chicken steak with sauteed vegetables',
+        'ستيك دجاج',
+    ],
+    'Chicken Mushroom': [
+        'Chicken mushroom with white rice',
+        'Chicken with mushrooms with sauteed vegetables',
+        'دجاج بالفطر',
+    ],
+    'Stroganoff Beef': ['Stroganoff pasta', 'ستروجانوف باستا'],
+    'Stroganoff pasta': ['Stroganoff pasta', 'ستروجانوف باستا'],
+    'Beef Amansi': [
+        'Beef M&C with saffron rice',
+        'Beef amansi with sauteed vegetables',
+        'بيف أمانسي',
+    ],
+    'Chicken Tikka': ['Tikka chicken with Buryani rice', 'دجاج تكا'],
+    'Lahm Fasooliya': ['Navy bean with meat and white rice', 'فاصولياء بيضاء باللحم'],
+    'Lemon Fish': ['Lemon Fish with orzo and spinach', 'سمك بالسبانخ والليمون'],
+    'Orzo Pasta': ['Lemon Fish with orzo and spinach', 'لسان العصفور'],
+    'Octa Poki Bowl': ['Octa Chicken Poke bowl (spicy)', 'أوكتا بوكي بول الدجاج'],
+    'Chicken Makloba': ['Chicken Maqluba', 'مقلوبة دجاج'],
+    'Makloba Veggi': ['Chicken Maqluba', 'مقلوبة دجاج'],
+    'BBQ Chicken': [
+        'BBQ Chicken Sandwich in Ciabatta Bread',
+        'ساندوتش الدجاج بالباربيكيو بخبز الشيباتا',
+    ],
+    'Classic Chicken Burger': ['Classic Chicken Burger', 'برجر الدجاج الكلاسيكي'],
+    'Chicken Noodles': ['Chicken and Vegatables Noodles', 'نودلز الدجاج و الخضار'],
+    'Noodles': ['Chicken and Vegatables Noodles', 'نودلز الدجاج و الخضار'],
+    'Noodles Veggie': ['Chicken and Vegatables Noodles', 'نودلز الدجاج و الخضار'],
+    'Mached Potato(4)': ['البطاطس المهروسة'],
+    'Sautee Vegetables (4)': ['خضار سوتيه'],
+    'Oriental Vegetables': ['الأرز المصري بالزعفران'],
 }
 
 # Some operational products are different menu rows but feed one Tokyo
@@ -584,16 +626,26 @@ def _prepared_update_columns(ws):
             ),
             1,
         )
+        # New daily files use a two-row pivot header: package Count/Grams are
+        # on the lower row while Total Count/Total Grams are one row above.
+        # Search both rows so the final pivot totals are preferred whenever
+        # they exist; older one-row exports still work unchanged.
+        total_labels = dict(labels)
+        if header_row > 1:
+            for column in range(1, ws.max_column + 1):
+                upper = str(ws.cell(header_row - 1, column).value or '').strip().casefold()
+                if upper:
+                    total_labels[column] = upper
         total_count_column = next(
             (
-                column for column, label in labels.items()
+                column for column, label in total_labels.items()
                 if 'total' in label and 'count' in label
             ),
             None,
         )
         total_grams_column = next(
             (
-                column for column, label in labels.items()
+                column for column, label in total_labels.items()
                 if 'total' in label and ('gram' in label or 'جرام' in label)
             ),
             None,
@@ -873,17 +925,6 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
         found, matched_input = _aggregate_recipe_inputs(
             sheet_name, meals_by_name, norm_lookup
         )
-
-        if found is None and sheet_name:
-            english_keys = [k for k in meals_by_name if any('a' <= ch.lower() <= 'z' for ch in str(k))]
-            fuzzy = max(
-                ((SequenceMatcher(None, sheet_name.lower(), str(candidate).lower()).ratio(), candidate)
-                 for candidate in english_keys),
-                default=(0, None),
-            )
-            if fuzzy[0] >= 0.62:
-                matched_input = fuzzy[1]
-                found = meals_by_name[matched_input]
 
         # Last-resort compatibility for older templates whose AQ mapping is
         # known to be correct. It intentionally comes after recipe-name match.
