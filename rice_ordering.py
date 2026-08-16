@@ -25,6 +25,9 @@ DAY_NAMES = {
     5: 'الأربعاء', 6: 'الخميس', 7: 'الجمعة',
 }
 SOURCE_COLUMN_MAP = {'AS': 'AQ', 'AX': 'AV'}
+ARABIC_FONT = 'Noto Sans Arabic'
+LATIN_FONT = 'Noto Sans'
+BUNDLED_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fonts')
 
 
 def _number(value):
@@ -122,13 +125,21 @@ def _soffice_bin():
     return os.environ.get('SOFFICE_BIN') or shutil.which('soffice') or 'soffice'
 
 
+def _soffice_env():
+    env = os.environ.copy()
+    if os.path.isdir(BUNDLED_FONTS_DIR):
+        existing = str(env.get('SAL_FONTPATH') or '').strip()
+        env['SAL_FONTPATH'] = os.pathsep.join(part for part in (BUNDLED_FONTS_DIR, existing) if part)
+    return env
+
+
 def _recalculate_to_xlsx(source_path):
     out_dir = tempfile.mkdtemp(prefix='rice_recalc_')
     profile_dir = tempfile.mkdtemp(prefix='rice_lo_profile_')
     proc = subprocess.run([
         _soffice_bin(), f'-env:UserInstallation=file://{profile_dir}',
         '--headless', '--convert-to', 'xlsx', '--outdir', out_dir, source_path,
-    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=150)
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=150, env=_soffice_env())
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or 'LibreOffice failed').strip())
     result = os.path.join(out_dir, os.path.splitext(os.path.basename(source_path))[0] + '.xlsx')
@@ -143,7 +154,7 @@ def _export_to_pdf(workbook_path):
     proc = subprocess.run([
         _soffice_bin(), f'-env:UserInstallation=file://{profile_dir}',
         '--headless', '--convert-to', 'pdf', '--outdir', out_dir, workbook_path,
-    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=150)
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=150, env=_soffice_env())
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or 'LibreOffice PDF export failed').strip())
     result = os.path.join(out_dir, os.path.splitext(os.path.basename(workbook_path))[0] + '.pdf')
@@ -244,21 +255,30 @@ def _build_pdf_source(calculated_path, day_no):
             arabic_title = _clean_arabic_title(mapping['sheet'])
             english_title = _english_title(recipe['B2'].value, mapping['sheet'])
 
-            ws.merge_cells('A1:F1')
-            ws['A1'] = arabic_title
-            ws['A1'].font = Font(name='Arial', bold=True, size=17)
-            ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+            # Balance the title between an empty left column and the Day cell
+            # so it is visually centred across the whole printed page.
+            ws.merge_cells('B1:F1')
+            ws['B1'] = arabic_title
+            ws['B1'].font = Font(name=ARABIC_FONT, bold=True, size=19)
+            ws['B1'].alignment = Alignment(horizontal='center', vertical='center', readingOrder=2)
             ws['G1'] = f'Day {int(day_no)}'
-            ws['G1'].font = Font(name='Arial', bold=True, size=16)
+            ws['G1'].font = Font(name=LATIN_FONT, bold=True, size=15)
             ws['G1'].alignment = Alignment(horizontal='right', vertical='center')
-            ws.row_dimensions[1].height = 32
+            ws.row_dimensions[1].height = 38
 
             ws.merge_cells('A3:G3')
-            ws['A3'] = f'{arabic_title}  {batch_index} / {batch_count}\n{english_title}  {batch_index} / {batch_count}'
+            ws['A3'] = f'{arabic_title}   {batch_index} / {batch_count}'
             ws['A3'].fill = brown
-            ws['A3'].font = Font(name='Arial', color='FFFFFF', bold=True, size=13)
-            ws['A3'].alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-            ws.row_dimensions[3].height = 36
+            ws['A3'].font = Font(name=ARABIC_FONT, color='FFFFFF', bold=True, size=14)
+            ws['A3'].alignment = Alignment(horizontal='center', vertical='center', readingOrder=2)
+            ws.row_dimensions[3].height = 27
+
+            ws.merge_cells('A4:G4')
+            ws['A4'] = f'{english_title}   {batch_index} / {batch_count}'
+            ws['A4'].fill = brown
+            ws['A4'].font = Font(name=LATIN_FONT, color='FFFFFF', bold=True, size=12)
+            ws['A4'].alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[4].height = 24
 
             headers = [
                 'Ingredient - الأصناف', 'Unit - الوحدة',
@@ -269,14 +289,14 @@ def _build_pdf_source(calculated_path, day_no):
                 'Linear Scaled Amount - الكمية المعدلة\nحسابياً',
             ]
             for column, header in enumerate(headers, 1):
-                cell = ws.cell(4, column, header)
+                cell = ws.cell(5, column, header)
                 cell.fill = green if column in (4, 5, 6) else peach
-                cell.font = Font(name='Arial', bold=True, size=10)
+                cell.font = Font(name=ARABIC_FONT, bold=True, size=10)
                 cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                 cell.border = border
-            ws.row_dimensions[4].height = 52
+            ws.row_dimensions[5].height = 52
 
-            for row_offset, item in enumerate(ingredients, 5):
+            for row_offset, item in enumerate(ingredients, 6):
                 linear_amount = item['base'] * batch['factor']
                 values = [
                     item['name'], item['unit'], item['base'], batch['factor'],
@@ -286,7 +306,7 @@ def _build_pdf_source(calculated_path, day_no):
                     cell = ws.cell(row_offset, column, value)
                     cell.fill = white
                     cell.border = border
-                    cell.font = Font(name='Arial', size=10)
+                    cell.font = Font(name=ARABIC_FONT, size=10)
                     cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                     if column == 4:
                         cell.number_format = '0.000'
@@ -301,7 +321,7 @@ def _build_pdf_source(calculated_path, day_no):
             widths = [31, 16, 29, 23, 25, 23, 38]
             for column, width in enumerate(widths, 1):
                 ws.column_dimensions[chr(64 + column)].width = width
-            last_row = 4 + len(ingredients)
+            last_row = 5 + len(ingredients)
             ws.print_area = f'A1:G{max(last_row + 17, 34)}'
             ws.page_setup.orientation = 'landscape'
             ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
@@ -314,7 +334,7 @@ def _build_pdf_source(calculated_path, day_no):
             ws.page_margins.bottom = 0.35
             ws.oddFooter.center.text = f'Page {page_index} of {total_pages}'
             ws.oddFooter.center.size = 10
-            ws.oddFooter.center.font = 'Arial,Bold'
+            ws.oddFooter.center.font = f'{LATIN_FONT},Bold'
 
         if not report.sheetnames:
             raise ValueError('لا توجد كميات أرز موجبة لهذا اليوم')
