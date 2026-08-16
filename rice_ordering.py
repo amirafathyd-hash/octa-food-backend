@@ -25,9 +25,13 @@ DAY_NAMES = {
     5: 'الأربعاء', 6: 'الخميس', 7: 'الجمعة',
 }
 SOURCE_COLUMN_MAP = {'AS': 'AQ', 'AX': 'AV'}
-ARABIC_FONT = 'Noto Sans Arabic'
+ARABIC_FONT = 'IBM Plex Sans Arabic'
 LATIN_FONT = 'Noto Sans'
-BUNDLED_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'fonts')
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+BUNDLED_FONTS_DIRS = (
+    os.path.join(APP_DIR, 'fonts'),
+    os.path.join(APP_DIR, 'data', 'fonts'),
+)
 
 
 def _number(value):
@@ -127,9 +131,10 @@ def _soffice_bin():
 
 def _soffice_env():
     env = os.environ.copy()
-    if os.path.isdir(BUNDLED_FONTS_DIR):
+    font_dirs = [path for path in BUNDLED_FONTS_DIRS if os.path.isdir(path)]
+    if font_dirs:
         existing = str(env.get('SAL_FONTPATH') or '').strip()
-        env['SAL_FONTPATH'] = os.pathsep.join(part for part in (BUNDLED_FONTS_DIR, existing) if part)
+        env['SAL_FONTPATH'] = os.pathsep.join(font_dirs + ([existing] if existing else []))
     return env
 
 
