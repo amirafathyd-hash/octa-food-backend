@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "description": "Each group is one distinct operational meal. Aliases inside a group are labels for the same row and are never added together.",
+  "recipes": {
+    "Chicken Fajita": {
+      "groups": [
+        {
+          "aliases": [
+            "Chicken Fajita Sandwich on Oat Bread",
+            "Chicken Fajita sandwich served with oat bread",
+            "ساندوتش فاهيتا الدجاج بخبز الشوفان"
+          ]
+        },
+        {
+          "aliases": [
+            "Chicken Bell Pepper Sandwich",
+            "ساندوتش الدجاج بالفلفل الرومي"
+          ]
+        }
+      ]
+    },
+    "Asian Chicken Sandwich": {
+      "groups": [
+        {
+          "aliases": [
+            "Asian chicken sandwich with oat bread",
+            "Asian chicken sandwich served with oat bread",
+            "ساندوتش الدجاج الآسيوي بخبز الشوفان",
+            "ساندويتش الدجاج الآسيوي"
+          ]
+        },
+        {
+          "aliases": [
+            "Chicken Awsal sandwich",
+            "ساندوتش دجاج أوصال",
+            "ساندويتش دجاج أوصال",
+            "ساندويتش دجاج اوصل"
+          ]
+        }
+      ]
+    },
+    "BBQ Chicken": {
+      "groups": [
+        {
+          "aliases": [
+            "BBQ Chicken Sandwich in Ciabatta Bread",
+            "BBQ chicken sandwich with Ciabatta Bread",
+            "ساندوتش الدجاج بالباربيكيو بخبز الشيباتا",
+            "ساندويتش الدجاج بالباربيكيو"
+          ]
+        },
+        {
+          "aliases": [
+            "Grilled chicken sandwich",
+            "ساندوتش الدجاج المشوي",
+            "ساندويتش الدجاج المشوي"
+          ]
+        }
+      ]
+    },
+    "Beef philly cheese steak": {
+      "groups": [
+        {
+          "aliases": [
+            "Philadelphia beef sandwich with oat bread",
+            "ساندويتش فلادلفيا لحم",
+            "ساندوتش فلادلفيا لحم"
+          ]
+        },
+        {
+          "aliases": [
+            "Classic beef sandwich",
+            "Classic meat sandwich",
+            "ساندوتش اللحم الكلاسيكي",
+            "ساندويتش اللحم الكلاسيكي"
+          ]
+        }
+      ]
+    }
+  }
+}
