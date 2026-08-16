@@ -245,15 +245,19 @@ def _arabic_title_png(text, font_size, width, height, color):
     canvas = PILImage.new('RGBA', (width, height), (255, 255, 255, 0))
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.truetype(ARABIC_BOLD_PATH, font_size)
-    visual_text = get_display(arabic_reshaper.reshape(str(text or '')))
-    # ``get_display`` has already converted the logical RTL text into visual
-    # glyph order.  Force Pillow/Raqm to draw that result as LTR so servers
-    # with libraqm do not apply bidi a second time and reverse the words.
-    text_options = {'font': font, 'direction': 'ltr'}
+    logical_text = str(text or '')
+    # Let Raqm shape the original logical Arabic exactly once.  Previously the
+    # text was reshaped/get_display'ed first and then shaped again by Raqm,
+    # which produced reversed words and broken presentation forms in the PDF.
+    visual_text = logical_text
+    text_options = {'font': font, 'direction': 'rtl', 'language': 'ar'}
     try:
         bounds = draw.textbbox((0, 0), visual_text, **text_options)
     except (KeyError, TypeError):
-        text_options.pop('direction', None)
+        # Fallback for Pillow builds without libraqm: shape once in Python and
+        # draw the visual glyph sequence without any directional processing.
+        visual_text = get_display(arabic_reshaper.reshape(logical_text))
+        text_options = {'font': font}
         bounds = draw.textbbox((0, 0), visual_text, **text_options)
     text_width = bounds[2] - bounds[0]
     text_height = bounds[3] - bounds[1]
