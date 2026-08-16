@@ -12,6 +12,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BUNDLED_TEMPLATE_PATH = os.path.join(APP_DIR, 'tokyo_ordering_template.xlsm')
 BUNDLED_BASELINE_PATH = os.path.join(APP_DIR, 'tokyo_template_baseline.json')
 BUNDLED_DESSERT_TEMPLATE_PATH = os.path.join(APP_DIR, 'data', 'Tokyo_Dessert_Ordering.xlsm')
+DESSERT_TEMPLATE_REVISION = '20260816-day3-profiterole'
 
 
 def _persistent_dir():
@@ -25,6 +26,28 @@ TOKYO_STORAGE_DIR = _persistent_dir()
 TOKYO_TEMPLATE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'tokyo_ordering_template.xlsm')
 TOKYO_BASELINE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'tokyo_template_baseline.json')
 DESSERT_TEMPLATE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'Tokyo_Dessert_Ordering.xlsm')
+DESSERT_REVISION_PATH = os.path.join(TOKYO_STORAGE_DIR, '.dessert-template-revision')
+
+
+def _dessert_revision():
+    try:
+        with open(DESSERT_REVISION_PATH, 'r', encoding='utf-8') as stream:
+            return stream.read().strip()
+    except OSError:
+        return ''
+
+
+def _install_dessert_revision():
+    if not os.path.exists(BUNDLED_DESSERT_TEMPLATE_PATH):
+        return
+    if _dessert_revision() == DESSERT_TEMPLATE_REVISION:
+        return
+    # One-time repair for the old bundled workbook that omitted the Day 3
+    # Pistachio Profiterole mapping. Future restarts keep the active template,
+    # including any newer template uploaded from the dashboard.
+    shutil.copy2(BUNDLED_DESSERT_TEMPLATE_PATH, DESSERT_TEMPLATE_PATH)
+    with open(DESSERT_REVISION_PATH, 'w', encoding='utf-8') as stream:
+        stream.write(DESSERT_TEMPLATE_REVISION)
 
 
 def ensure_tokyo_storage():
@@ -38,6 +61,7 @@ def ensure_tokyo_storage():
     for bundled_path, persistent_path in migrations:
         if not os.path.exists(persistent_path) and os.path.exists(bundled_path):
             shutil.copy2(bundled_path, persistent_path)
+    _install_dessert_revision()
     return TOKYO_TEMPLATE_PATH, TOKYO_BASELINE_PATH
 
 
