@@ -28,11 +28,11 @@ from tokyo_storage import TOKYO_BASELINE_PATH, TOKYO_TEMPLATE_PATH
 
 PORTIONS_PATH = os.path.join(os.path.dirname(__file__), 'meal_portions_data.json')
 PACKAGES_PATH = os.path.join(os.path.dirname(__file__), 'menu_packages.json')
-EXPECTED_TEMPLATE_SHA256 = '0e110f2f45330cce3c1aea0f2f86542323614f3329e64ed935dc0be71ddb5d18'
-EXPECTED_VBA_SHA256 = 'a6e4ee6fecaca26a334e05efba9422ca9f6d1ea539a638969fb4ab47d28c5758'
-EXPECTED_SHEET_COUNT = 88
-EXPECTED_FORMULA_COUNT = 31085
-ALLOWED_FORMULA_COUNTS = {31085, 31084}  # original XML / openpyxl-normalized XML
+EXPECTED_TEMPLATE_SHA256 = '7c1e23430735ab09fc6a784f06ab02dd8a737aa89076b391daf9888ba3f67666'
+EXPECTED_VBA_SHA256 = '7fd64a068ae257d2b862ed22fc946a3f3624521d2767e2285cea78ed2c56b21c'
+EXPECTED_SHEET_COUNT = 100
+EXPECTED_FORMULA_COUNT = 33556
+ALLOWED_FORMULA_COUNTS = {33556, 33555}  # original XML / openpyxl-normalized XML
 
 with open(PORTIONS_PATH, encoding='utf-8') as f:
     # { meal_name: [portion_grams_per_order, arabic_name] }
