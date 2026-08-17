@@ -60,6 +60,13 @@ from dessert_ordering import (
     replace_dessert_template,
     update_dessert_ordering_from_upload,
 )
+from breakfast_ordering import (
+    export_breakfast_excel_with_edits,
+    export_breakfast_pdf_with_edits,
+    get_breakfast_template_state,
+    recalculate_breakfast_with_edits,
+    replace_breakfast_template,
+)
 from salads_ordering import (
     export_salads_cost_report_pdf_with_edits,
     export_salads_cost_report_with_edits,
@@ -793,6 +800,87 @@ def day_operations_archive_download(archive_id):
     except Exception as exc:
         return jsonify({'error': f'تعذر فتح الأرشيف: {exc}'}), 500
     return send_file(path, as_attachment=True, download_name=f'Day_Operations_Archive_{archive_id}.zip', mimetype='application/zip')
+
+
+@app.route('/api/breakfast-ordering/template', methods=['GET'])
+def breakfast_ordering_template():
+    try:
+        day_no = request.args.get('day_no') or 1
+        return jsonify({'ok': True, 'state': get_breakfast_template_state(day_no=day_no)})
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('breakfast_ordering_template failed')
+        return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/breakfast-ordering/replace-template', methods=['POST'])
+def breakfast_ordering_replace_template():
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف الشيت الرئيسي الجديد باسم file'}), 400
+    try:
+        state, report = replace_breakfast_template(uploaded)
+        return jsonify({'ok': True, 'state': state, 'report': report})
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('breakfast_ordering_replace_template failed')
+        return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/breakfast-ordering/recalculate', methods=['POST'])
+def breakfast_ordering_recalculate():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify({
+            'ok': True,
+            'state': recalculate_breakfast_with_edits(payload.get('edits') or []),
+        })
+    except Exception as exc:
+        app.logger.exception('breakfast_ordering_recalculate failed')
+        return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/breakfast-ordering/export-pdf', methods=['POST'])
+def breakfast_ordering_export_pdf():
+    payload = request.get_json(silent=True) or {}
+    try:
+        day_no = payload.get('day_no') or 1
+        pdf_path, report = export_breakfast_pdf_with_edits(
+            payload.get('edits') or [], day_no=day_no
+        )
+        response = send_file(
+            pdf_path,
+            as_attachment=True,
+            download_name=f"Day{report['day_no']}_Breakfast.pdf",
+            mimetype='application/pdf',
+        )
+        response.headers['X-Breakfast-Pdf-Report'] = json.dumps(report, ensure_ascii=True)
+        return response
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('breakfast_ordering_export_pdf failed')
+        return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/breakfast-ordering/export-excel', methods=['POST'])
+def breakfast_ordering_export_excel():
+    payload = request.get_json(silent=True) or {}
+    try:
+        excel_path, report = export_breakfast_excel_with_edits(payload.get('edits') or [])
+        response = send_file(
+            excel_path,
+            as_attachment=True,
+            download_name=f"Day{report['day_no']}_Breakfast_Updated.xlsx",
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response.headers['X-Breakfast-Excel-Report'] = json.dumps(report, ensure_ascii=True)
+        return response
+    except Exception as exc:
+        app.logger.exception('breakfast_ordering_export_excel failed')
+        return jsonify({'error': str(exc)}), 500
 
 
 @app.route('/api/dessert-ordering/update', methods=['POST'])

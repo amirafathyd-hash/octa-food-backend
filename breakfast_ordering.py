@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -110,16 +111,58 @@ def _recipe_sheet_names(wb):
     return [name for name in wb.sheetnames if name not in ("List of Meals", "Ordering", "NameNormalizationLog")]
 
 
-def _selected_day_recipe_sheets(workbook_path, day_no, per_day=7):
+def _resolve_sheet_name(wb, value):
+    wanted = _norm_text(value)
+    if not wanted:
+        return None
+    for name in wb.sheetnames:
+        if _norm_text(name) == wanted:
+            return name
+    return None
+
+
+def _day_recipe_entries(wb, day_no):
+    """Read the authoritative breakfast day map from Ordering!AA:AC.
+
+    Breakfast days do not contain a fixed number of recipes, so slicing the
+    workbook tabs in groups of seven selects the wrong sheets from day 2
+    onwards.  The workbook itself stores the exact recipe sheet, day and base
+    count in columns AA, AB and AC (AC may be formula-backed from AG).
+    """
+    if "Ordering" not in wb.sheetnames:
+        raise ValueError("الشيت الرئيسي لازم يحتوي على Ordering")
+    ordering = wb["Ordering"]
+    day = max(1, int(_as_number(day_no) or 1))
+    entries = []
+    seen = set()
+    for row in range(3, ordering.max_row + 1):
+        mapped_day = int(_as_number(ordering.cell(row, 28).value) or 0)  # AB
+        if mapped_day != day:
+            continue
+        sheet_name = _resolve_sheet_name(wb, ordering.cell(row, 27).value)  # AA
+        if not sheet_name or sheet_name in seen:
+            continue
+        count = _as_number(ordering.cell(row, 29).value)  # AC
+        if count is None:
+            count = _as_number(ordering.cell(row, 33).value)  # AG fallback
+        entries.append({
+            "sheet": sheet_name,
+            "day": day,
+            "base_count": _rounded(count or 0),
+            "map_row": row,
+        })
+        seen.add(sheet_name)
+    if not entries:
+        raise ValueError(f"لا توجد وصفات فطار مرتبطة باليوم {day} في Ordering!AA:AC")
+    return entries
+
+
+def _selected_day_recipe_sheets(workbook_path, day_no):
     wb = load_workbook(workbook_path, read_only=True, data_only=True)
     try:
-        recipes = _recipe_sheet_names(wb)
+        return [entry["sheet"] for entry in _day_recipe_entries(wb, day_no)]
     finally:
         wb.close()
-    day = max(1, int(_as_number(day_no) or 1))
-    start = (day - 1) * per_day
-    selected = recipes[start:start + per_day]
-    return selected or recipes[:per_day]
 
 
 def _english_first_title(value):
@@ -190,34 +233,33 @@ def extract_workbook_state(workbook_path):
     return {"sheets": sheets}
 
 
-def extract_dashboard_state(workbook_path):
+def extract_dashboard_state(workbook_path, day_no=None):
     wb = load_workbook(workbook_path, data_only=True)
     ordering = wb["Ordering"]
-
+    day = max(1, int(_as_number(day_no) or _as_number(ordering["R1"].value) or 1))
+    day_entries = _day_recipe_entries(wb, day)
     breakfast = []
-    recipe_sheet_names = _recipe_sheet_names(wb)
-    for sheet_name in recipe_sheet_names:
+    for entry in day_entries:
+        sheet_name = entry["sheet"]
         ws = wb[sheet_name]
         name = ws["B2"].value or sheet_name
-        count = _rounded(ws["V1"].value)
-        required_count = _rounded(ws["S15"].value)
+        base_count = _rounded(entry["base_count"])
         safety_count = _rounded(ws["S14"].value)
+        final_count = _rounded(ws["S15"].value)
         total_cost = _as_number(ws["S16"].value) or 0
         unit_cost = _as_number(ws["Y8"].value)
-        numeric_count = _as_number(count) or 0
-        numeric_required = _as_number(required_count) or numeric_count
-        if unit_cost is None and numeric_required:
-            unit_cost = total_cost / numeric_required
-        if not name and numeric_count == 0:
-            continue
+        numeric_final = _as_number(final_count) or (_as_number(base_count) or 0)
+        if unit_cost is None and numeric_final:
+            unit_cost = total_cost / numeric_final
         breakfast.append({
             "sheet": sheet_name,
-            "row": 1,
+            "row": entry["map_row"],
             "name": name,
-            "count": count,
-            "extra_count": count,
-            "required_count": required_count,
-            "safety_count": safety_count,
+            "count": base_count,
+            "base_count": base_count,
+            "required_count": base_count,
+            "safety_count": safety_count or 0,
+            "final_count": final_count,
             "unit_cost": round(unit_cost or 0, 3),
             "total_cost": round(total_cost, 3),
             "fill": _fill_rgb(ws["B2"]),
@@ -240,17 +282,19 @@ def extract_dashboard_state(workbook_path):
             "fill": _fill_rgb(ordering[f"A{row}"]),
         })
 
-    day = int(_as_number(ordering["R1"].value) or 1)
     wb.close()
     return {"breakfast": breakfast, "ingredients": ingredients, "day": day}
 
 
-def get_breakfast_template_state(template_path=BREAKFAST_TEMPLATE_PATH):
+def get_breakfast_template_state(template_path=BREAKFAST_TEMPLATE_PATH, day_no=None):
     if not os.path.exists(template_path):
         raise FileNotFoundError("ملف Tokyo_Breakfast.xlsm غير موجود في data")
     recalculated = recalc_workbook_to_xlsx(template_path)
-    state = extract_dashboard_state(recalculated)
-    state.update(extract_workbook_state(recalculated))
+    state = extract_dashboard_state(recalculated, day_no=day_no)
+    state["template_file"] = os.path.basename(template_path)
+    state["template_updated_at"] = datetime.fromtimestamp(
+        os.path.getmtime(template_path), tz=timezone.utc
+    ).isoformat()
     return state
 
 
@@ -264,7 +308,6 @@ def recalculate_breakfast_with_edits(edits, template_path=BREAKFAST_TEMPLATE_PAT
     wb.close()
     recalculated = recalc_workbook_to_xlsx(out_path)
     state = extract_dashboard_state(recalculated)
-    state.update(extract_workbook_state(recalculated))
     return state
 
 
@@ -301,7 +344,6 @@ def update_breakfast_counts_from_upload(file_storage, template_path=BREAKFAST_TE
 
     recalculated = recalc_workbook_to_xlsx(out_path)
     state = extract_dashboard_state(recalculated)
-    state.update(extract_workbook_state(recalculated))
     return state, {"matched_count": changed}
 
 
@@ -357,34 +399,25 @@ def export_breakfast_pdf_with_edits(edits, day_no=1, template_path=BREAKFAST_TEM
             ws["B4"].fill = dark_fill
             ws["B4"].font = white_font
             ws["B4"].alignment = Alignment(horizontal="center", vertical="center")
-            ws.merge_cells("B5:H5")
-            ws["B5"] = meal_title
-            ws["B5"].fill = dark_fill
-            ws["B5"].font = white_font
-            ws["B5"].alignment = Alignment(horizontal="center", vertical="center")
-            for address in ("A4", "A5"):
-                ws[address].fill = dark_fill
-                ws[address].border = border
+            ws["A4"].fill = dark_fill
+            ws["A4"].border = border
+            if meal_title:
+                ws["I4"] = meal_title
+                ws["I4"].font = body_bold
+                ws["I4"].alignment = Alignment(horizontal="center", vertical="center")
 
-            headers = [
-                "Category",
-                "Ingredient",
-                "Unit",
-                "Base Recipe\n(1 Portion)",
-                "Corrected\nConversion Factor",
-                "Scaling Factor\n(1-10KG)",
-                "Linear Scaled\nAmount",
-                "Scaled Amount Post Conversion Factor",
-            ]
+            # Keep each recipe's own headings.  Some breakfast sheets have a
+            # Cutting Method column while others intentionally leave it blank.
+            headers = [vals.cell(4, col).value for col in range(1, 9)]
             for col, header in enumerate(headers, 1):
-                cell = ws.cell(row=6, column=col)
+                cell = ws.cell(row=5, column=col)
                 cell.value = header
                 cell.fill = green_fill if col in (5, 6) else dark_fill
                 cell.font = Font(color="000000" if col in (5, 6) else "FFFFFF", bold=True, size=10)
                 cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 cell.border = border
 
-            out_row = 7
+            out_row = 6
             for src_row in range(5, vals.max_row + 1):
                 ingredient = vals.cell(src_row, 2).value
                 if not ingredient:
@@ -414,9 +447,8 @@ def export_breakfast_pdf_with_edits(edits, day_no=1, template_path=BREAKFAST_TEM
             ws.column_dimensions["H"].width = 34
             ws.column_dimensions["I"].width = 14
             ws.row_dimensions[4].height = 20
-            ws.row_dimensions[5].height = 20
-            ws.row_dimensions[6].height = 52
-            for row in range(7, out_row):
+            ws.row_dimensions[5].height = 52
+            for row in range(6, out_row):
                 ws.row_dimensions[row].height = 18
 
             ws.page_setup.orientation = "landscape"
@@ -457,9 +489,18 @@ def replace_breakfast_template(file_storage, template_path=BREAKFAST_TEMPLATE_PA
     file_storage.save(upload_path)
     wb = load_workbook(upload_path, data_only=False, keep_vba=True)
     try:
-        for required in ["Ordering"]:
-            if required not in wb.sheetnames:
-                raise ValueError(f"الشيت الجديد لازم يحتوي على {required}")
+        if "Ordering" not in wb.sheetnames:
+            raise ValueError("الشيت الجديد لازم يحتوي على Ordering")
+        mapped_days = set()
+        ordering = wb["Ordering"]
+        for row in range(3, ordering.max_row + 1):
+            day = int(_as_number(ordering.cell(row, 28).value) or 0)
+            if day:
+                mapped_days.add(day)
+        if not mapped_days:
+            raise ValueError("الشيت الجديد لا يحتوي على خريطة الأيام في Ordering!AA:AC")
+        for day in mapped_days:
+            _day_recipe_entries(wb, day)
     finally:
         wb.close()
     shutil.copyfile(upload_path, template_path)
