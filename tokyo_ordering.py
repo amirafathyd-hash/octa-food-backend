@@ -675,7 +675,7 @@ def _prepared_update_columns(ws):
     raise ValueError('تعذر تحديد أعمدة Count و Grams داخل شيت Update')
 
 
-def read_day_file_payload(file_storage):
+def read_day_file_payload(file_storage, fallback_day_no=None):
     """بتقرا شيت 'Update' من ملف يوم واحد (زي Octa_Food_Sat_...xlsx) وترجع:
     (day_no, {اسم الصنف: (Total Count, Total Grams)}, input_report)
     - اسم اليوم بيتقرا من الخلية A6 (زي 'السبت') وبيتحول لرقم اليوم.
@@ -705,6 +705,10 @@ def read_day_file_payload(file_storage):
         ),
         None,
     )
+    if not day_no and fallback_day_no:
+        fallback_day_no = int(_number(fallback_day_no))
+        if fallback_day_no in DAY_NAMES:
+            day_no = fallback_day_no
     if not day_no:
         found_labels = " / ".join(label or "فارغ" for label in day_labels)
         raise ValueError(
