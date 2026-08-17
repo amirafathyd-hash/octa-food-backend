@@ -80,6 +80,13 @@ from sauce_ordering import (
     replace_sauce_template,
     update_sauce_counts_from_upload,
 )
+from sauce_production import (
+    build_sauce_day_files,
+    build_sauce_manual_files,
+    get_sauce_production_state,
+    package_sauce_files,
+    replace_sauce_production_template,
+)
 from rice_ordering import (
     build_rice_day_files,
     build_rice_manual_files,
@@ -998,7 +1005,8 @@ def salads_ordering_export_cost_report_pdf():
 @app.route('/api/sauce-ordering/template', methods=['GET'])
 def sauce_ordering_template():
     try:
-        return jsonify({'ok': True, 'state': get_sauce_template_state()})
+        day_no = request.args.get('day_no') or 1
+        return jsonify({'ok': True, 'state': get_sauce_production_state(day_no=day_no)})
     except Exception as e:
         app.logger.exception('sauce_ordering_template failed')
         return jsonify({'error': str(e)}), 500
@@ -1103,10 +1111,57 @@ def sauce_ordering_replace_template():
     if not f:
         return jsonify({'error': 'ارفع ملف الشيت الرئيسي الجديد باسم file'}), 400
     try:
-        state, report = replace_sauce_template(f)
+        state, report = replace_sauce_production_template(f)
         return jsonify({'ok': True, 'report': report, 'state': state})
     except Exception as e:
         app.logger.exception('sauce_ordering_replace_template failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/sauce-ordering/process-day', methods=['POST'])
+def sauce_ordering_process_day():
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف اليوم باسم file'}), 400
+    try:
+        safety_items = json.loads(request.form.get('safety_items') or '[]')
+        excel_path, pdf_path, report = build_sauce_day_files(
+            uploaded,
+            safety_items=safety_items,
+            expected_day_no=request.form.get('day_no'),
+        )
+        package = package_sauce_files(excel_path, pdf_path, report['day_no'])
+        response = send_file(
+            package,
+            as_attachment=True,
+            download_name=f"Day{report['day_no']}_Sauce.zip",
+            mimetype='application/zip',
+        )
+        response.headers['X-Sauce-Report'] = json.dumps(report, ensure_ascii=True)[:7000]
+        return response
+    except Exception as e:
+        app.logger.exception('sauce_ordering_process_day failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/sauce-ordering/export-manual', methods=['POST'])
+def sauce_ordering_export_manual():
+    payload = request.get_json(silent=True) or {}
+    try:
+        excel_path, pdf_path, report = build_sauce_manual_files(
+            payload.get('day_no'), payload.get('items') or []
+        )
+        package = package_sauce_files(excel_path, pdf_path, report['day_no'])
+        response = send_file(
+            package,
+            as_attachment=True,
+            download_name=f"Day{report['day_no']}_Sauce.zip",
+            mimetype='application/zip',
+        )
+        response.headers['X-Sauce-Report'] = json.dumps(report, ensure_ascii=True)[:7000]
+        return response
+    except Exception as e:
+        app.logger.exception('sauce_ordering_export_manual failed')
         return jsonify({'error': str(e)}), 500
 
 
