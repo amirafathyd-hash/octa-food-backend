@@ -9,7 +9,8 @@ import tempfile
 import zipfile
 from datetime import datetime
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from sauce_storage import SAUCE_MAPPING_PATH, SAUCE_TEMPLATE_PATH
 from tokyo_ordering import read_day_file_payload
@@ -257,20 +258,115 @@ def _write_inputs(day_no, inputs, template_path=SAUCE_TEMPLATE_PATH):
 
 
 def _pdf_source(calculated_path, day_no):
-    wb = load_workbook(calculated_path, data_only=False)
+    source = load_workbook(calculated_path, data_only=True, read_only=True)
+    report = Workbook()
+    report.remove(report.active)
+    dark_fill = PatternFill('solid', fgColor='303D4D')
+    green_fill = PatternFill('solid', fgColor='C6E0B4')
+    yellow_fill = PatternFill('solid', fgColor='FFF200')
+    white_fill = PatternFill('solid', fgColor='FFFFFF')
+    thin = Side(style='thin', color='000000')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    mixed_font = 'IBM Plex Sans Arabic'
     try:
-        selected = set(_day_sheets(wb, day_no))
-        for sheet_name in list(wb.sheetnames):
-            if sheet_name not in selected:
-                wb.remove(wb[sheet_name])
-        if not wb.sheetnames:
+        selected = _day_sheets(source, day_no)
+        total_pages = len(selected)
+        for page_index, sheet_name in enumerate(selected, 1):
+            values = source[sheet_name]
+            ws = report.create_sheet(sheet_name[:31])
+            ws.sheet_view.showGridLines = False
+
+            ws.merge_cells('A1:G1')
+            ws['A1'] = sheet_name
+            ws['A1'].font = Font(name=mixed_font, bold=True, size=16)
+            ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+            ws['H1'] = f'Day {int(day_no)}'
+            ws['H1'].font = Font(name=mixed_font, bold=True, size=14)
+            ws['H1'].alignment = Alignment(horizontal='right', vertical='center')
+            ws.row_dimensions[1].height = 31
+
+            ws.merge_cells('A3:H3')
+            ws['A3'] = str(values['B2'].value or sheet_name).strip()
+            ws.merge_cells('A4:H4')
+            ws['A4'] = str(values['B3'].value or '').strip()
+            for row in (3, 4):
+                cell = ws.cell(row, 1)
+                cell.fill = dark_fill
+                cell.font = Font(name=mixed_font, color='FFFFFF', bold=True, size=11)
+                cell.alignment = Alignment(horizontal='center', vertical='center', readingOrder=2)
+                for column in range(1, 9):
+                    ws.cell(row, column).fill = dark_fill
+            ws.row_dimensions[3].height = 22
+            ws.row_dimensions[4].height = 22
+
+            headers = [
+                'Category', 'Ingredient', 'Unit', 'Base Recipe\n(1 Portion)',
+                'Corrected\nConversion Factor', 'Scaling Factor\n(1-10KG)',
+                'Linear Scaled\nAmount', 'Scaled Amount Post Conversion Factor',
+            ]
+            for column, header in enumerate(headers, 1):
+                cell = ws.cell(5, column, header)
+                cell.fill = green_fill if column in (5, 6) else dark_fill
+                cell.font = Font(
+                    name=mixed_font,
+                    color='000000' if column in (5, 6) else 'FFFFFF',
+                    bold=True,
+                    size=9,
+                )
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                cell.border = border
+            ws.row_dimensions[5].height = 46
+
+            output_row = 6
+            for source_row in range(5, min(values.max_row, 50) + 1):
+                ingredient = values.cell(source_row, 2).value
+                if not ingredient:
+                    continue
+                is_total = str(ingredient).strip().casefold() == 'sauce quantity gm'
+                for column in range(1, 9):
+                    value = values.cell(source_row, column).value
+                    cell = ws.cell(output_row, column, value)
+                    cell.fill = yellow_fill if is_total and column in (7, 8) else white_fill
+                    cell.font = Font(name=mixed_font, bold=is_total or column in (2, 8), size=9)
+                    cell.alignment = Alignment(
+                        horizontal='right' if column in (2, 8) else 'center',
+                        vertical='center',
+                        wrap_text=True,
+                        readingOrder=2 if column == 2 else 0,
+                    )
+                    cell.border = border
+                    if isinstance(value, (int, float)):
+                        cell.number_format = '#,##0.##'
+                ws.row_dimensions[output_row].height = 21
+                output_row += 1
+
+            widths = [16, 36, 11, 15, 18, 16, 17, 34]
+            for column, width in enumerate(widths, 1):
+                ws.column_dimensions[chr(64 + column)].width = width
+            last_row = output_row - 1
+            ws.print_area = f'A1:H{max(last_row + 12, 28)}'
+            ws.page_setup.orientation = 'landscape'
+            ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.page_setup.fitToWidth = 1
+            ws.page_setup.fitToHeight = 1
+            ws.page_margins.left = 0.25
+            ws.page_margins.right = 0.25
+            ws.page_margins.top = 0.35
+            ws.page_margins.bottom = 0.35
+            ws.oddFooter.center.text = f'Page {page_index} of {total_pages}'
+            ws.oddFooter.center.size = 10
+            ws.oddFooter.center.font = 'Arial,Bold'
+
+        if not report.sheetnames:
             raise ValueError('لا توجد وصفات صوص مرتبطة بهذا اليوم')
-        wb.active = 0
+        report.active = 0
         output = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False).name
-        wb.save(output)
-        return output, len(wb.sheetnames)
+        report.save(output)
+        return output, len(report.sheetnames)
     finally:
-        wb.close()
+        source.close()
+        report.close()
 
 
 def _state_from_workbook(path, day_no):
