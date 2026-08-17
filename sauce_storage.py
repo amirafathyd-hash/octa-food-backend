@@ -18,6 +18,7 @@ def _persistent_dir():
 SAUCE_STORAGE_DIR = _persistent_dir()
 SAUCE_TEMPLATE_PATH = os.path.join(SAUCE_STORAGE_DIR, 'Tokyo_Sauce.xlsm')
 SAUCE_REVISION_PATH = os.path.join(SAUCE_STORAGE_DIR, '.sauce-template-revision')
+SAUCE_MAPPING_PATH = os.path.join(SAUCE_STORAGE_DIR, 'sauce-meal-mappings.json')
 
 
 def ensure_sauce_storage():

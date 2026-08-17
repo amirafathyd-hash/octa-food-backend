@@ -1,5 +1,6 @@
 """Permanent count-driven production engine for the approved sauce workbook."""
 import io
+import json
 import os
 import re
 import shutil
@@ -10,13 +11,55 @@ from datetime import datetime
 
 from openpyxl import load_workbook
 
-from sauce_storage import SAUCE_TEMPLATE_PATH
+from sauce_storage import SAUCE_MAPPING_PATH, SAUCE_TEMPLATE_PATH
 from tokyo_ordering import read_day_file_payload
 
 
 DAY_NAMES = {1: 'السبت', 2: 'الأحد', 3: 'الاثنين', 4: 'الثلاثاء', 5: 'الأربعاء', 6: 'الخميس'}
 # The approved master is arranged in these six production-day blocks.
 DAY_BLOCK_LENGTHS = (9, 7, 6, 7, 8, 4)
+
+
+class SauceMappingRequiredError(ValueError):
+    def __init__(self, missing_groups, available_meals):
+        super().__init__('توجد أسماء وجبات جديدة تحتاج ربطها مرة واحدة بوصفات الصوص')
+        self.missing_groups = missing_groups
+        self.available_meals = available_meals
+
+
+def _load_mapping_overrides():
+    try:
+        with open(SAUCE_MAPPING_PATH, 'r', encoding='utf-8') as stream:
+            data = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        data = {}
+    aliases = data.get('aliases') if isinstance(data, dict) else {}
+    return aliases if isinstance(aliases, dict) else {}
+
+
+def save_sauce_mappings(mappings):
+    aliases = _load_mapping_overrides()
+    saved = 0
+    for item in mappings or []:
+        sheet = str(item.get('sheet') or '').strip()
+        group_index = int(_number(item.get('group_index')))
+        meal_name = str(item.get('meal_name') or '').strip()
+        if not sheet or group_index < 0 or not meal_name:
+            continue
+        key = f'{sheet}::{group_index}'
+        values = [str(value).strip() for value in aliases.get(key, []) if str(value).strip()]
+        if meal_name not in values:
+            values.append(meal_name)
+        aliases[key] = values
+        saved += 1
+    os.makedirs(os.path.dirname(SAUCE_MAPPING_PATH), exist_ok=True)
+    temp_path = tempfile.NamedTemporaryFile(
+        mode='w', suffix='.json', delete=False, dir=os.path.dirname(SAUCE_MAPPING_PATH), encoding='utf-8'
+    ).name
+    with open(temp_path, 'w', encoding='utf-8') as stream:
+        json.dump({'version': 1, 'aliases': aliases}, stream, ensure_ascii=False, indent=2)
+    os.replace(temp_path, SAUCE_MAPPING_PATH)
+    return {'saved_count': saved, 'mapping_file': os.path.basename(SAUCE_MAPPING_PATH)}
 
 
 def _number(value):
@@ -100,14 +143,14 @@ SOURCE_GROUPS = {
     'Red sauce Big (4)': [('Boukhary Beef', 'بخارى لحم', 'Boukhary')],
     'Cucumber yogurt sauce (4)': [('Boukhary Beef', 'بخارى لحم', 'Boukhary')],
     'Coctail Sauce Weight (4)': [
-        ('Philadelphia beef sandwich with oat bread', 'ساندويتش فلادلفيا لحم'),
+        ('Philadelphia beef sandwich with oat bread', 'ساندويتش فلادلفيا لحم', 'ساندوتش فيلادلفيا لحم بخبز الشوفان'),
         ('Classic beef sandwich', 'Classic meat sandwich', 'ساندوتش اللحم الكلاسيكي'),
     ],
-    'BBQ Sauce Packed': [('Chicken Burger BBQ', 'برجر دجاج باربكيو')],
-    'BBQ Sauce unpacked': [('Chicken Burger BBQ', 'برجر دجاج باربكيو')],
-    'Sumak Onion': [('Kebab Sandwich', 'ساندويتش كباب لحم')],
-    'Tahina Small (2)': [('Fish with lemon', 'سمك بالليمون'), ('Kebab Sandwich', 'ساندويتش كباب لحم')],
-    'Red sauce (2)': [('Fish with lemon', 'سمك بالليمون')],
+    'BBQ Sauce Packed': [('Chicken Burger BBQ', 'برجر دجاج باربكيو', 'برجر باربكيو الدجاج')],
+    'BBQ Sauce unpacked': [('Chicken Burger BBQ', 'برجر دجاج باربكيو', 'برجر باربكيو الدجاج')],
+    'Sumak Onion': [('Kebab Sandwich', 'ساندويتش كباب لحم', 'كباب اللحم')],
+    'Tahina Small (2)': [('Fish with lemon', 'سمك بالليمون', 'سمك بالكاري والكريمة'), ('Kebab Sandwich', 'ساندويتش كباب لحم', 'كباب اللحم')],
+    'Red sauce (2)': [('Fish with lemon', 'سمك بالليمون', 'سمك بالكاري والكريمة')],
     'Red sauce Big (5)': [('Chicken Saleeq', 'سليق دجاج', 'Saleeq')],
     'Cucumber yogurt sauce (5)': [('Kabli', 'كابلى', 'كابلي')],
     'Garlic Aioli': [('Beef Burger Arabic', 'برجر لحم عربي')],
@@ -147,6 +190,7 @@ def _match_group(aliases, lookup):
 
 def _compute_day_counts(wb, day_no, meals):
     lookup = _meal_count_lookup(meals)
+    overrides = _load_mapping_overrides()
     results, missing = [], []
     for sheet_name in _day_sheets(wb, day_no):
         ws = wb[sheet_name]
@@ -156,14 +200,21 @@ def _compute_day_counts(wb, day_no, meals):
             parts = [part.strip(' ()') for part in re.split(r'\s[-–—]\s', meal_title) if part.strip(' ()')]
             groups = [tuple(parts or [meal_title])]
         total, sources = 0.0, []
-        for aliases in groups:
+        for group_index, base_aliases in enumerate(groups):
+            override_aliases = overrides.get(f'{sheet_name}::{group_index}', [])
+            aliases = tuple(base_aliases) + tuple(override_aliases)
             count, matched_key = _match_group(aliases, lookup)
             total += count
             sources.append({'aliases': list(aliases), 'count': count, 'matched': bool(matched_key)})
             if not matched_key:
-                missing.append(str(aliases[0]))
+                missing.append({
+                    'sheet': sheet_name,
+                    'sauce_name': str(ws['B2'].value or sheet_name).strip(),
+                    'group_index': group_index,
+                    'source_label': str(base_aliases[0]),
+                })
         results.append({'sheet': sheet_name, 'input_count': round(total, 3), 'safety_count': 0.0, 'sources': sources})
-    return results, sorted(set(missing), key=_name_key)
+    return results, missing
 
 
 def _soffice_bin():
@@ -282,7 +333,7 @@ def build_sauce_day_files(file_storage, template_path=SAUCE_TEMPLATE_PATH, safet
     for item in inputs:
         item['safety_count'] = safety_lookup.get(item['sheet'], 0.0)
     if missing:
-        raise ValueError('لم تتم مطابقة وجبات الصوص التالية: ' + '، '.join(missing))
+        raise SauceMappingRequiredError(missing, list((meals or {}).keys()))
     excel_path, pdf_path, report = _files_from_inputs(day_no, inputs, template_path)
     report.update({'input_report': input_report, 'missing_sources': missing, 'inputs': inputs})
     return excel_path, pdf_path, report

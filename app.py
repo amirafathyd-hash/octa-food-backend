@@ -81,11 +81,13 @@ from sauce_ordering import (
     update_sauce_counts_from_upload,
 )
 from sauce_production import (
+    SauceMappingRequiredError,
     build_sauce_day_files,
     build_sauce_manual_files,
     get_sauce_production_state,
     package_sauce_files,
     replace_sauce_production_template,
+    save_sauce_mappings,
 )
 from rice_ordering import (
     build_rice_day_files,
@@ -1139,8 +1141,26 @@ def sauce_ordering_process_day():
         )
         response.headers['X-Sauce-Report'] = json.dumps(report, ensure_ascii=True)[:7000]
         return response
+    except SauceMappingRequiredError as e:
+        return jsonify({
+            'error': str(e),
+            'code': 'sauce_mapping_required',
+            'missing_groups': e.missing_groups,
+            'available_meals': e.available_meals,
+        }), 422
     except Exception as e:
         app.logger.exception('sauce_ordering_process_day failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/sauce-ordering/save-mappings', methods=['POST'])
+def sauce_ordering_save_mappings():
+    payload = request.get_json(silent=True) or {}
+    try:
+        report = save_sauce_mappings(payload.get('mappings') or [])
+        return jsonify({'ok': True, 'report': report})
+    except Exception as e:
+        app.logger.exception('sauce_ordering_save_mappings failed')
         return jsonify({'error': str(e)}), 500
 
 
