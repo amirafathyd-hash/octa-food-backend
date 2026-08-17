@@ -263,7 +263,11 @@ def _files_from_inputs(day_no, inputs, template_path=SAUCE_TEMPLATE_PATH):
 
 
 def build_sauce_day_files(file_storage, template_path=SAUCE_TEMPLATE_PATH, safety_items=None, expected_day_no=None):
-    day_no, meals, input_report = read_day_file_payload(file_storage)
+    # Some operational exports leave Update!A6/B6 empty. The dashboard day
+    # selection is an explicit, reliable fallback in that case.
+    day_no, meals, input_report = read_day_file_payload(
+        file_storage, fallback_day_no=expected_day_no
+    )
     if expected_day_no is not None and int(_number(expected_day_no)) != int(day_no):
         raise ValueError(f'ملف اليوم يخص يوم {day_no} بينما اليوم المختار في لوحة الصوص هو {int(_number(expected_day_no))}')
     wb = load_workbook(template_path, data_only=False, keep_vba=True)
