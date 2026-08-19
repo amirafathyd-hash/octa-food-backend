@@ -124,7 +124,7 @@ from vegetable_cutting import vegetable_cutting_bp
 from tokyo_storage import TOKYO_TEMPLATE_PATH
 
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-08-09-v18'
+BACKEND_RELEASE = 'octa-backend-2026-08-20-receiving-permissions-fix'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -2718,7 +2718,20 @@ def _require_auth():
     if permissions.get('enabled') is False:
         return None, (jsonify({'error': 'تم إيقاف هذا الحساب من الأدمن'}), 403)
     role = permissions.get('role') or ADMIN_ROLE
-    if role == REVIEW_ROLE:
+    pages = permissions.get('pages') if isinstance(permissions.get('pages'), list) else []
+    normalized_pages = {
+        str(page or '').strip().lower().removesuffix('.html')
+        for page in pages
+        if str(page or '').strip()
+    }
+    # REVIEW_ROLE كان في الأصل لحساب تقييمات العملاء فقط. بعد إضافة الصلاحيات
+    # التفصيلية أصبح نفس الدور يُستخدم أيضًا للحسابات المحدودة الأخرى. لذلك نطبّق
+    # الحظر القديم على حساب التقييمات فقط، لا على مستخدم مُنح صفحات أخرى صراحة.
+    legacy_review_only = role == REVIEW_ROLE and (
+        not normalized_pages
+        or normalized_pages.issubset({'index', 'customer-reviews'})
+    )
+    if legacy_review_only:
         path = request.path or ''
         allowed_paths = (
             '/api/customer-reviews',
