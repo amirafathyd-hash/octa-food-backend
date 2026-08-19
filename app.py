@@ -2734,6 +2734,18 @@ def _require_auth():
     return username, None
 
 
+def _require_action(action):
+    """يتأكد أن المستخدم مسموح له بالإجراء الإداري المطلوب، وليس مسجّلًا فقط."""
+    username, err = _require_auth()
+    if err:
+        return None, err
+    permissions = _permissions_for_username(username)
+    actions = permissions.get('actions') if isinstance(permissions.get('actions'), list) else []
+    if '*' not in actions and action not in actions:
+        return None, (jsonify({'error': 'ليس لديك صلاحية لتنفيذ هذا الإجراء'}), 403)
+    return username, None
+
+
 configure_invoice_receipts(_require_auth)
 configure_veg_comparison(_require_auth)
 
@@ -3176,7 +3188,7 @@ def logout():
 
 @app.route('/api/users', methods=['GET'])
 def list_users():
-    _, err = _require_auth()
+    _, err = _require_action('manage_users')
     if err:
         return err
     sb = get_client()
@@ -3201,7 +3213,7 @@ def list_users():
 
 @app.route('/api/users', methods=['POST'])
 def create_user():
-    _, err = _require_auth()
+    _, err = _require_action('manage_users')
     if err:
         return err
     payload = request.get_json(silent=True) or {}
@@ -3238,7 +3250,7 @@ def create_user():
 def update_user_permissions(user_id):
     """بيحدّث الصلاحيات التفصيلية (القوائم + الإجراءات) لمستخدم موجود - محتاج
     تسجيل دخول أدمن. Body: { role, enabled, pages: [...], actions: [...] }"""
-    _, err = _require_auth()
+    _, err = _require_action('manage_users')
     if err:
         return err
     sb = get_client()
@@ -3264,7 +3276,7 @@ def update_user_permissions(user_id):
 
 @app.route('/api/users/<int:user_id>', methods=['DELETE'])
 def delete_user(user_id):
-    _, err = _require_auth()
+    _, err = _require_action('manage_users')
     if err:
         return err
     sb = get_client()
@@ -3274,7 +3286,7 @@ def delete_user(user_id):
 
 @app.route('/api/users/<int:user_id>/password', methods=['PUT'])
 def change_user_password(user_id):
-    _, err = _require_auth()
+    _, err = _require_action('manage_users')
     if err:
         return err
     payload = request.get_json(silent=True) or {}
