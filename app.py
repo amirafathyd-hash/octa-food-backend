@@ -5641,7 +5641,8 @@ def _add_station_tab_daily(wb, station_key, file_storage):
     return out_ws
 
 
-def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num_override=None, vegetable_summary_rows=None):
+def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num_override=None,
+                              vegetable_summary_rows=None, inventory_date=None):
     """بتبني zip فيه Daily_Ordering + Vegetables (إكسيل) + صورة PNG لكل تاب
     فيهم لو with_images=True (لو توليد الصور فشل لأي سبب - مثلاً LibreOffice
     مش متظبط على السيرفر - بيرجع الإكسيل عادي بدون ما يكسر الطلب كله).
@@ -5656,15 +5657,21 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
         zf.writestr(f'Vegetables_{today}.xlsx', buf2.getvalue())
         if vegetable_summary_rows:
             try:
-                wb_after_inventory, previous_date = _build_vegetables_after_inventory_workbook(vegetable_summary_rows, today)
+                wb_after_inventory, selected_inventory_date = _build_vegetables_after_inventory_workbook(
+                    vegetable_summary_rows,
+                    inventory_date,
+                )
                 buf3 = io.BytesIO(); wb_after_inventory.save(buf3)
-                zf.writestr(f'Vegetables_After_Yesterday_Inventory_{today}.xlsx', buf3.getvalue())
+                zf.writestr(
+                    f'Vegetables_After_Inventory_{selected_inventory_date}_{today}.xlsx',
+                    buf3.getvalue(),
+                )
             except Exception as e:
-                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم مخزون أمس')
-                zf.writestr('Vegetables_After_Yesterday_Inventory_ERROR.txt',
-                             f'حصل خطأ أثناء خصم مخزون أمس: {e}')
+                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم يوم المخزون المختار')
+                zf.writestr('Vegetables_After_Inventory_ERROR.txt',
+                             f'حصل خطأ أثناء خصم يوم المخزون المختار: {e}')
                 wb_after_inventory = None
-                previous_date = None
+                selected_inventory_date = None
 
         if with_images:
             try:
@@ -5705,7 +5712,8 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
 
 
 def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_override=None,
-                               vegetable_summary_rows=None, bakery_summary_image=False):
+                               vegetable_summary_rows=None, bakery_summary_image=False,
+                               inventory_date=None):
     """زي _build_daily_ordering_zip بالظبط بس لملف واحد بس (مش اتنين) — مستخدمة
     في زرار "Daily Ordering" أو "Vegetables" لوحدهم، عشان صور التابات PNG
     تفضل متضافة زي ما كانت أول ما الزرارين كانوا مدموجين في واحد."""
@@ -5716,13 +5724,19 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
         wb_after_inventory = None
         if vegetable_summary_rows:
             try:
-                wb_after_inventory, previous_date = _build_vegetables_after_inventory_workbook(vegetable_summary_rows, today)
+                wb_after_inventory, selected_inventory_date = _build_vegetables_after_inventory_workbook(
+                    vegetable_summary_rows,
+                    inventory_date,
+                )
                 buf2 = io.BytesIO(); wb_after_inventory.save(buf2)
-                zf.writestr(f'Vegetables_After_Yesterday_Inventory_{today}.xlsx', buf2.getvalue())
+                zf.writestr(
+                    f'Vegetables_After_Inventory_{selected_inventory_date}_{today}.xlsx',
+                    buf2.getvalue(),
+                )
             except Exception as e:
-                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم مخزون أمس')
-                zf.writestr('Vegetables_After_Yesterday_Inventory_ERROR.txt',
-                             f'حصل خطأ أثناء خصم مخزون أمس: {e}')
+                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم يوم المخزون المختار')
+                zf.writestr('Vegetables_After_Inventory_ERROR.txt',
+                             f'حصل خطأ أثناء خصم يوم المخزون المختار: {e}')
         try:
             add_workbook_images_to_zip(zf, wb, today, prefix=image_prefix,
                                         day_num_override=day_num_override)
@@ -5858,18 +5872,17 @@ def _normalize_inventory_qty(qty, inventory_unit, order_unit):
     return qty
 
 
-def _load_previous_day_veg_inventory(target_date):
+def _load_selected_day_veg_inventory(inventory_date):
     try:
-        target_dt = datetime.strptime(target_date, '%Y-%m-%d').date()
+        selected_date = datetime.strptime(str(inventory_date or '').strip(), '%Y-%m-%d').date().isoformat()
     except (TypeError, ValueError):
-        target_dt = datetime.now(timezone.utc).date()
-    previous_date = (target_dt - timedelta(days=1)).isoformat()
+        raise ValueError('اختر يوم المخزون الذي تريد الخصم منه أولًا')
 
     sb = get_client()
     entries_res = execute_with_retry(
         sb.table('veg_inventory_entries')
         .select('item_name, remaining_stock')
-        .eq('entry_date', previous_date)
+        .eq('entry_date', selected_date)
     )
     items_res = execute_with_retry(
         sb.table('veg_inventory_items')
@@ -5900,11 +5913,11 @@ def _load_previous_day_veg_inventory(target_date):
         for alias in _vegetable_match_aliases(item_name):
             inventory[alias] = record
 
-    return previous_date, inventory
+    return selected_date, inventory
 
 
-def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
-    previous_date, inventory = _load_previous_day_veg_inventory(target_date)
+def _build_vegetables_after_inventory_workbook(summary_rows, inventory_date):
+    selected_inventory_date, inventory = _load_selected_day_veg_inventory(inventory_date)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -5924,7 +5937,7 @@ def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
     center = Alignment(horizontal='center', vertical='center', wrap_text=True)
     right = Alignment(horizontal='right', vertical='center', wrap_text=True)
 
-    headers = ['الصنف', 'طلب اليوم', 'مخزون أمس', 'الطلب المتبقي', 'الوحدة', 'حالة الخصم', 'التصنيف']
+    headers = ['الصنف', 'طلب اليوم', 'مخزون اليوم المختار', 'الطلب المتبقي', 'الوحدة', 'حالة الخصم', 'التصنيف']
     widths = [44, 16, 16, 18, 12, 22, 18]
     for col, (header, width) in enumerate(zip(headers, widths), 1):
         cell = ws.cell(row=1, column=col, value=header)
@@ -5949,7 +5962,7 @@ def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
         stock_qty = 0.0 if unit_mismatch else normalized_stock
         remaining = max(order_qty - stock_qty, 0.0)
         if not inventory:
-            status = 'لا يوجد مخزون أمس'
+            status = 'لا توجد كميات مسجلة في اليوم المختار'
         elif unit_mismatch:
             status = 'وحدة مختلفة'
         elif inv_record:
@@ -5982,7 +5995,7 @@ def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
                 cell.number_format = '#,##0.000'
 
     ws.freeze_panes = 'A2'
-    return wb, previous_date
+    return wb, selected_inventory_date
 
 
 def _detect_uploaded_station_files(uploaded):
@@ -6162,6 +6175,12 @@ def daily_ordering():
     if missing:
         return jsonify({'error': f'محطات ناقصة: {", ".join(missing)}'}), 400
 
+    inventory_date = (request.form.get('inventory_date') or request.args.get('inventory_date') or '').strip()
+    try:
+        inventory_date = datetime.strptime(inventory_date, '%Y-%m-%d').date().isoformat()
+    except (TypeError, ValueError):
+        return jsonify({'error': 'اختر يوم المخزون الذي تريد الخصم منه أولًا'}), 400
+
     try:
         wb_daily = openpyxl.Workbook()
         wb_daily.remove(wb_daily.active)
@@ -6253,6 +6272,7 @@ def daily_ordering():
             today,
             day_num_override=day_num_by_tab,
             vegetable_summary_rows=_vegetable_summary_rows_from_station_data(vegetable_data),
+            inventory_date=inventory_date,
         )
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
@@ -6415,6 +6435,14 @@ def auto_detect_stations():
         }), 400
     detected_keys = list(station_files.keys())
 
+    only = request.args.get('only')
+    inventory_date = (request.form.get('inventory_date') or request.args.get('inventory_date') or '').strip()
+    if only != 'daily':
+        try:
+            inventory_date = datetime.strptime(inventory_date, '%Y-%m-%d').date().isoformat()
+        except (TypeError, ValueError):
+            return jsonify({'error': 'اختر يوم المخزون الذي تريد الخصم منه أولًا'}), 400
+
     # خطوة 2: نفس منطق daily_ordering بالضبط
     try:
         wb_daily = openpyxl.Workbook()
@@ -6471,7 +6499,6 @@ def auto_detect_stations():
         # ?only=daily أو ?only=vegetables — بيرجّع zip فيه ملف واحد بس + صوره،
         # عشان الواجهة تقدر تفصل زرار "Daily Ordering" عن زرار "Vegetables" لوحدهم
         # (لسه بيرجع zip مش xlsx خام، عشان صور التابات متضاعش زي الأول).
-        only = request.args.get('only')
         if only == 'daily':
             zip_buf = _build_single_workbook_zip(
                 wb_daily,
@@ -6492,6 +6519,7 @@ def auto_detect_stations():
                 'Vegetables_',
                 day_num_override,
                 vegetable_summary_rows=_vegetable_summary_rows_from_station_data(vegetable_data),
+                inventory_date=inventory_date,
             )
             return send_file(zip_buf, as_attachment=True,
                               download_name=f'Vegetables_{today}.zip',
@@ -6503,6 +6531,7 @@ def auto_detect_stations():
             today,
             day_num_override=day_num_override,
             vegetable_summary_rows=_vegetable_summary_rows_from_station_data(vegetable_data),
+            inventory_date=inventory_date,
         )
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
