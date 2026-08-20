@@ -6470,7 +6470,9 @@ def _detect_station_from_workbook(wb):
     if 'All_Ingredients' in sheets:
         return 'hot'
     if 'User' in sheets and 'Usage' in sheets:
-        return 'salads'  # ملف السلطات عنده شيت User + Usage مميزين
+        return 'salads'  # التوقيع القديم لملف السلطات
+    if {'Vegetable Receiving Order', 'User', 'Ordering', 'Recipe'}.issubset(sheets):
+        return 'salads'  # التوقيع الجديد لملف Salads order & Costing
     # الملفات اللي عندها شيت Ordering + شيتات وجبات عربية
     if 'Ordering' in sheets:
         ar_count = sum(1 for s in sheets if any('\u0600' <= c <= '\u06FF' for c in s))
