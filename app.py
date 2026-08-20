@@ -121,10 +121,11 @@ from receipt_pricing import (
 )
 from kitchen_live import register_kitchen_live_routes
 from vegetable_cutting import vegetable_cutting_bp
+from packaging_orders import packaging_orders_bp
 from tokyo_storage import TOKYO_TEMPLATE_PATH
 
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-08-20-receiving-permissions-fix'
+BACKEND_RELEASE = 'octa-backend-2026-08-20-packaging-orders-v1'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -141,6 +142,7 @@ app.register_blueprint(appointments_bp)
 app.register_blueprint(invoice_receipts_bp)
 app.register_blueprint(veg_comparison_bp)
 app.register_blueprint(vegetable_cutting_bp)
+app.register_blueprint(packaging_orders_bp)
 register_kitchen_live_routes(app)
 
 
