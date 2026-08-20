@@ -5655,6 +5655,8 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
         zf.writestr(f'Daily_Ordering_{today}.xlsx', buf1.getvalue())
         buf2 = io.BytesIO(); wb_veg.save(buf2)
         zf.writestr(f'Vegetables_{today}.xlsx', buf2.getvalue())
+        wb_after_inventory = None
+        wb_remaining_summary = None
         if vegetable_summary_rows:
             try:
                 wb_after_inventory, selected_inventory_date = _build_vegetables_after_inventory_workbook(
@@ -5665,6 +5667,12 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
                 zf.writestr(
                     f'Vegetables_After_Inventory_{selected_inventory_date}_{today}.xlsx',
                     buf3.getvalue(),
+                )
+                wb_remaining_summary = _build_remaining_inventory_summary_workbook(wb_after_inventory)
+                buf4 = io.BytesIO(); wb_remaining_summary.save(buf4)
+                zf.writestr(
+                    f'Vegetables_Remaining_Summary_{selected_inventory_date}_{today}.xlsx',
+                    buf4.getvalue(),
                 )
             except Exception as e:
                 app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم يوم المخزون المختار')
@@ -5686,6 +5694,14 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
                         today,
                         prefix='Vegetables_After_Yesterday_Inventory_',
                         day_num_override=_inventory_sheet_day_override(day_num_override),
+                    )
+                if wb_remaining_summary:
+                    add_workbook_images_to_zip(
+                        zf,
+                        wb_remaining_summary,
+                        today,
+                        prefix='Vegetables_Remaining_',
+                        day_num_override=_remaining_summary_day_override(day_num_override),
                     )
             except Exception as e:
                 app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
@@ -5722,6 +5738,7 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
         buf = io.BytesIO(); wb.save(buf)
         zf.writestr(f'{file_label}_{today}.xlsx', buf.getvalue())
         wb_after_inventory = None
+        wb_remaining_summary = None
         if vegetable_summary_rows:
             try:
                 wb_after_inventory, selected_inventory_date = _build_vegetables_after_inventory_workbook(
@@ -5732,6 +5749,12 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
                 zf.writestr(
                     f'Vegetables_After_Inventory_{selected_inventory_date}_{today}.xlsx',
                     buf2.getvalue(),
+                )
+                wb_remaining_summary = _build_remaining_inventory_summary_workbook(wb_after_inventory)
+                buf3 = io.BytesIO(); wb_remaining_summary.save(buf3)
+                zf.writestr(
+                    f'Vegetables_Remaining_Summary_{selected_inventory_date}_{today}.xlsx',
+                    buf3.getvalue(),
                 )
             except Exception as e:
                 app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم يوم المخزون المختار')
@@ -5747,6 +5770,14 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
                     today,
                     prefix='Vegetables_After_Yesterday_Inventory_',
                     day_num_override=_inventory_sheet_day_override(day_num_override),
+                )
+            if wb_remaining_summary:
+                add_workbook_images_to_zip(
+                    zf,
+                    wb_remaining_summary,
+                    today,
+                    prefix='Vegetables_Remaining_',
+                    day_num_override=_remaining_summary_day_override(day_num_override),
                 )
         except Exception as e:
             app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
@@ -5781,6 +5812,13 @@ def _inventory_sheet_day_override(day_num_override):
     if day_num_override:
         return day_num_override
     return None
+
+
+def _remaining_summary_day_override(day_num_override):
+    if isinstance(day_num_override, dict):
+        day_num = day_num_override.get('Summary') or next(iter(day_num_override.values()), None)
+        return {'Summary': day_num} if day_num else None
+    return {'Summary': day_num_override} if day_num_override else None
 
 
 def _bakery_sheet_day_override(day_num_override):
@@ -5996,6 +6034,63 @@ def _build_vegetables_after_inventory_workbook(summary_rows, inventory_date):
 
     ws.freeze_panes = 'A2'
     return wb, selected_inventory_date
+
+
+def _build_remaining_inventory_summary_workbook(after_inventory_wb):
+    """ملخص إضافي فقط للكميات المتبقية بعد الخصم.
+
+    لا يغيّر تقرير الخصم الأصلي، ولا يضيف أعمدة الاستلام أو الإمضاء.
+    """
+    source = after_inventory_wb['الطلب المتبقي']
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Summary'
+    ws.sheet_view.rightToLeft = False
+    ws.freeze_panes = 'A2'
+
+    purple_fill = PatternFill('solid', start_color='6600FF')
+    even_fill = PatternFill('solid', start_color='F2EEFF')
+    odd_fill = PatternFill('solid', start_color='FFFFFF')
+    header_font = Font(name='Tahoma', bold=True, color='FFFFFF', size=11)
+    data_font = Font(name='Tahoma', size=11)
+    number_font = Font(name='Tahoma', bold=True, size=11)
+    thin = Side(style='thin', color='D0C8F0')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    right = Alignment(horizontal='right', vertical='center', wrap_text=True)
+
+    headers = ['ITEMS', 'Category', 'Remaining Order', 'Order Unit']
+    widths = [48, 16, 16, 14]
+    for col, (header, width) in enumerate(zip(headers, widths), start=1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.fill = purple_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = border
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.row_dimensions[1].height = 24
+
+    out_row = 2
+    for source_row in range(2, source.max_row + 1):
+        item_name = source.cell(source_row, 1).value
+        if not item_name:
+            continue
+        category = source.cell(source_row, 7).value or ''
+        remaining = _to_number(source.cell(source_row, 4).value)
+        order_unit = source.cell(source_row, 5).value or ''
+        fill = even_fill if out_row % 2 == 0 else odd_fill
+        values = [item_name, category, remaining, order_unit]
+        for col, value in enumerate(values, start=1):
+            cell = ws.cell(row=out_row, column=col, value=value)
+            cell.fill = fill
+            cell.font = number_font if col == 3 else data_font
+            cell.alignment = right if col == 1 else center
+            cell.border = border
+            if col == 3:
+                cell.number_format = '#,##0.000'
+        out_row += 1
+
+    return wb
 
 
 def _detect_uploaded_station_files(uploaded):
