@@ -5167,13 +5167,68 @@ STATION_TAB_NAMES = {
 PURPLE_FILL = PatternFill(fill_type='solid', fgColor='6600FF')
 
 
+def _normalise_workbook_label(value):
+    """Normalise a tab/header label without depending on spaces or punctuation."""
+    text = str(value or '').strip().casefold().replace('_', ' ')
+    return re.sub(r'[^0-9a-z\u0600-\u06ff]+', ' ', text).strip()
+
+
+def _sheet_row_has_groups(ws, groups, max_rows=15, max_cols=16):
+    """Return True when one early row contains every requested header group."""
+    for row in ws.iter_rows(
+        min_row=1, max_row=min(max_rows, ws.max_row),
+        min_col=1, max_col=min(max_cols, ws.max_column), values_only=True,
+    ):
+        cells = [_normalise_workbook_label(value) for value in row if value is not None]
+        if not cells:
+            continue
+        if all(
+            any(any(alias == cell or alias in cell for alias in aliases) for cell in cells)
+            for aliases in groups
+        ):
+            return True
+    return False
+
+
+def _find_ordering_sheet_name(wb):
+    """Find the actual ordering table even if its tab was harmlessly renamed."""
+    groups = (
+        ('items', 'item', 'الأصناف', 'الصنف'),
+        ('category', 'التصنيف'),
+        ('unit', 'الوحدة'),
+        ('daily weight', 'الوزن اليومي'),
+    )
+    # Prefer the established tab, then fall back to its table structure.
+    for name in wb.sheetnames:
+        if _normalise_workbook_label(name) == 'ordering':
+            return name
+    for name in wb.sheetnames:
+        if _sheet_row_has_groups(wb[name], groups):
+            return name
+    return None
+
+
+def _resolve_station_sheet_name(wb, requested_name):
+    """Resolve a processing tab by meaning; unrelated tab renames are ignored."""
+    if requested_name in wb.sheetnames:
+        return requested_name
+    requested_norm = _normalise_workbook_label(requested_name)
+    for name in wb.sheetnames:
+        if _normalise_workbook_label(name) == requested_norm:
+            return name
+    if requested_norm == 'ordering':
+        return _find_ordering_sheet_name(wb)
+    return None
+
+
 def _read_station_rows(file_storage, sheet_name):
     """بيرجّع dict: name -> {'unit':..,'category':..,'weekly':..} من شيت المحطة
     المحدّد بالاسم (عشان ملف توكيو فيه أكتر من شيت محتمل، ولازم نحدد الصحيح
     لكل محطة بالاسم مش بالتخمين).
     أعمدة المصدر: A=الاسم، B=الفئة، C=الوحدة، D=الوزن اليومي، E=الوزن الأسبوعي."""
     wb = openpyxl.load_workbook(file_storage, data_only=True)
-    if sheet_name not in wb.sheetnames:
+    sheet_name = _resolve_station_sheet_name(wb, sheet_name)
+    if not sheet_name:
         return None, {}
     ws = wb[sheet_name]
     out = {}
@@ -5358,8 +5413,8 @@ def _add_station_tab(wb, station_key, file_storage):
     """بيضيف تاب لمحطة بنفس التنسيق الكامل (A:E)، باستخدام نفس منطق extract-sheet-range."""
     file_storage.seek(0)
     src_wb = openpyxl.load_workbook(file_storage, data_only=True)
-    sheet_name = STATION_SHEET_MAP[station_key]
-    if sheet_name not in src_wb.sheetnames:
+    sheet_name = _resolve_station_sheet_name(src_wb, STATION_SHEET_MAP[station_key])
+    if not sheet_name:
         return None
     src_ws = src_wb[sheet_name]
     out_ws = wb.create_sheet(title=STATION_TAB_NAMES[station_key])
@@ -5446,7 +5501,8 @@ def _read_vegetable_rows(file_storage, sheet_name):
     M (وحدة الطلب)، وبتشيل أي صف وزنه اليومي صفر بالظبط (زي باقي Daily Ordering)."""
     file_storage.seek(0)
     wb = openpyxl.load_workbook(file_storage, data_only=True)
-    if sheet_name not in wb.sheetnames:
+    sheet_name = _resolve_station_sheet_name(wb, sheet_name)
+    if not sheet_name:
         return []
     ws = wb[sheet_name]
     out = []
@@ -5610,8 +5666,8 @@ def _add_station_tab_daily(wb, station_key, file_storage):
     (اللي عمود D فيها فاضي) بتفضل زي ما هي."""
     file_storage.seek(0)
     src_wb = openpyxl.load_workbook(file_storage, data_only=True)
-    sheet_name = STATION_SHEET_MAP[station_key]
-    if sheet_name not in src_wb.sheetnames:
+    sheet_name = _resolve_station_sheet_name(src_wb, STATION_SHEET_MAP[station_key])
+    if not sheet_name:
         return None
     src_ws = src_wb[sheet_name]
     out_ws = wb.create_sheet(title=STATION_TAB_NAMES[station_key])
@@ -6295,8 +6351,8 @@ def daily_ordering():
             # جمع كل الأصناف من الـ Ordering sheet لعمل Summary
             request.files[key].seek(0)
             src_wb = openpyxl.load_workbook(request.files[key], data_only=True)
-            sheet_name = STATION_SHEET_MAP[key]
-            if sheet_name in src_wb.sheetnames:
+            sheet_name = _resolve_station_sheet_name(src_wb, STATION_SHEET_MAP[key])
+            if sheet_name:
                 src_ws = src_wb[sheet_name]
                 for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row, min_col=1, max_col=13, values_only=True):
                     name = row[0]
@@ -6460,25 +6516,59 @@ def _build_summary_sheet(ws, rows, with_unit_col=False):
 
 
 def _detect_station_from_workbook(wb):
-    """بتحدد نوع المحطة من الشيتات الموجودة في الملف — بدون الاعتماد على اسم الملف.
-    الأولوية بالترتيب عشان الفحص يكون دقيق ومحدد."""
+    """Detect a station from stable workbook content, not fragile secondary tabs.
+
+    Exact primary tabs remain the fastest signal.  For Ordering-based workbooks,
+    table headers and recipe content provide the fallback, so renaming an
+    unrelated tab never blocks the whole upload.
+    """
     sheets = set(wb.sheetnames)
-    if 'All_Ingredients' in sheets and 'Marination_Ordering' in sheets:
+    normalised_sheets = {_normalise_workbook_label(name): name for name in wb.sheetnames}
+
+    def has_tab(label):
+        return _normalise_workbook_label(label) in normalised_sheets
+
+    def workbook_has_row(groups, max_rows=15, max_cols=16):
+        return any(
+            _sheet_row_has_groups(wb[name], groups, max_rows=max_rows, max_cols=max_cols)
+            for name in wb.sheetnames
+        )
+
+    has_all_ingredients = has_tab('All_Ingredients')
+    has_marination = has_tab('Marination_Ordering')
+    ordering_sheet = _find_ordering_sheet_name(wb)
+
+    if has_all_ingredients and has_marination:
         return 'tokyo'  # ملف توكيو الرئيسي (فيه الاتنين مع بعض)
-    if 'Marination_Ordering' in sheets:
+    if has_marination:
         return 'marination'
-    if 'All_Ingredients' in sheets:
+    if has_all_ingredients:
         return 'hot'
-    if 'User' in sheets and 'Usage' in sheets:
+
+    # سلطة: نعتمد على محتوى جداول السلطة/الاستلام، ولا نشترط أسماء
+    # Recipe أو User أو أي تاب ثانوي لا يدخل في استخراج الطلب.
+    salad_recipe_signature = workbook_has_row((
+        ('salad name', 'اسم السلطة'),
+        ('quantity needed salad', 'الكمية المطلوبة من السلطة'),
+    ))
+    salad_receiving_signature = workbook_has_row((
+        ('items', 'item', 'الأصناف', 'الصنف'),
+        ('category', 'التصنيف'),
+        ('daily order', 'طلب اليوم'),
+        ('order unit', 'وحدة الطلب'),
+        ('quantity received', 'الاستلام'),
+    ))
+    if has_tab('User') and has_tab('Usage'):
         return 'salads'  # التوقيع القديم لملف السلطات
-    if {'Vegetable Receiving Order', 'User', 'Ordering', 'Recipe'}.issubset(sheets):
-        return 'salads'  # التوقيع الجديد لملف Salads order & Costing
+    if ordering_sheet and (salad_recipe_signature or salad_receiving_signature):
+        return 'salads'
+
     # الملفات اللي عندها شيت Ordering + شيتات وجبات عربية
-    if 'Ordering' in sheets:
+    if ordering_sheet:
         ar_count = sum(1 for s in sheets if any('\u0600' <= c <= '\u06FF' for c in s))
         if ar_count >= 3:
             return 'rice'  # شيت الأرز فيه أسماء شيتات عربية كتير
-        if 'List of Meals' in sheets:
+        if has_tab('List of Meals'):
             return 'sauce'
         # بعض نسخ ملف الصوص الجديدة لم تعد تحتوي على تاب List of Meals،
         # لكنها تحتوي على عدة تابات وصفات صوص واضحة بجانب Ordering.
@@ -6490,12 +6580,20 @@ def _detect_station_from_workbook(wb):
         if sauce_sheet_count >= 2:
             return 'sauce'
         # فطار أو حلويات — نفرق بينهم من اسم أول شيت بعد Ordering
-        others = [s for s in wb.sheetnames if s != 'Ordering']
+        others = [s for s in wb.sheetnames if s != ordering_sheet]
         if others:
-            first = others[0].lower()
-            if any(w in first for w in ('foul', 'egg', 'croissant', 'sandwich', 'omelette', 'fool')):
+            all_recipe_names = ' '.join(_normalise_workbook_label(s) for s in others)
+            breakfast_score = sum(
+                all_recipe_names.count(w)
+                for w in ('foul', 'fool', 'egg', 'croissant', 'sandwich', 'omelette', 'oatmeal')
+            )
+            dessert_score = sum(
+                all_recipe_names.count(w)
+                for w in ('pie', 'cake', 'cookie', 'brownie', 'dessert', 'profiterole', 'muffin')
+            )
+            if breakfast_score >= 2 and breakfast_score > dessert_score:
                 return 'breakfast'
-            if any(w in first for w in ('pie', 'cake', 'cookie', 'brownie', 'dessert', 'zatar')):
+            if dessert_score >= 2 and dessert_score > breakfast_score:
                 return 'desserts'
     return None
 
@@ -6562,8 +6660,8 @@ def auto_detect_stations():
             vegetable_data[key] = _read_vegetable_rows(f, STATION_SHEET_MAP[key])
             f.seek(0)
             src_wb = openpyxl.load_workbook(f, data_only=True)
-            sheet_name = STATION_SHEET_MAP[key]
-            if sheet_name in src_wb.sheetnames:
+            sheet_name = _resolve_station_sheet_name(src_wb, STATION_SHEET_MAP[key])
+            if sheet_name:
                 src_ws = src_wb[sheet_name]
                 for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row,
                                              min_col=1, max_col=13, values_only=True):
