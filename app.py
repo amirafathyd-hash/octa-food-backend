@@ -5657,7 +5657,7 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
         zf.writestr(f'Vegetables_{today}.xlsx', buf2.getvalue())
         wb_after_inventory = None
         wb_remaining_summary = None
-        if vegetable_summary_rows:
+        if vegetable_summary_rows and inventory_date:
             try:
                 wb_after_inventory, selected_inventory_date = _build_vegetables_after_inventory_workbook(
                     vegetable_summary_rows,
@@ -5739,7 +5739,7 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
         zf.writestr(f'{file_label}_{today}.xlsx', buf.getvalue())
         wb_after_inventory = None
         wb_remaining_summary = None
-        if vegetable_summary_rows:
+        if vegetable_summary_rows and inventory_date:
             try:
                 wb_after_inventory, selected_inventory_date = _build_vegetables_after_inventory_workbook(
                     vegetable_summary_rows,
@@ -6270,11 +6270,15 @@ def daily_ordering():
     if missing:
         return jsonify({'error': f'محطات ناقصة: {", ".join(missing)}'}), 400
 
+    skip_inventory = str(request.form.get('skip_inventory') or request.args.get('skip_inventory') or '').strip().lower() in {'1', 'true', 'yes'}
     inventory_date = (request.form.get('inventory_date') or request.args.get('inventory_date') or '').strip()
-    try:
-        inventory_date = datetime.strptime(inventory_date, '%Y-%m-%d').date().isoformat()
-    except (TypeError, ValueError):
-        return jsonify({'error': 'اختر يوم المخزون الذي تريد الخصم منه أولًا'}), 400
+    if skip_inventory:
+        inventory_date = None
+    else:
+        try:
+            inventory_date = datetime.strptime(inventory_date, '%Y-%m-%d').date().isoformat()
+        except (TypeError, ValueError):
+            return jsonify({'error': 'اختر يوم المخزون الذي تريد الخصم منه، أو اختر التنزيل بدون خصم'}), 400
 
     try:
         wb_daily = openpyxl.Workbook()
@@ -6531,12 +6535,15 @@ def auto_detect_stations():
     detected_keys = list(station_files.keys())
 
     only = request.args.get('only')
+    skip_inventory = str(request.form.get('skip_inventory') or request.args.get('skip_inventory') or '').strip().lower() in {'1', 'true', 'yes'}
     inventory_date = (request.form.get('inventory_date') or request.args.get('inventory_date') or '').strip()
-    if only != 'daily':
+    if skip_inventory:
+        inventory_date = None
+    elif only != 'daily':
         try:
             inventory_date = datetime.strptime(inventory_date, '%Y-%m-%d').date().isoformat()
         except (TypeError, ValueError):
-            return jsonify({'error': 'اختر يوم المخزون الذي تريد الخصم منه أولًا'}), 400
+            return jsonify({'error': 'اختر يوم المخزون الذي تريد الخصم منه، أو اختر التنزيل بدون خصم'}), 400
 
     # خطوة 2: نفس منطق daily_ordering بالضبط
     try:
