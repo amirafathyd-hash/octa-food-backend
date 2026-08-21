@@ -135,13 +135,14 @@ def _read_day_name(ws):
 
 def _sheet_items(ws):
     items = OrderedDict()
-    for row in range(4, ws.max_row + 1):
-        first = _key(ws.cell(row, 1).value)
+    max_row = min(ws.max_row or 0, 5000)
+    for values in ws.iter_rows(min_row=4, max_row=max_row, min_col=1, max_col=12, values_only=True):
+        first = _key(values[0] if values else None)
         if first in {"total", "totals", "الاجمالي", "الاجماليات"}:
             continue
         for qty_col, item_col in COUNT_ITEM_COLUMNS:
-            qty = _number(ws.cell(row, qty_col).value)
-            raw_item = _clean(ws.cell(row, item_col).value)
+            qty = _number(values[qty_col - 1] if len(values) >= qty_col else None)
+            raw_item = _clean(values[item_col - 1] if len(values) >= item_col else None)
             if qty <= 0 or not raw_item:
                 continue
             item = _canonical_item(raw_item)
@@ -159,11 +160,19 @@ def _customer_count_from_workbook(wb):
     for ws in wb.worksheets:
         max_row = min(ws.max_row or 0, 500)
         max_col = min(ws.max_column or 0, 40)
+        if not max_row or not max_col:
+            continue
         has_count_header = False
         direct_candidates = []
         total_candidates = []
-        for row in range(1, max_row + 1):
-            values = [ws.cell(row, col).value for col in range(1, max_col + 1)]
+        # Sequential iteration is dramatically faster for read-only workbooks.
+        # Random ws.cell() access re-reads worksheet XML repeatedly and made a
+        # six-day upload appear to hang for several minutes.
+        for values in ws.iter_rows(
+            min_row=1, max_row=max_row, min_col=1, max_col=max_col,
+            values_only=True,
+        ):
+            values = list(values)
             keys = [_key(value) for value in values]
             for col, key in enumerate(keys):
                 if any(_key(label) in key for label in count_headers):
@@ -643,10 +652,13 @@ def build_supplies_png(payload):
             draw.ellipse((icon_x - 12, icon_y - 43, icon_x + 12, icon_y - 10), outline="#0E5556", width=6)
             draw.line((icon_x, icon_y - 10, icon_x, icon_y + 43), fill="#0E5556", width=7)
             ink = "#0E5556"
-        rtl_text((x1 - 215, cards_top + 52), title, f_card, ink)
-        draw.text((x1 - 215, cards_top + 130), f"{int(value):,}", font=f_value, fill=ink, anchor="ra")
-        rtl_text((x1 - 365, cards_top + 131), "كرتونة مطلوبة", f_head, ink)
-        rtl_text((x1 - 215, cards_top + 190), note, f_sub, ink)
+        content_left = x0 + 34
+        content_right = icon_x - 82
+        content_x = (content_left + content_right) / 2
+        rtl_text((content_x, cards_top + 48), title, f_card, ink, anchor="mm")
+        draw.text((content_x, cards_top + 116), f"{int(value):,}", font=f_value, fill=ink, anchor="mm")
+        rtl_text((content_x, cards_top + 160), "كرتونة مطلوبة", f_head, ink, anchor="mm")
+        rtl_text((content_x, cards_top + 205), note, f_sub, ink, anchor="mm")
 
     card(margin, "#FFD078", "أكياس التغليف", shown["bag_cartons"], "كل كرتونة تحتوي 200 كيس", "bag")
     card(margin + card_w + gap, "#A7E7DC", "الملاعق", shown["spoon_cartons"], f"كل كرتونة تحتوي {supplies['spoon_carton_size']} ملعقة · احتياطي 20%", "spoon")
