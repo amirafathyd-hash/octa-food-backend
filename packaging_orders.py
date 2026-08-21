@@ -577,6 +577,113 @@ def _fonts():
     return regular, bold
 
 
+def build_supplies_png(payload):
+    """Render the standalone bags-and-cutlery calculator as a branded PNG."""
+    settings = payload.get("supplies") or {}
+    supplies = _supply_plan(
+        payload.get("customer_counts") or {},
+        settings.get("spoon_carton_size", 200),
+        settings.get("mode", "weekly"),
+    )
+    if not supplies["weekly"]["customers"]:
+        raise PackagingWorkbookError("لا توجد أعداد عملاء لإنشاء التقرير")
+
+    daily_mode = supplies["mode"] == "daily"
+    daily_rows = supplies["daily"] if daily_mode else []
+    width = 1600
+    margin = 55
+    header_h = 175
+    cards_top = 215
+    cards_h = 230
+    table_top = 485
+    table_head_h = 58
+    row_h = 58
+    footer_h = 58
+    height = (table_top + table_head_h + row_h * len(daily_rows) + footer_h + 35) if daily_mode else 585
+    image = Image.new("RGB", (width, height), "#F7F4EE")
+    draw = ImageDraw.Draw(image)
+    regular_path, bold_path = _fonts()
+    f_title = ImageFont.truetype(bold_path, 42)
+    f_sub = ImageFont.truetype(regular_path, 20)
+    f_card = ImageFont.truetype(bold_path, 31)
+    f_value = ImageFont.truetype(bold_path, 62)
+    f_head = ImageFont.truetype(bold_path, 21)
+    f_cell = ImageFont.truetype(regular_path, 20)
+    f_num = ImageFont.truetype(bold_path, 22)
+
+    def rtl_text(xy, value, font, fill="#183B42", anchor="ra"):
+        text = _clean(value)
+        try:
+            draw.text(xy, text, font=font, fill=fill, anchor=anchor, direction="rtl", language="ar")
+        except (KeyError, TypeError, ValueError):
+            draw.text(xy, _rtl(text), font=font, fill=fill, anchor=anchor)
+
+    draw.rounded_rectangle((margin, 32, width - margin, header_h), 28, fill="#163B47")
+    rtl_text((width - margin - 36, 78), "تقرير احتياج الأكياس والملاعق", f_title, "#FFFFFF")
+    mode_text = "تجميع يومي" if daily_mode else "تجميع أسبوعي"
+    rtl_text((width - margin - 36, 125), f"{mode_text} · سعة كرتونة الملاعق {supplies['spoon_carton_size']}", f_sub, "#CDE3DF")
+    draw.rounded_rectangle((margin + 30, 66, margin + 300, 145), 18, fill="#FFB84D")
+    draw.text((margin + 165, 91), f"{supplies['weekly']['customers']:,}", font=f_card, fill="#163B47", anchor="mm")
+    rtl_text((margin + 165, 127), "إجمالي العملاء", f_sub, "#163B47", anchor="mm")
+
+    shown = supplies["daily_totals"] if daily_mode else supplies["weekly"]
+    gap = 28
+    card_w = (width - (2 * margin) - gap) / 2
+
+    def card(x0, fill, title, value, note, kind):
+        x1 = x0 + card_w
+        draw.rounded_rectangle((x0, cards_top, x1, cards_top + cards_h), 28, fill=fill)
+        icon_x, icon_y = x1 - 112, cards_top + cards_h / 2
+        draw.rounded_rectangle((icon_x - 62, icon_y - 62, icon_x + 62, icon_y + 62), 26, fill="#FFFFFF")
+        if kind == "bag":
+            draw.rounded_rectangle((icon_x - 25, icon_y - 19, icon_x + 25, icon_y + 35), 6, outline="#523500", width=6)
+            draw.arc((icon_x - 17, icon_y - 40, icon_x + 17, icon_y - 4), 180, 360, fill="#523500", width=6)
+            ink = "#523500"
+        else:
+            draw.ellipse((icon_x - 12, icon_y - 43, icon_x + 12, icon_y - 10), outline="#0E5556", width=6)
+            draw.line((icon_x, icon_y - 10, icon_x, icon_y + 43), fill="#0E5556", width=7)
+            ink = "#0E5556"
+        rtl_text((x1 - 215, cards_top + 52), title, f_card, ink)
+        draw.text((x1 - 215, cards_top + 130), f"{int(value):,}", font=f_value, fill=ink, anchor="ra")
+        rtl_text((x1 - 365, cards_top + 131), "كرتونة مطلوبة", f_head, ink)
+        rtl_text((x1 - 215, cards_top + 190), note, f_sub, ink)
+
+    card(margin, "#FFD078", "أكياس التغليف", shown["bag_cartons"], "كل كرتونة تحتوي 200 كيس", "bag")
+    card(margin + card_w + gap, "#A7E7DC", "الملاعق", shown["spoon_cartons"], f"كل كرتونة تحتوي {supplies['spoon_carton_size']} ملعقة · احتياطي 20%", "spoon")
+
+    if daily_mode:
+        columns = [
+            ("اليوم", 430), ("عدد العملاء", 330),
+            ("كراتين الأكياس", 350), ("كراتين الملاعق", 350),
+        ]
+        x = margin
+        for label, col_w in columns:
+            draw.rectangle((x, table_top, x + col_w, table_top + table_head_h), fill="#163B47", outline="#315B63", width=2)
+            rtl_text((x + col_w / 2, table_top + table_head_h / 2), label, f_head, "#FFFFFF", anchor="mm")
+            x += col_w
+        for index, item in enumerate(daily_rows):
+            y0 = table_top + table_head_h + index * row_h
+            fill = "#FFFFFF" if index % 2 == 0 else "#EAF4F2"
+            values = (item["day_ar"], item["customers"], item["bag_cartons"], item["spoon_cartons"])
+            x = margin
+            for col_index, ((_, col_w), value) in enumerate(zip(columns, values)):
+                draw.rectangle((x, y0, x + col_w, y0 + row_h), fill=fill, outline="#D3E0DE", width=1)
+                if col_index == 0:
+                    rtl_text((x + col_w / 2, y0 + row_h / 2), value, f_cell, "#183B42", anchor="mm")
+                else:
+                    draw.text((x + col_w / 2, y0 + row_h / 2), f"{int(value):,}", font=f_num, fill="#183B42", anchor="mm")
+                x += col_w
+
+    footer_y = height - footer_h - 18
+    draw.rounded_rectangle((margin, footer_y, width - margin, footer_y + footer_h), 16, fill="#163B47")
+    draw.text((margin + 24, footer_y + footer_h / 2), "OCTA FOOD · DAILY SUPPLIES", font=f_sub, fill="#FFFFFF", anchor="lm")
+    rtl_text((width - margin - 24, footer_y + footer_h / 2), "طلبات التغليف", f_sub, "#FFFFFF", anchor="rm")
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
+
 def build_packaging_png(payload):
     rows = payload.get("rows") or []
     days = [day for day in DAY_ORDER if day in (payload.get("days") or [])]
@@ -941,6 +1048,15 @@ def packaging_orders_export_png():
     try:
         output = build_packaging_png(request.get_json(silent=True) or {})
         return send_file(output, as_attachment=True, download_name="Packaging_Orders.png", mimetype="image/png")
+    except PackagingWorkbookError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@packaging_orders_bp.route("/api/packaging-orders/export-supplies-png", methods=["POST"])
+def packaging_orders_export_supplies_png():
+    try:
+        output = build_supplies_png(request.get_json(silent=True) or {})
+        return send_file(output, as_attachment=True, download_name="Bags_and_Spoons_Report.png", mimetype="image/png")
     except PackagingWorkbookError as exc:
         return jsonify({"error": str(exc)}), 400
 
