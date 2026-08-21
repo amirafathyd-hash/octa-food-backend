@@ -1,4 +1,4 @@
-# OCTA BACKEND RELEASE: octa-backend-2026-08-21-packaging-stock-v2
+# OCTA BACKEND RELEASE: octa-backend-2026-08-21-packaging-image-excel-v3
 import os
 import requests
 import io
@@ -125,7 +125,7 @@ from packaging_orders import packaging_orders_bp
 from tokyo_storage import TOKYO_TEMPLATE_PATH
 
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-08-21-packaging-stock-v2'
+BACKEND_RELEASE = 'octa-backend-2026-08-21-packaging-image-excel-v3'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')

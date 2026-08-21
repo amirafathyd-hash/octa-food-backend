@@ -39,6 +39,15 @@ PACKING_ALIASES = {
 }
 COUNT_ITEM_COLUMNS = ((3, 4), (5, 6), (7, 8), (9, 10), (11, 12))
 FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+CUSTOMER_COUNT_VISION_PROMPT = """\
+اقرأ صورة جدول التشغيل هذه واستخرج فقط يوم الأسبوع وإجمالي عدد العملاء.
+ابحث عن صف المجموع النهائي في عمود «عدد التطبيق» أو «عدد العملاء». قد يظهر
+المجموع أكثر من مرة في الصورة؛ إذا كانت القيم متطابقة استخدم القيمة مرة واحدة.
+اليوم يجب أن يكون واحدًا من Saturday, Sunday, Monday, Tuesday, Wednesday, Thursday.
+ارجع JSON فقط بدون شرح بهذا الشكل:
+{"day":"Monday","customer_count":879}
+"""
 
 
 class PackagingWorkbookError(ValueError):
@@ -173,6 +182,116 @@ def _customer_count_from_workbook(wb):
             if candidates:
                 return int(round(max(candidates)))
     return 0
+
+
+def _day_from_workbook(wb):
+    """Find the operating day from content across all sheets, not a tab name."""
+    for ws in wb.worksheets:
+        day = _read_day_name(ws)
+        if day:
+            return day
+    return ""
+
+
+def _day_from_filename(filename):
+    text = _clean(filename)
+    lowered = text.casefold()
+    for day in DAY_ORDER:
+        if day.casefold() in lowered:
+            return day
+    for day, arabic in DAY_AR.items():
+        if _key(arabic) in _key(text):
+            return day
+    return ""
+
+
+def _customer_count_from_image(raw, filename):
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise PackagingWorkbookError("قراءة الصور تحتاج ANTHROPIC_API_KEY في إعدادات Railway")
+    extension = os.path.splitext(filename or "")[1].lower()
+    media_type = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(extension, "image/jpeg")
+    payload = {
+        "model": os.environ.get("ANTHROPIC_VISION_MODEL") or os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-4-20250514",
+        "max_tokens": 500,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": media_type,
+                 "data": base64.b64encode(raw).decode("ascii")}},
+                {"type": "text", "text": CUSTOMER_COUNT_VISION_PROMPT},
+            ],
+        }],
+    }
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+        json=payload, timeout=90,
+    )
+    if response.status_code != 200:
+        try:
+            message = response.json().get("error", {}).get("message") or response.text
+        except Exception:
+            message = response.text
+        raise PackagingWorkbookError(f"تعذر قراءة الصورة {filename}: {message[:300]}")
+    content = response.json().get("content", [])
+    text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise PackagingWorkbookError(f"تعذر استخراج عدد العملاء من الصورة {filename}")
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        raise PackagingWorkbookError(f"نتيجة قراءة الصورة {filename} غير صالحة") from exc
+    day_text = _clean(data.get("day"))
+    day = next((item for item in DAY_ORDER if item.casefold() == day_text.casefold()), "")
+    day = day or _day_from_filename(filename)
+    count = max(0, int(round(_number(data.get("customer_count")))))
+    if not day:
+        raise PackagingWorkbookError(f"تعذر تحديد يوم التشغيل في الصورة {filename}")
+    if not count:
+        raise PackagingWorkbookError(f"تعذر تحديد إجمالي عدد العملاء في الصورة {filename}")
+    return day, count
+
+
+def extract_customer_count_files(files):
+    counts = OrderedDict()
+    sources = []
+    for uploaded in files:
+        filename = uploaded.filename or "file"
+        extension = os.path.splitext(filename)[1].lower()
+        raw = uploaded.read()
+        uploaded.seek(0)
+        if extension in IMAGE_EXTENSIONS:
+            day, count = _customer_count_from_image(raw, filename)
+            source_type = "image"
+        elif extension in {".xlsx", ".xlsm"}:
+            try:
+                workbook = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            except Exception as exc:
+                raise PackagingWorkbookError(f"تعذر قراءة ملف Excel {filename}: {exc}") from exc
+            try:
+                day = _day_from_workbook(workbook) or _day_from_filename(filename)
+                count = max(0, int(round(_customer_count_from_workbook(workbook))))
+            finally:
+                workbook.close()
+            source_type = "excel"
+            if not day:
+                raise PackagingWorkbookError(f"تعذر تحديد يوم التشغيل داخل {filename}")
+            if not count:
+                raise PackagingWorkbookError(f"تعذر العثور على إجمالي عدد العملاء داخل {filename}")
+        else:
+            raise PackagingWorkbookError(f"صيغة الملف {filename} غير مدعومة؛ ارفع صورة أو Excel")
+        if day in counts:
+            raise PackagingWorkbookError(f"تم رفع أكثر من ملف ليوم {DAY_AR.get(day, day)}")
+        counts[day] = count
+        sources.append({"filename": filename, "type": source_type, "day": day,
+                        "day_ar": DAY_AR.get(day, day), "customers": count})
+    ordered = OrderedDict((day, counts[day]) for day in DAY_ORDER if day in counts)
+    return ordered, sources
 
 
 def _supply_plan(customer_counts, spoon_carton_size=200, mode="weekly"):
@@ -661,6 +780,26 @@ def build_packaging_xlsx(payload):
     wb.save(output)
     output.seek(0)
     return output
+
+
+@packaging_orders_bp.route("/api/packaging-orders/customer-counts", methods=["POST"])
+def packaging_customer_counts():
+    files = [file for file in request.files.getlist("files") if file and file.filename]
+    if not 1 <= len(files) <= 6:
+        return jsonify({"error": "ارفع من ملف واحد إلى 6 ملفات، صور أو Excel"}), 400
+    try:
+        counts, sources = extract_customer_count_files(files)
+        return jsonify({
+            "ok": True,
+            "days": list(counts.keys()),
+            "customer_counts": counts,
+            "sources": sources,
+            "supplies": _supply_plan(counts, 200, "weekly"),
+        })
+    except PackagingWorkbookError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"تعذر قراءة أعداد العملاء: {str(exc)[:180]}"}), 500
 
 
 @packaging_orders_bp.route("/api/packaging-orders/extract", methods=["POST"])
