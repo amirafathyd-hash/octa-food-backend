@@ -490,6 +490,32 @@ def build_packaging_png(payload):
             # Fallback for Pillow builds without libraqm.
             draw.text(xy, _rtl(text), font=font, fill=fill, anchor=anchor)
 
+    def item_icon(cx, cy, value):
+        """Draw a compact line symbol matching the packaging item shape."""
+        key = _key(value)
+        ink, bg = "#176A69", "#E7F4F1"
+        draw.rounded_rectangle((cx - 23, cy - 23, cx + 23, cy + 23), 10, fill=bg, outline="#BED9D3", width=2)
+        if "مقسم" in key:
+            draw.ellipse((cx - 14, cy - 14, cx + 14, cy + 14), outline=ink, width=3)
+            draw.line((cx, cy - 14, cx, cy), fill=ink, width=3)
+            draw.line((cx, cy, cx - 11, cy + 9), fill=ink, width=3)
+            draw.line((cx, cy, cx + 11, cy + 9), fill=ink, width=3)
+        elif "دائري" in key or "دايري" in key:
+            draw.ellipse((cx - 15, cy - 15, cx + 15, cy + 15), outline=ink, width=3)
+            draw.ellipse((cx - 9, cy - 9, cx + 9, cy + 9), outline=ink, width=2)
+        elif "مستطيل" in key:
+            draw.rounded_rectangle((cx - 18, cy - 12, cx + 18, cy + 12), 5, outline=ink, width=3)
+            draw.rounded_rectangle((cx - 12, cy - 7, cx + 12, cy + 7), 3, outline=ink, width=2)
+        elif "ساندوتش" in key:
+            draw.arc((cx - 18, cy - 14, cx + 18, cy + 13), 180, 360, fill=ink, width=3)
+            draw.rounded_rectangle((cx - 18, cy, cx + 18, cy + 12), 3, outline=ink, width=3)
+        elif "سلط" in key or "فواكه" in key:
+            draw.line((cx - 17, cy - 7, cx + 17, cy - 7), fill=ink, width=3)
+            draw.polygon(((cx - 14, cy - 4), (cx + 14, cy - 4), (cx + 10, cy + 14), (cx - 10, cy + 14)), outline=ink)
+        else:
+            draw.rounded_rectangle((cx - 16, cy - 13, cx + 16, cy + 14), 5, outline=ink, width=3)
+            draw.line((cx - 12, cy - 3, cx + 12, cy - 3), fill=ink, width=2)
+
     regular_path, bold_path = _fonts()
     f_title = ImageFont.truetype(bold_path, 45)
     f_sub = ImageFont.truetype(regular_path, 21)
@@ -558,6 +584,7 @@ def build_packaging_png(payload):
         for key, col_w, _ in columns:
             draw.rectangle((x, y0, x + col_w, y0 + row_h), fill=fill, outline="#D7E0DE", width=1)
             if key == "item":
+                item_icon(x + 35, y0 + row_h / 2, row.get("item"))
                 rtl_text((x + col_w - 18, y0 + row_h / 2), row.get("item"), f_cell, "#183B42", anchor="rm")
             else:
                 if key in days:
