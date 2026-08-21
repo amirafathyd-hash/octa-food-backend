@@ -7,6 +7,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import uuid
@@ -139,6 +140,78 @@ def _sheet_items(ws):
     return items
 
 
+def _customer_count_from_workbook(wb):
+    """Read the daily customer total by structure, never by a fixed tab name."""
+    count_headers = (
+        "عدد التطبيق", "عدد العملاء", "اجمالي العملاء", "إجمالي العملاء",
+        "customer count", "customers", "application count",
+    )
+    total_labels = ("المجموع", "الاجمالي", "الإجمالي", "grand total", "total")
+    for ws in wb.worksheets:
+        max_row = min(ws.max_row or 0, 500)
+        max_col = min(ws.max_column or 0, 40)
+        has_count_header = False
+        direct_candidates = []
+        total_candidates = []
+        for row in range(1, max_row + 1):
+            values = [ws.cell(row, col).value for col in range(1, max_col + 1)]
+            keys = [_key(value) for value in values]
+            for col, key in enumerate(keys):
+                if any(_key(label) in key for label in count_headers):
+                    has_count_header = True
+                    for offset in (1, -1, 2):
+                        index = col + offset
+                        if 0 <= index < len(values):
+                            number = _number(values[index])
+                            if number > 0:
+                                direct_candidates.append(number)
+            if any(any(_key(label) == key or _key(label) in key for label in total_labels) for key in keys):
+                numbers = [_number(value) for value in values]
+                total_candidates.extend(number for number in numbers if 0 < number < 1_000_000)
+        if has_count_header:
+            candidates = total_candidates or direct_candidates
+            if candidates:
+                return int(round(max(candidates)))
+    return 0
+
+
+def _supply_plan(customer_counts, spoon_carton_size=200, mode="weekly"):
+    spoon_carton_size = 300 if int(_number(spoon_carton_size)) == 300 else 200
+    normalized = OrderedDict()
+    for day in DAY_ORDER:
+        if day in (customer_counts or {}):
+            normalized[day] = max(0, int(round(_number(customer_counts.get(day)))))
+    daily = []
+    for day, customers in normalized.items():
+        daily.append({
+            "day": day,
+            "day_ar": DAY_AR.get(day, day),
+            "customers": customers,
+            "bag_cartons": int(math.ceil(customers / 200.0)) if customers else 0,
+            "spoon_cartons": int(math.ceil((customers * 1.2) / spoon_carton_size)) if customers else 0,
+        })
+    total_customers = sum(item["customers"] for item in daily)
+    weekly = {
+        "customers": total_customers,
+        "bag_cartons": int(math.ceil(total_customers / 200.0)) if total_customers else 0,
+        "spoon_cartons": int(math.ceil((total_customers * 1.2) / spoon_carton_size)) if total_customers else 0,
+    }
+    daily_totals = {
+        "customers": total_customers,
+        "bag_cartons": sum(item["bag_cartons"] for item in daily),
+        "spoon_cartons": sum(item["spoon_cartons"] for item in daily),
+    }
+    return {
+        "mode": "daily" if mode == "daily" else "weekly",
+        "spoon_carton_size": spoon_carton_size,
+        "bag_carton_size": 200,
+        "spoon_safety_percent": 20,
+        "daily": daily,
+        "weekly": weekly,
+        "daily_totals": daily_totals,
+    }
+
+
 def extract_packaging_files(files):
     days = OrderedDict()
     sources = []
@@ -155,6 +228,7 @@ def extract_packaging_files(files):
         except Exception as exc:
             raise PackagingWorkbookError(f"تعذر قراءة الملف {uploaded.filename}: {exc}") from exc
         matched = []
+        customer_count = _customer_count_from_workbook(wb)
         day_name = ""
         file_items = OrderedDict()
         for shift, aliases in PACKING_ALIASES.items():
@@ -177,7 +251,10 @@ def extract_packaging_files(files):
         if day_name in days:
             raise PackagingWorkbookError(f"تم رفع أكثر من ملف ليوم {DAY_AR[day_name]}")
         days[day_name] = file_items
-        sources.append({"filename": uploaded.filename, "day": day_name, "day_ar": DAY_AR[day_name], "sheets": matched})
+        sources.append({
+            "filename": uploaded.filename, "day": day_name, "day_ar": DAY_AR[day_name],
+            "sheets": matched, "customers": customer_count,
+        })
     if not days:
         raise PackagingWorkbookError("لم يتم العثور على ملفات تغليف صالحة")
     ordered_days = OrderedDict((day, days[day]) for day in DAY_ORDER if day in days)
@@ -386,9 +463,17 @@ def build_packaging_png(payload):
     days = [day for day in DAY_ORDER if day in (payload.get("days") or [])]
     if not rows:
         raise PackagingWorkbookError("لا توجد بيانات لإنشاء الصورة")
+    supply_settings = payload.get("supplies") or {}
+    supplies = _supply_plan(
+        payload.get("customer_counts") or {},
+        supply_settings.get("spoon_carton_size", 200),
+        supply_settings.get("mode", "weekly"),
+    )
+    show_supplies = supplies["weekly"]["customers"] > 0
+    supply_h = (238 + (56 * len(supplies["daily"]) if supplies["mode"] == "daily" else 0)) if show_supplies else 0
     width = 1800
     header_h, table_head_h, row_h, footer_h = 166, 72, 62, 58
-    height = header_h + table_head_h + row_h * len(rows) + footer_h + 70
+    height = header_h + supply_h + table_head_h + row_h * len(rows) + footer_h + 70
     image = Image.new("RGB", (width, height), "#F7F4EE")
     draw = ImageDraw.Draw(image)
 
@@ -417,13 +502,50 @@ def build_packaging_png(payload):
     draw.text((margin + 34, 91), f"{len(rows)}", font=f_title, fill="#FFB84D", anchor="lm")
     rtl_text((margin + 115, 96), "صنف تغليف", f_sub, "white", anchor="lm")
 
+    if show_supplies:
+        supply_y = header_h + 12
+        draw.rounded_rectangle((margin, supply_y, width - margin, supply_y + supply_h - 18), 24, fill="#FFFFFF", outline="#D7E0DE", width=2)
+        rtl_text((width - margin - 28, supply_y + 28), "احتياج الأكياس والملاعق", f_head, "#183B42")
+        card_top = supply_y + 68
+        gap = 20
+        card_w = (width - (2 * margin) - 60 - gap) / 2
+
+        def supply_card(x0, color, title, cartons, detail, kind):
+            x1 = x0 + card_w
+            draw.rounded_rectangle((x0, card_top, x1, card_top + 128), 20, fill=color)
+            icon_x, icon_y = x1 - 76, card_top + 64
+            draw.ellipse((icon_x - 36, icon_y - 36, icon_x + 36, icon_y + 36), fill="#FFFFFF")
+            if kind == "bag":
+                draw.rounded_rectangle((icon_x - 18, icon_y - 14, icon_x + 18, icon_y + 22), 5, outline="#183B42", width=4)
+                draw.arc((icon_x - 12, icon_y - 27, icon_x + 12, icon_y - 3), 180, 360, fill="#183B42", width=4)
+            else:
+                draw.ellipse((icon_x - 7, icon_y - 27, icon_x + 7, icon_y - 8), outline="#183B42", width=4)
+                draw.line((icon_x, icon_y - 8, icon_x, icon_y + 25), fill="#183B42", width=5)
+            rtl_text((x1 - 130, card_top + 29), title, f_head, "#183B42")
+            rtl_text((x1 - 130, card_top + 70), f"{cartons:,} كرتونة", f_title, "#183B42")
+            rtl_text((x1 - 130, card_top + 110), detail, f_sub, "#3F666B")
+
+        shown_totals = supplies["daily_totals"] if supplies["mode"] == "daily" else supplies["weekly"]
+        supply_card(margin + 20, "#FFF1D8", "أكياس التغليف", shown_totals["bag_cartons"], "200 كيس في الكرتونة", "bag")
+        supply_card(margin + 40 + card_w, "#DDF4EF", "ملاعق", shown_totals["spoon_cartons"], f"{supplies['spoon_carton_size']} ملعقة في الكرتونة · احتياطي 20%", "spoon")
+        if supplies["mode"] == "daily":
+            row_y = card_top + 148
+            for item in supplies["daily"]:
+                draw.rounded_rectangle((margin + 22, row_y, width - margin - 22, row_y + 44), 11, fill="#F3F7F6")
+                rtl_text((width - margin - 42, row_y + 22), item["day_ar"], f_cell, "#183B42", anchor="rm")
+                draw.text((width / 2 + 180, row_y + 22), f"{item['customers']:,}", font=f_num, fill="#183B42", anchor="mm")
+                rtl_text((width / 2 + 95, row_y + 22), "عميل", f_cell, "#60787B", anchor="rm")
+                rtl_text((width / 2 - 40, row_y + 22), f"{item['bag_cartons']} أكياس", f_cell, "#9A5C00", anchor="rm")
+                rtl_text((margin + 250, row_y + 22), f"{item['spoon_cartons']} ملاعق", f_cell, "#0F6765", anchor="rm")
+                row_y += 56
+
     table_x0, table_x1 = margin, width - margin
     item_w, total_w, stock_w, needed_w = 420, 155, 155, 180
     day_w = ((table_x1 - table_x0 - item_w - total_w - stock_w - needed_w) / len(days)) if days else 0
     columns = [("item", item_w, "الصنف")]
     columns += [(day, day_w, DAY_AR[day]) for day in days]
     columns += [("total", total_w, "الإجمالي"), ("used_inventory", stock_w, "استخدام المخزون"), ("remaining", needed_w, "المطلوب")]
-    y = header_h
+    y = header_h + supply_h
     x = table_x0
     for _, col_w, label in columns:
         draw.rectangle((x, y, x + col_w, y + table_head_h), fill="#FFB84D", outline="#E6C58D", width=2)
@@ -483,6 +605,31 @@ def build_packaging_xlsx(payload):
         ws.column_dimensions[openpyxl.utils.get_column_letter(index)].width = 16
     ws.freeze_panes = "B2"
     ws.sheet_view.rightToLeft = True
+    supply_settings = payload.get("supplies") or {}
+    supplies = _supply_plan(
+        payload.get("customer_counts") or {},
+        supply_settings.get("spoon_carton_size", 200),
+        supply_settings.get("mode", "weekly"),
+    )
+    if supplies["weekly"]["customers"] > 0:
+        supply_ws = wb.create_sheet("Bags and Spoons")
+        supply_ws.sheet_view.rightToLeft = True
+        supply_ws.append(["اليوم", "عدد العملاء", "كراتين الأكياس", "كراتين الملاعق", "سعة كرتونة الملاعق"])
+        for item in supplies["daily"]:
+            supply_ws.append([item["day_ar"], item["customers"], item["bag_cartons"], item["spoon_cartons"], supplies["spoon_carton_size"]])
+        shown_totals = supplies["daily_totals"] if supplies["mode"] == "daily" else supplies["weekly"]
+        total_label = "إجمالي الطلب اليومي" if supplies["mode"] == "daily" else "الإجمالي الأسبوعي"
+        supply_ws.append([total_label, shown_totals["customers"], shown_totals["bag_cartons"], shown_totals["spoon_cartons"], supplies["spoon_carton_size"]])
+        for cell in supply_ws[1]:
+            cell.fill = PatternFill("solid", fgColor=gold)
+            cell.font = Font(bold=True, color=dark, size=12)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for row in supply_ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+        for letter, width_value in zip(("A", "B", "C", "D", "E"), (20, 18, 20, 20, 24)):
+            supply_ws.column_dimensions[letter].width = width_value
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
@@ -505,9 +652,12 @@ def packaging_orders_extract():
             row["used_inventory"] = round(min(stock, row["total"]), 3)
             row["remaining"] = round(max(0, row["total"] - stock), 3)
         fingerprint = json.dumps({"days": list(days.keys()), "rows": rows}, ensure_ascii=False, sort_keys=True)
+        customer_counts = {source["day"]: source.get("customers", 0) for source in sources}
         return jsonify({
             "ok": True, "days": list(days.keys()), "rows": rows, "sources": sources,
             "total_units": round(sum(row["total"] for row in rows), 3),
+            "customer_counts": customer_counts,
+            "supplies": _supply_plan(customer_counts, 200, "weekly"),
             "run_id": hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24],
         })
     except PackagingWorkbookError as exc:
@@ -577,6 +727,12 @@ def packaging_weeks():
         record = {
             "id": uuid.uuid4().hex, "run_id": run_id, "name": name, "date": week_date,
             "rows": saved_rows, "days": payload.get("days") or [], "created_at": now,
+            "customer_counts": payload.get("customer_counts") or {},
+            "supplies": _supply_plan(
+                payload.get("customer_counts") or {},
+                (payload.get("supplies") or {}).get("spoon_carton_size", 200),
+                (payload.get("supplies") or {}).get("mode", "weekly"),
+            ),
             "updated_at": now, "deleted": False,
         }
         _save_week_event(record)
