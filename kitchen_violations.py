@@ -144,6 +144,17 @@ def _all_records():
     return records
 
 
+def _record_row(record_id):
+    rows = execute_with_retry(
+        get_client().table("upload_log")
+        .select("id,file_name,item_date,message,created_at")
+        .eq("id", record_id)
+        .eq("file_type", "kitchen_violation")
+        .limit(1)
+    ).data or []
+    return rows[0] if rows else None
+
+
 @kitchen_violations_bp.get("/api/kitchen-violations/links")
 def kitchen_violation_links():
     _, err = _require_admin()
@@ -272,8 +283,60 @@ def kitchen_violation_list():
             "repeated": sum(1 for item in records if item.get("repeated")),
             "images": sum(1 for item in records if item.get("media_type") == "image"),
             "videos": sum(1 for item in records if item.get("media_type") == "video"),
+            "open": sum(1 for item in records if item.get("status") != "closed"),
+            "closed": sum(1 for item in records if item.get("status") == "closed"),
         },
     })
+
+
+@kitchen_violations_bp.patch("/api/public/kitchen-violations/<int:record_id>/close")
+def kitchen_violation_close(record_id):
+    if not _token("view"):
+        return jsonify({"error": "رابط متابعة المخالفات غير صالح"}), 403
+    body = request.get_json(silent=True) or {}
+    action_note = str(body.get("action_note") or "").strip()[:2000]
+    if not action_note:
+        return jsonify({"error": "اكتب الإجراء الذي تم اتخاذه أولًا"}), 400
+    row = _record_row(record_id)
+    record = _payload(row) if row else None
+    if not record:
+        return jsonify({"error": "المخالفة غير موجودة"}), 404
+    closed_at = datetime.now(timezone.utc).isoformat()
+    record.update({
+        "status": "closed",
+        "action_note": action_note,
+        "closed_at": closed_at,
+    })
+    record.pop("id", None)
+    execute_with_retry(
+        get_client().table("upload_log").update({
+            "message": json.dumps(record, ensure_ascii=False),
+            "level": "info",
+        }).eq("id", record_id).eq("file_type", "kitchen_violation")
+    )
+    return jsonify({"ok": True, "status": "closed", "closed_at": closed_at})
+
+
+@kitchen_violations_bp.delete("/api/public/kitchen-violations/<int:record_id>")
+def kitchen_violation_delete(record_id):
+    if not _token("view"):
+        return jsonify({"error": "رابط متابعة المخالفات غير صالح"}), 403
+    row = _record_row(record_id)
+    record = _payload(row) if row else None
+    if not record:
+        return jsonify({"error": "المخالفة غير موجودة"}), 404
+    try:
+        if record.get("storage_path"):
+            get_client().storage.from_(BUCKET_NAME).remove([record["storage_path"]])
+        execute_with_retry(
+            get_client().table("upload_log")
+            .delete()
+            .eq("id", record_id)
+            .eq("file_type", "kitchen_violation")
+        )
+        return jsonify({"ok": True})
+    except Exception as exc:
+        return jsonify({"error": f"تعذر حذف المخالفة: {exc}"}), 500
 
 
 @kitchen_violations_bp.get("/api/public/kitchen-violations/<int:record_id>/media")
