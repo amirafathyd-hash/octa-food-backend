@@ -122,6 +122,7 @@ from receipt_pricing import (
 from kitchen_live import register_kitchen_live_routes
 from vegetable_cutting import vegetable_cutting_bp
 from packaging_orders import packaging_orders_bp
+from kitchen_violations import kitchen_violations_bp, configure_kitchen_violations
 from tokyo_storage import TOKYO_TEMPLATE_PATH
 
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
@@ -143,6 +144,7 @@ app.register_blueprint(invoice_receipts_bp)
 app.register_blueprint(veg_comparison_bp)
 app.register_blueprint(vegetable_cutting_bp)
 app.register_blueprint(packaging_orders_bp)
+app.register_blueprint(kitchen_violations_bp)
 register_kitchen_live_routes(app)
 
 
@@ -155,7 +157,7 @@ def _ensure_cors_headers(response):
     origin = request.headers.get('Origin')
     if origin:
         response.headers.setdefault('Access-Control-Allow-Origin', origin)
-        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token, X-Invoice-Receipt-Token')
+        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token, X-Invoice-Receipt-Token, X-Kitchen-Violation-Token')
         response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
         response.headers.setdefault('Access-Control-Expose-Headers', 'X-Match-Report, X-Decision-Report, X-Day-Operations-Report, Content-Disposition')
     return response
@@ -2763,6 +2765,7 @@ def _require_action(action):
 
 configure_invoice_receipts(_require_auth)
 configure_veg_comparison(_require_auth)
+configure_kitchen_violations(_require_auth)
 
 
 def _price_center_row_from_payload(payload, partial=False):
