@@ -362,6 +362,11 @@ def _consume_inventory(current, rows):
         saved_rows.append({
             "item": item, "total": round(total, 3), "inventory_before": round(before, 3),
             "used_inventory": round(used, 3), "remaining": round(remaining, 3),
+            "daily": {
+                str(day): round(max(0, _number(value)), 3)
+                for day, value in (row.get("daily") or {}).items()
+            },
+            "unit": _clean(row.get("unit")) or "قطعة",
         })
     return updated, saved_rows
 
@@ -379,10 +384,10 @@ def _fonts():
 def build_packaging_png(payload):
     rows = payload.get("rows") or []
     days = [day for day in DAY_ORDER if day in (payload.get("days") or [])]
-    if not rows or not days:
+    if not rows:
         raise PackagingWorkbookError("لا توجد بيانات لإنشاء الصورة")
     width = 1800
-    header_h, table_head_h, row_h, footer_h = 190, 72, 62, 58
+    header_h, table_head_h, row_h, footer_h = 166, 72, 62, 58
     height = header_h + table_head_h + row_h * len(rows) + footer_h + 70
     image = Image.new("RGB", (width, height), "#F7F4EE")
     draw = ImageDraw.Draw(image)
@@ -408,14 +413,13 @@ def build_packaging_png(payload):
     f_num = ImageFont.truetype(bold_path, 21)
     margin = 45
     draw.rounded_rectangle((margin, 35, width - margin, header_h - 12), 28, fill="#163B47")
-    rtl_text((width - margin - 34, 68), "طلبات التغليف الأسبوعية", f_title, "white")
-    rtl_text((width - margin - 34, 133), "تجميع ذكي من شيتات الصباح والمساء", f_sub, "#BCE3DD")
-    draw.text((margin + 34, 98), f"{len(rows)}", font=f_title, fill="#FFB84D", anchor="lm")
-    rtl_text((margin + 115, 103), "صنف تغليف", f_sub, "white", anchor="lm")
+    rtl_text((width - margin - 34, 82), "طلبات التغليف الأسبوعية", f_title, "white")
+    draw.text((margin + 34, 91), f"{len(rows)}", font=f_title, fill="#FFB84D", anchor="lm")
+    rtl_text((margin + 115, 96), "صنف تغليف", f_sub, "white", anchor="lm")
 
     table_x0, table_x1 = margin, width - margin
     item_w, total_w, stock_w, needed_w = 420, 155, 155, 180
-    day_w = (table_x1 - table_x0 - item_w - total_w - stock_w - needed_w) / len(days)
+    day_w = ((table_x1 - table_x0 - item_w - total_w - stock_w - needed_w) / len(days)) if days else 0
     columns = [("item", item_w, "الصنف")]
     columns += [(day, day_w, DAY_AR[day]) for day in days]
     columns += [("total", total_w, "الإجمالي"), ("used_inventory", stock_w, "استخدام المخزون"), ("remaining", needed_w, "المطلوب")]
@@ -452,7 +456,7 @@ def build_packaging_png(payload):
 def build_packaging_xlsx(payload):
     rows = payload.get("rows") or []
     days = [day for day in DAY_ORDER if day in (payload.get("days") or [])]
-    if not rows or not days:
+    if not rows:
         raise PackagingWorkbookError("لا توجد بيانات لإنشاء Excel")
     wb = openpyxl.Workbook()
     ws = wb.active
