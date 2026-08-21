@@ -32,6 +32,13 @@ BUCKET_NAME = os.environ.get(
     "KITCHEN_VIOLATION_BUCKET",
     os.environ.get("INVOICE_RECEIPT_BUCKET", "invoice-receipts"),
 )
+# The existing invoice bucket can be restricted to PDF MIME metadata.  Evidence
+# is always served through our API with its original MIME stored in upload_log,
+# so use bucket-compatible metadata without changing the actual file bytes.
+STORAGE_CONTENT_TYPE = os.environ.get(
+    "KITCHEN_VIOLATION_STORAGE_CONTENT_TYPE",
+    "application/pdf",
+)
 MAX_FILE_BYTES = int(os.environ.get("KITCHEN_VIOLATION_MAX_MB", "60")) * 1024 * 1024
 ALLOWED_MIME = {
     "image/jpeg": ".jpg",
@@ -198,7 +205,7 @@ def kitchen_violation_submit():
         sb.storage.from_(BUCKET_NAME).upload(
             storage_path,
             content,
-            file_options={"content-type": content_type, "upsert": "false"},
+            file_options={"content-type": STORAGE_CONTENT_TYPE, "upsert": "false"},
         )
         created_at = datetime.now(timezone.utc).isoformat()
         message = {
