@@ -318,21 +318,31 @@ def _supply_plan(customer_counts, spoon_carton_size=200, mode="weekly"):
             normalized[day] = max(0, int(round(_number(customer_counts.get(day)))))
     daily = []
     for day, customers in normalized.items():
+        bag_units = customers + 10 if customers else 0
+        spoon_units = customers * 3
         daily.append({
             "day": day,
             "day_ar": DAY_AR.get(day, day),
             "customers": customers,
-            "bag_cartons": int(math.ceil(customers / 200.0)) if customers else 0,
-            "spoon_cartons": int(math.ceil((customers * 1.2) / spoon_carton_size)) if customers else 0,
+            "bag_units": bag_units,
+            "spoon_units": spoon_units,
+            "bag_cartons": int(math.ceil(bag_units / 200.0)) if bag_units else 0,
+            "spoon_cartons": int(math.ceil(spoon_units / spoon_carton_size)) if spoon_units else 0,
         })
     total_customers = sum(item["customers"] for item in daily)
+    weekly_bag_units = total_customers + 10 if total_customers else 0
+    weekly_spoon_units = total_customers * 3
     weekly = {
         "customers": total_customers,
-        "bag_cartons": int(math.ceil(total_customers / 200.0)) if total_customers else 0,
-        "spoon_cartons": int(math.ceil((total_customers * 1.2) / spoon_carton_size)) if total_customers else 0,
+        "bag_units": weekly_bag_units,
+        "spoon_units": weekly_spoon_units,
+        "bag_cartons": int(math.ceil(weekly_bag_units / 200.0)) if weekly_bag_units else 0,
+        "spoon_cartons": int(math.ceil(weekly_spoon_units / spoon_carton_size)) if weekly_spoon_units else 0,
     }
     daily_totals = {
         "customers": total_customers,
+        "bag_units": sum(item["bag_units"] for item in daily),
+        "spoon_units": sum(item["spoon_units"] for item in daily),
         "bag_cartons": sum(item["bag_cartons"] for item in daily),
         "spoon_cartons": sum(item["spoon_cartons"] for item in daily),
     }
@@ -340,7 +350,8 @@ def _supply_plan(customer_counts, spoon_carton_size=200, mode="weekly"):
         "mode": "daily" if mode == "daily" else "weekly",
         "spoon_carton_size": spoon_carton_size,
         "bag_carton_size": 200,
-        "spoon_safety_percent": 20,
+        "bag_extra_units": 10,
+        "spoons_per_customer": 3,
         "daily": daily,
         "weekly": weekly,
         "daily_totals": daily_totals,
@@ -667,8 +678,8 @@ def build_supplies_png(payload):
         rtl_text((content_x, cards_top + 160), "كرتونة مطلوبة", f_head, ink, anchor="mm")
         rtl_text((content_x, cards_top + 205), note, f_sub, ink, anchor="mm")
 
-    card(margin, "#FFD078", "أكياس التغليف", shown["bag_cartons"], "كل كرتونة تحتوي 200 كيس", "bag")
-    card(margin + card_w + gap, "#A7E7DC", "الملاعق", shown["spoon_cartons"], f"كل كرتونة تحتوي {supplies['spoon_carton_size']} ملعقة · احتياطي 20%", "spoon")
+    card(margin, "#FFD078", "أكياس التغليف", shown["bag_cartons"], "عدد العملاء + 10 · كل كرتونة 200 كيس", "bag")
+    card(margin + card_w + gap, "#A7E7DC", "الملاعق", shown["spoon_cartons"], f"عدد العملاء × 3 · كل كرتونة {supplies['spoon_carton_size']} ملعقة", "spoon")
 
     if daily_mode:
         columns = [
@@ -797,8 +808,8 @@ def build_packaging_png(payload):
             rtl_text((x1 - 130, card_top + 110), detail, f_sub, "#3F666B")
 
         shown_totals = supplies["daily_totals"] if supplies["mode"] == "daily" else supplies["weekly"]
-        supply_card(margin + 20, "#FFF1D8", "أكياس التغليف", shown_totals["bag_cartons"], "200 كيس في الكرتونة", "bag")
-        supply_card(margin + 40 + card_w, "#DDF4EF", "ملاعق", shown_totals["spoon_cartons"], f"{supplies['spoon_carton_size']} ملعقة في الكرتونة · احتياطي 20%", "spoon")
+        supply_card(margin + 20, "#FFF1D8", "أكياس التغليف", shown_totals["bag_cartons"], "عدد العملاء + 10 · كل كرتونة 200 كيس", "bag")
+        supply_card(margin + 40 + card_w, "#DDF4EF", "ملاعق", shown_totals["spoon_cartons"], f"عدد العملاء × 3 · كل كرتونة {supplies['spoon_carton_size']} ملعقة", "spoon")
         if supplies["mode"] == "daily":
             row_y = card_top + 148
             for item in supplies["daily"]:
