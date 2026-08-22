@@ -79,6 +79,15 @@ def _canonical_item(value):
     raw = _clean(value)
     key = _key(raw)
     digits = "".join(re.findall(r"\d+", key))
+    if "كيس" in key and "شفاف" in key:
+        # Keep every transparent-bag size independent.  The previous check only
+        # looked for the digit "5", so both 5x5 and 5x10 were collapsed into
+        # the same inventory/order row.
+        dimension = re.search(r"(\d+)\s*[xX×*]\s*(\d+)", raw)
+        if dimension:
+            width, height = (str(int(part)) for part in dimension.groups())
+            return f"كيس شفاف {width}×{height}"
+        return raw
     if "مستطيل" in key:
         size = "16" if "16" in digits else ("28" if "28" in digits else "")
         return f"صحن مستطيل {size} أونز".strip()
@@ -96,8 +105,6 @@ def _canonical_item(value):
         return "علبة سلطة 250 مل"
     if "فواكه" in key and "200" in digits:
         return "علبة فواكه 200 مل"
-    if "كيس" in key and "5" in digits and "شفاف" in key:
-        return "كيس شفاف 5×5"
     if "ذهبي" in key and "2" in digits:
         return "علبة ذهبية 2 أونز"
     if ("علب" in key or "علبه" in key) and "2" in digits and "اونز" in key:
