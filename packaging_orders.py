@@ -649,9 +649,9 @@ def build_supplies_png(payload):
             draw.text(xy, _rtl(text), font=font, fill=fill, anchor=anchor)
 
     draw.rounded_rectangle((margin, 32, width - margin, header_h), 28, fill="#163B47")
-    rtl_text((width - margin - 36, 78), "تقرير احتياج الأكياس والملاعق", f_title, "#FFFFFF")
+    rtl_text((width - margin - 36, 62), "تقرير احتياج الأكياس والملاعق", f_title, "#FFFFFF")
     mode_text = "تجميع يومي" if daily_mode else "تجميع أسبوعي"
-    rtl_text((width - margin - 36, 125), f"{mode_text} · سعة كرتونة الملاعق {supplies['spoon_carton_size']}", f_sub, "#CDE3DF")
+    rtl_text((width - margin - 36, 136), f"{mode_text} · سعة كرتونة الملاعق {supplies['spoon_carton_size']}", f_sub, "#CDE3DF")
     draw.rounded_rectangle((margin + 30, 66, margin + 300, 145), 18, fill="#FFB84D")
     draw.text((margin + 165, 91), f"{supplies['weekly']['customers']:,}", font=f_card, fill="#163B47", anchor="mm")
     rtl_text((margin + 165, 127), "إجمالي العملاء", f_sub, "#163B47", anchor="mm")
