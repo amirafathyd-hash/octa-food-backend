@@ -32,6 +32,7 @@ DAY_ORDER = ("Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday")
 DAY_AR = {
     "Saturday": "السبت", "Sunday": "الأحد", "Monday": "الإثنين",
     "Tuesday": "الثلاثاء", "Wednesday": "الأربعاء", "Thursday": "الخميس",
+    "Manual": "إدخال يدوي",
 }
 PACKING_ALIASES = {
     "morning": ("Morning Packing", "Morn Packing", "Packing Morn"),
@@ -313,7 +314,9 @@ def extract_customer_count_files(files):
 def _supply_plan(customer_counts, spoon_carton_size=200, mode="weekly"):
     spoon_carton_size = 300 if int(_number(spoon_carton_size)) == 300 else 200
     normalized = OrderedDict()
-    for day in DAY_ORDER:
+    ordered_days = list(DAY_ORDER)
+    ordered_days.extend(day for day in (customer_counts or {}) if day not in DAY_ORDER)
+    for day in ordered_days:
         if day in (customer_counts or {}):
             normalized[day] = max(0, int(round(_number(customer_counts.get(day)))))
     daily = []
