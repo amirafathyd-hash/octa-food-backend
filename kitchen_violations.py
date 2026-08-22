@@ -289,11 +289,11 @@ def kitchen_violation_list():
     })
 
 
-@kitchen_violations_bp.patch("/api/public/kitchen-violations/<int:record_id>/close")
+@kitchen_violations_bp.route("/api/public/kitchen-violations/<int:record_id>/close", methods=["PATCH", "POST"])
 def kitchen_violation_close(record_id):
     if not _token("view"):
         return jsonify({"error": "رابط متابعة المخالفات غير صالح"}), 403
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True) or request.form.to_dict() or {}
     action_note = str(body.get("action_note") or "").strip()[:2000]
     if not action_note:
         return jsonify({"error": "اكتب الإجراء الذي تم اتخاذه أولًا"}), 400

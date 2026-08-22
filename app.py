@@ -158,7 +158,7 @@ def _ensure_cors_headers(response):
     if origin:
         response.headers.setdefault('Access-Control-Allow-Origin', origin)
         response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token, X-Invoice-Receipt-Token, X-Kitchen-Violation-Token')
-        response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
         response.headers.setdefault('Access-Control-Expose-Headers', 'X-Match-Report, X-Decision-Report, X-Day-Operations-Report, Content-Disposition')
     return response
 
