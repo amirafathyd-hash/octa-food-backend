@@ -39,6 +39,22 @@
         }
       ]
     },
+    "Sautee Vegetables (1)": {
+      "groups": [
+        {
+          "aliases": [
+            "Sauteed vegetables",
+            "خضار سوتيه"
+          ]
+        },
+        {
+          "aliases": [
+            "Spicy sauteed vegetables",
+            "خضار سوتيه 🌶"
+          ]
+        }
+      ]
+    },
     "BBQ Chicken": {
       "groups": [
         {
