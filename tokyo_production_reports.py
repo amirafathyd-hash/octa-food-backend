@@ -24,6 +24,7 @@ from tokyo_ordering import (
     DAY_NAMES,
     merge_day_into_template,
     read_day_file_payload,
+    read_day_file_shifts,
     validate_raw_targets_for_day,
 )
 
@@ -194,7 +195,7 @@ def _page_setup(ws, day_no: int, section: str) -> None:
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.page_margins.left = 0.4 if section in {'batch', 'special', 'marination'} else 0.5
+    ws.page_margins.left = 0.4 if section in {'batch', 'special', 'marination', 'production'} else 0.5
     ws.page_margins.right = ws.page_margins.left
     ws.page_margins.top = 1.0
     ws.page_margins.bottom = 0.5
@@ -222,7 +223,15 @@ def _make_block_workbook(source: Path, values_path: Path, destination: Path,
         ws = wb[name]
         wsv = values[name]
         ranges = []
-        if section == 'batch':
+        if section == 'production':
+            # Keep the recipe order from All_Ingredients. Each recipe prints
+            # either its calculated batch table(s), or its special table when
+            # that recipe does not use the standard batch layout.
+            ranges = _batch_ranges(wsv)
+            if not ranges and name in SPECIAL_SHEETS:
+                found = _special_range(wsv)
+                ranges = [found] if found else []
+        elif section == 'batch':
             ranges = _batch_ranges(wsv)
         elif section == 'special' and name in SPECIAL_SHEETS:
             found = _special_range(wsv)
@@ -308,11 +317,130 @@ def _make_libreoffice_copy(source: Path, destination: Path) -> Path:
     return destination
 
 
+def _stamp_selected_day(workbook_path: Path, day_no: int) -> None:
+    wb = load_workbook(workbook_path, keep_vba=True, data_only=False)
+    wb['All_Ingredients']['R1'] = day_no
+    wb['Marination_Ordering']['R1'] = day_no
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.calculation.calcMode = 'auto'
+    wb.save(workbook_path)
+    wb.close()
+
+
+def _render_hot_section_pdf(updated_xlsm: Path, root: Path, day_no: int,
+                            output_name: str, ordered=False):
+    render_root = root / Path(output_name).stem.replace(' ', '_')
+    render_root.mkdir(parents=True, exist_ok=True)
+    calculation_source = _make_libreoffice_copy(
+        updated_xlsm, render_root / 'calculation-source.xlsx'
+    )
+    recalculated = _run_soffice(
+        calculation_source, render_root / 'recalculated', 'xlsx'
+    )
+    values = load_workbook(recalculated, data_only=False, read_only=False)
+    hot_sheets = _day_sheets(values, 'All_Ingredients', day_no)
+    values.close()
+
+    blocks = []
+    counts = {}
+    sections = ('production', 'actuals', 'garnish') if ordered else (
+        'batch', 'special', 'actuals', 'garnish'
+    )
+    for section in sections:
+        block_book = render_root / f'{section}.xlsx'
+        try:
+            block_book, page_count = _make_block_workbook(
+                recalculated, recalculated, block_book, day_no, section, hot_sheets
+            )
+            block_pdf = _run_soffice(block_book, render_root / 'pdf', 'pdf')
+            blocks.append(block_pdf)
+            counts[section] = page_count
+        except RuntimeError as exc:
+            if 'لا توجد جداول قابلة للطباعة' not in str(exc):
+                raise
+            counts[section] = 0
+
+    if not blocks:
+        raise RuntimeError('لا توجد أي جداول Hot Section قابلة للطباعة لليوم المختار')
+    hot_pdf = _merge_pdfs(blocks, root / output_name)
+    return hot_pdf, hot_sheets, counts
+
+
+def _split_safety_values(safety_overrides, shift):
+    if not isinstance(safety_overrides, dict):
+        return safety_overrides
+    nested = safety_overrides.get(shift)
+    return nested if isinstance(nested, dict) else safety_overrides
+
+
+def _merge_sheet1_snapshot(template_path, day_no, meals, safety_overrides):
+    return merge_day_into_template(
+        template_path,
+        day_no,
+        meals,
+        safety_overrides=safety_overrides,
+        zero_missing=True,
+        # Sheet1 is authoritative. Never fall back to the old AQ labels;
+        # those labels can belong to a previous operating-day layout.
+        allow_legacy_aq_fallback=False,
+        # Jollof has no standalone row in the supplied Sheet1. Preserve its
+        # configured master input instead of stealing another meal's value.
+        preserve_missing_sheets={'Jollof Sauce'},
+    )
+
+
 def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str | None = None,
                             safety_overrides=None):
     """Return ``(zip_path, updated_xlsm, report)`` for one uploaded day file."""
     root = Path(output_dir or tempfile.mkdtemp(prefix='tokyo-day-reports-'))
     root.mkdir(parents=True, exist_ok=True)
+
+    split_result = read_day_file_shifts(uploaded_file)
+    if split_result:
+        day_no, shifts, input_report = split_result
+
+        # Persist one total master after both shift reports have been built.
+        updated_xlsm, match_report = _merge_sheet1_snapshot(
+            template_path, day_no, shifts['total'], safety_overrides
+        )
+        updated_xlsm = Path(updated_xlsm)
+        _stamp_selected_day(updated_xlsm, day_no)
+
+        shift_files = []
+        shift_reports = {}
+        for shift, label in (('morning', 'Morning'), ('evening', 'Evening')):
+            shift_xlsm, shift_match = _merge_sheet1_snapshot(
+                template_path,
+                day_no,
+                shifts[shift],
+                _split_safety_values(safety_overrides, shift),
+            )
+            shift_xlsm = Path(shift_xlsm)
+            _stamp_selected_day(shift_xlsm, day_no)
+            pdf_name = f'Day{day_no}_Hot Section {label}.pdf'
+            hot_pdf, hot_sheets, counts = _render_hot_section_pdf(
+                shift_xlsm, root, day_no, pdf_name, ordered=True
+            )
+            shift_files.append(hot_pdf)
+            shift_reports[shift] = {
+                'matched_count': shift_match.get('matched_count', 0),
+                'hot_sheets': len(hot_sheets),
+                'pages': {**counts, 'hot_total': sum(counts.values())},
+            }
+
+        zip_path = root / f'Tokyo_Production_Day{day_no}_Morning_Evening.zip'
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            for output in shift_files:
+                archive.write(output, output.name)
+
+        report = {
+            **match_report,
+            'input': input_report,
+            'split': shift_reports,
+            'files': [output.name for output in shift_files],
+        }
+        return str(zip_path), str(updated_xlsm), report
 
     day_no, meals, input_report = read_day_file_payload(uploaded_file)
     if input_report.get('kind') == 'repeat_update':
@@ -329,43 +457,12 @@ def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str |
     )
     updated_xlsm = Path(updated_xlsm)
 
-    wb = load_workbook(updated_xlsm, keep_vba=True, data_only=False)
-    wb['All_Ingredients']['R1'] = day_no
-    wb['Marination_Ordering']['R1'] = day_no
-    wb.calculation.fullCalcOnLoad = True
-    wb.calculation.forceFullCalc = True
-    wb.calculation.calcMode = 'auto'
-    wb.save(updated_xlsm)
-    wb.close()
-
-    calculation_source = _make_libreoffice_copy(updated_xlsm, root / 'calculation-source.xlsx')
-    recalculated_dir = root / 'recalculated'
-    recalculated = _run_soffice(calculation_source, recalculated_dir, 'xlsx')
-    values = load_workbook(recalculated, data_only=False, read_only=False)
-    hot_sheets = _day_sheets(values, 'All_Ingredients', day_no)
-    values.close()
-
-    blocks = []
-    counts = {}
-    for section in ('batch', 'special', 'actuals', 'garnish'):
-        block_book = root / f'{section}.xlsx'
-        try:
-            block_book, page_count = _make_block_workbook(
-                recalculated, recalculated, block_book, day_no, section, hot_sheets
-            )
-            block_pdf = _run_soffice(block_book, root / 'pdf', 'pdf')
-            blocks.append(block_pdf)
-            counts[section] = page_count
-        except RuntimeError as exc:
-            if 'لا توجد جداول قابلة للطباعة' not in str(exc):
-                raise
-            counts[section] = 0
-
-    if not blocks:
-        raise RuntimeError('لا توجد أي جداول Hot Section قابلة للطباعة لليوم المختار')
+    _stamp_selected_day(updated_xlsm, day_no)
 
     day_name = DAY_NAMES.get(day_no, f'Day {day_no}')
-    hot_pdf = _merge_pdfs(blocks, root / f'Tokyo_Hot_Section_Day{day_no}.pdf')
+    hot_pdf, hot_sheets, counts = _render_hot_section_pdf(
+        updated_xlsm, root, day_no, f'Tokyo_Hot_Section_Day{day_no}.pdf'
+    )
     final_xlsm = root / f'Tokyo_Ordering_Updated_Day{day_no}.xlsm'
     shutil.copyfile(updated_xlsm, final_xlsm)
 

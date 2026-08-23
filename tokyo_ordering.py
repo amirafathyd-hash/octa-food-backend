@@ -27,6 +27,20 @@ SAFETY_COL = 39   # AM
 # the English tab name. Values are searched in both Arabic and English names
 # read from the daily workbook.
 SHEET_INPUT_ALIASES = {
+    # Day 1 / Sheet1 operational labels.
+    'Curry Chicken': ['Curry Chicken', 'دجاج بالكاري'],
+    'Kabsa Lahm': ['Kabsa Lahm', 'كبسة لحم'],
+    'Pan Fried Fish': ['Pan Fried Fish', 'بان فرايد فش', 'بان فرايد فيش'],
+    'Beef Chilli Dry': ['Beef Chilli Dry', 'بيف شيلي دراي'],
+    'Meat with Bamiya': ['Meat with Bamiya', 'بامية لحم'],
+    'Chinese Chicken': ['Chinese Chicken', 'دجاج صيني'],
+    'Herbal Chicken': ['Herbal Chicken', 'دجاج بالأعشاب', 'دجاج بالاعشاب'],
+    'Arabic Chicken Burger': ['Arabic Chicken Burger', 'برجر الدجاج العربي'],
+    'Chicken Mandi (1)': ['Chicken Mandi', 'مندي دجاج'],
+    'Asian Potato Cubes': ['Asian Potato Cubes', 'بطاطس مكعبات الآسيوي'],
+    'Herbal Potato Wedges': ['Herbal Potato Wedges', 'البطاطا'],
+    'Spaghetti pasta': ['Spaghetti pasta', 'المكرونة'],
+    'Mached Potato(1)': ['Mashed potato', 'البطاطس المهروسة'],
     'Almond Chicken': ['Almond chicken in the oven with potato wedges', 'دجاج باللوز في الفرن'],
     'Pasta with Vegetable(Pasta)': ['Chicken pasta with vegetables', 'دجاج مكروني بالخضار'],
     'Daoud Basha': ['Daoud Basha with saffron rice', 'داوود باشا'],
@@ -515,14 +529,158 @@ def _number(value):
 
 def _day_no_from_filename(filename):
     match = re.search(r'(20\d{2})[-_/](\d{1,2})[-_/](\d{1,2})', filename or '')
-    if not match:
-        raise ValueError('اسم ملف ابديت تكرار لازم يحتوي على التاريخ بصيغة YYYY-MM-DD لتحديد يوم توكيو')
-    date_value = datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    date_value = None
+    if match:
+        date_value = datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    if date_value is None:
+        text = str(filename or '')
+        month_names = {
+            'jan': 1, 'january': 1, 'feb': 2, 'february': 2,
+            'mar': 3, 'march': 3, 'apr': 4, 'april': 4,
+            'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+            'aug': 8, 'august': 8, 'sep': 9, 'september': 9,
+            'oct': 10, 'october': 10, 'nov': 11, 'november': 11,
+            'dec': 12, 'december': 12,
+        }
+        named = re.search(r'\b(\d{1,2})\s+([A-Za-z]+)\s+(20\d{2})\b', text)
+        if named and named.group(2).casefold() in month_names:
+            date_value = datetime(
+                int(named.group(3)), month_names[named.group(2).casefold()],
+                int(named.group(1)),
+            )
+    if date_value is None:
+        weekday_map = {
+            'sat': 1, 'saturday': 1, 'السبت': 1,
+            'sun': 2, 'sunday': 2, 'الأحد': 2, 'الاحد': 2,
+            'mon': 3, 'monday': 3, 'الاثنين': 3, 'الإثنين': 3,
+            'tue': 4, 'tuesday': 4, 'الثلاثاء': 4,
+            'wed': 5, 'wednesday': 5, 'الأربعاء': 5, 'الاربعاء': 5,
+            'thu': 6, 'thursday': 6, 'الخميس': 6,
+        }
+        lowered = str(filename or '').casefold()
+        for label, day_no in weekday_map.items():
+            if re.search(rf'(?<![\w]){re.escape(label)}(?![\w])', lowered):
+                return day_no
+        raise ValueError('اسم الملف لا يحتوي على تاريخ أو يوم واضح لتحديد يوم توكيو')
     # Python: Monday=0. Tokyo: Saturday=1 ... Thursday=6.
     day_no = {5: 1, 6: 2, 0: 3, 1: 4, 2: 5, 3: 6}.get(date_value.weekday())
     if not day_no:
         raise ValueError('ملف يوم الجمعة غير مدعوم في خطة توكيو الحالية')
     return day_no
+
+
+def _find_sheet1_shift_layout(wb):
+    if 'Sheet1' not in wb.sheetnames:
+        return None
+    ws = wb['Sheet1']
+    for header_row in range(1, min(ws.max_row, 15) + 1):
+        labels = {
+            str(ws.cell(header_row, column).value or '').strip().casefold(): column
+            for column in range(1, ws.max_column + 1)
+        }
+        required = {
+            'recipe', 'final morning count', 'final morning grams',
+            'final evening count', 'final evening grams',
+        }
+        if required.issubset(labels):
+            return ws, header_row, {
+                'recipe': labels['recipe'],
+                'morning_count': labels['final morning count'],
+                'morning_grams': labels['final morning grams'],
+                'evening_count': labels['final evening count'],
+                'evening_grams': labels['final evening grams'],
+            }
+    return None
+
+
+def _add_shift_value(target, name, count, grams):
+    clean_name = str(name or '').strip()
+    if not clean_name or clean_name == '-':
+        return
+    count = _number(count)
+    grams = _number(grams)
+    if count <= 0 and grams <= 0:
+        return
+    old_count, old_grams = target.get(clean_name, (0.0, 0.0))
+    target[clean_name] = (old_count + count, old_grams + grams)
+
+
+def _add_day1_derived_inputs(meals):
+    """Add component recipes that do not have a standalone Sheet1 row."""
+    normalized = {_normalize_meal_name(name): value for name, value in meals.items()}
+    asian_count = 0.0
+    for aliases in _load_recipe_input_groups().get('Asian Chicken Sandwich', []):
+        value, _ = _lookup_meal_value(aliases, meals, normalized)
+        if value is not None:
+            asian_count += _number(value[0])
+    if asian_count > 0:
+        # Tokyo's Asian potato side is 90 grams per sandwich.
+        meals['Asian Potato Cubes'] = (asian_count, asian_count * 90.0)
+    # Jollof is a fixed Day-1 production component in the approved Hot
+    # Section output, but it has no standalone row in Sheet1. Keep the
+    # approved operational batch instead of reading an unrelated legacy AQ
+    # label from the master workbook.
+    meals['Jollof Sauce'] = (0.0, 18170.0)
+
+
+def _read_sheet1_shifts(wb, file_storage, fallback_day_no=None):
+    layout = _find_sheet1_shift_layout(wb)
+    if not layout:
+        return None
+    ws, header_row, columns = layout
+    upload_name = (
+        getattr(file_storage, 'filename', '') or
+        os.path.basename(getattr(file_storage, 'name', '') or '')
+    )
+    try:
+        day_no = _day_no_from_filename(upload_name)
+    except ValueError:
+        day_no = int(_number(fallback_day_no)) if fallback_day_no else 0
+        if day_no not in DAY_NAMES:
+            raise
+
+    morning, evening = {}, {}
+    for row in range(header_row + 1, ws.max_row + 1):
+        name = ws.cell(row, columns['recipe']).value
+        _add_shift_value(
+            morning, name,
+            ws.cell(row, columns['morning_count']).value,
+            ws.cell(row, columns['morning_grams']).value,
+        )
+        _add_shift_value(
+            evening, name,
+            ws.cell(row, columns['evening_count']).value,
+            ws.cell(row, columns['evening_grams']).value,
+        )
+    if not morning and not evening:
+        raise ValueError('شيت Sheet1 لا يحتوي على بيانات صباحي أو مسائي')
+    _add_day1_derived_inputs(morning)
+    _add_day1_derived_inputs(evening)
+    total = {}
+    for source in (morning, evening):
+        for name, (count, grams) in source.items():
+            _add_shift_value(total, name, count, grams)
+    # This is one fixed production batch used by both shifts, not two batches
+    # to be added together in the persisted master snapshot.
+    if 'Jollof Sauce' in total:
+        total['Jollof Sauce'] = (0.0, 18170.0)
+    report = {
+        'kind': 'sheet1_split', 'sheet_name': ws.title,
+        'morning_meals': len(morning), 'evening_meals': len(evening),
+        'source_rows': ws.max_row - header_row,
+    }
+    return day_no, {'morning': morning, 'evening': evening, 'total': total}, report
+
+
+def read_day_file_shifts(file_storage, fallback_day_no=None):
+    """Read the authoritative Morning/Evening values from Sheet1."""
+    file_storage.seek(0)
+    wb = load_workbook(file_storage, data_only=True, read_only=True)
+    try:
+        return _read_sheet1_shifts(wb, file_storage, fallback_day_no)
+    finally:
+        wb.close()
+        file_storage.seek(0)
 
 
 def _find_repeat_update_sheet(wb):
@@ -682,6 +840,16 @@ def read_day_file_payload(file_storage, fallback_day_no=None):
     - أو يحول ملف "ابديت تكرار" الخام إلى وصفات توكيو أولًا."""
     file_storage.seek(0)
     wb = load_workbook(file_storage, data_only=True, read_only=True)
+    split_result = _read_sheet1_shifts(wb, file_storage, fallback_day_no)
+    if split_result:
+        day_no, shifts, report = split_result
+        wb.close()
+        file_storage.seek(0)
+        report['shifts'] = {
+            'morning': len(shifts['morning']),
+            'evening': len(shifts['evening']),
+        }
+        return day_no, shifts['total'], report
     if 'Update' not in wb.sheetnames:
         raw_result = _read_repeat_update(wb, file_storage)
         wb.close()
@@ -939,7 +1107,9 @@ def _aggregate_recipe_inputs(sheet_name, meals_by_name, norm_lookup):
 
 
 def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
-                            safety_overrides=None, zero_missing=False):
+                            safety_overrides=None, zero_missing=False,
+                            allow_legacy_aq_fallback=True,
+                            preserve_missing_sheets=None):
     """بتاخد قاموس {اسم الصنف: (count, grams)} من ملف يوم واحد، وتحدّث بيه
     صفوف نفس اليوم (AJ=day_no) بس في شيت All_Ingredients، بالمطابقة على
     عمود AQ (Meal name). بترجع (out_path, report) - الـreport بيوضح كل صنف
@@ -960,6 +1130,7 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
             raise ValueError(f'قيمة Safety لا يمكن أن تكون سالبة للصف {row_no}')
         clean_safety[row_no] = number
 
+    preserve_missing_sheets = set(preserve_missing_sheets or ())
     matched, unmatched, zeroed = [], [], []
     applied_safety = []
     for r in range(2, ws.max_row + 1):
@@ -993,12 +1164,15 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
 
         # Last-resort compatibility for older templates whose AQ mapping is
         # known to be correct. It intentionally comes after recipe-name match.
-        if found is None:
+        if found is None and allow_legacy_aq_fallback:
             if key in meals_by_name:
                 found, matched_input = meals_by_name[key], key
             elif norm_key in norm_lookup:
                 found, matched_input = norm_lookup[norm_key], key
         if found is None:
+            if sheet_name in preserve_missing_sheets:
+                unmatched.append(sheet_name or key)
+                continue
             if zero_missing:
                 ws.cell(row=r, column=COUNT_COL, value=0)
                 ws.cell(row=r, column=GRAMS_COL, value=0)
