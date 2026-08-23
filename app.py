@@ -36,6 +36,7 @@ from tokyo_ordering import (
     UnmappedTokyoMealsError,
     list_tokyo_recipe_sheet_names,
     read_day_file_payload,
+    read_day_file_shifts,
     read_day_safety_fields,
     save_raw_tokyo_mappings,
     validate_raw_targets_for_day,
@@ -669,6 +670,29 @@ def tokyo_production_analyze_day():
     if not uploaded:
         return jsonify({'error': 'ارفع ملف اليوم بصيغة Excel'}), 400
     try:
+        split_result = read_day_file_shifts(uploaded)
+        if split_result:
+            day_no, shifts, input_report = split_result
+            fields = read_day_safety_fields(TOKYO_TEMPLATE_PATH, day_no)
+            return jsonify({
+                'day_no': day_no,
+                'day_name': DAY_NAMES.get(day_no, str(day_no)),
+                'meal_count': len(shifts['total']),
+                # Keep this field for older frontend versions while exposing
+                # two independent Safety groups to the current interface.
+                'safety_fields': fields,
+                'safety_mode': 'split',
+                'safety_groups': {
+                    'morning': fields,
+                    'evening': fields,
+                },
+                'shift_meal_counts': {
+                    'morning': len(shifts['morning']),
+                    'evening': len(shifts['evening']),
+                },
+                'input': input_report,
+            })
+
         day_no, meals, input_report = read_day_file_payload(uploaded)
         if input_report.get('kind') == 'repeat_update':
             validate_raw_targets_for_day(TOKYO_TEMPLATE_PATH, day_no, meals)

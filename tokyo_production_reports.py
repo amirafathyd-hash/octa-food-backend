@@ -374,6 +374,24 @@ def _split_safety_values(safety_overrides, shift):
     return nested if isinstance(nested, dict) else safety_overrides
 
 
+def _total_safety_values(safety_overrides):
+    """Combine independent shift Safety values for the persisted total master."""
+    if not isinstance(safety_overrides, dict):
+        return safety_overrides
+    morning = safety_overrides.get('morning')
+    evening = safety_overrides.get('evening')
+    if not isinstance(morning, dict) and not isinstance(evening, dict):
+        return safety_overrides
+
+    combined = {}
+    for values in (morning, evening):
+        if not isinstance(values, dict):
+            continue
+        for row, value in values.items():
+            combined[row] = combined.get(row, 0.0) + float(value or 0)
+    return combined
+
+
 def _merge_sheet1_snapshot(template_path, day_no, meals, safety_overrides):
     return merge_day_into_template(
         template_path,
@@ -402,7 +420,7 @@ def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str |
 
         # Persist one total master after both shift reports have been built.
         updated_xlsm, match_report = _merge_sheet1_snapshot(
-            template_path, day_no, shifts['total'], safety_overrides
+            template_path, day_no, shifts['total'], _total_safety_values(safety_overrides)
         )
         updated_xlsm = Path(updated_xlsm)
         _stamp_selected_day(updated_xlsm, day_no)
