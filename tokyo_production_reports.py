@@ -9,6 +9,7 @@ Tokyo workbook.
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import subprocess
@@ -18,7 +19,8 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
 
 from tokyo_ordering import (
     DAY_NAMES,
@@ -207,7 +209,10 @@ def _page_setup(ws, day_no: int, section: str) -> None:
         ws.oddHeader.right.text = f'&B&16Day {day_no}  |  Marination'
     else:
         ws.oddHeader.right.text = f'&B&12Day {day_no}'
-    ws.oddFooter.center.text = '&B&10Page &P of &N'
+    # Blocks are exported separately and merged afterwards. Their native
+    # &N value is therefore only the number of pages in that block. Global
+    # numbering is stamped after the final merge instead.
+    ws.oddFooter.center.text = ''
 
 
 def _make_block_workbook(source: Path, values_path: Path, destination: Path,
@@ -227,10 +232,23 @@ def _make_block_workbook(source: Path, values_path: Path, destination: Path,
             # Keep the recipe order from All_Ingredients. Each recipe prints
             # either its calculated batch table(s), or its special table when
             # that recipe does not use the standard batch layout.
-            ranges = _batch_ranges(wsv)
-            if not ranges and name in SPECIAL_SHEETS:
-                found = _special_range(wsv)
-                ranges = [found] if found else []
+            if name == 'Asian Chicken Sandwich':
+                # The original tab contains the sandwich recipe followed by
+                # Instant Marination. LibreOffice collapses multiple print
+                # areas from one sheet into one page, so keep the original tab
+                # for marination and add a dedicated printable copy of the
+                # first table below.
+                ranges = ['B9:H28']
+            elif name == 'Herbal Chicken':
+                # This recipe's production table lives in the lower printable
+                # block and has no standard batch marker. Keep it as its own
+                # production page so the morning report stays at 41 pages.
+                ranges = ['A62:H65']
+            else:
+                ranges = _batch_ranges(wsv)
+                if not ranges and name in SPECIAL_SHEETS:
+                    found = _special_range(wsv)
+                    ranges = [found] if found else []
         elif section == 'batch':
             ranges = _batch_ranges(wsv)
         elif section == 'special' and name in SPECIAL_SHEETS:
@@ -251,14 +269,16 @@ def _make_block_workbook(source: Path, values_path: Path, destination: Path,
         ws.print_area = ranges
         _page_setup(ws, day_no, section)
         included.append(name)
-        page_total += len(ranges)
+        # LibreOffice exports each included worksheet as one physical page in
+        # these fitted report blocks, even when the worksheet has several
+        # contiguous print ranges.
+        page_total += 1
 
     if not included:
         wb.close()
         values.close()
         raise RuntimeError(f'لا توجد جداول قابلة للطباعة في قسم {section} لليوم المختار')
 
-    included_set = set(included)
     # LibreOffice includes hidden sheets in whole-workbook PDF export. Freeze
     # the already-calculated values in the selected recipe sheets, then remove
     # non-selected tabs from this disposable print copy. The source XLSM and
@@ -270,6 +290,25 @@ def _make_block_workbook(source: Path, values_path: Path, destination: Path,
             for cell in row:
                 if isinstance(cell.value, str) and cell.value.startswith('='):
                     cell.value = value_ws[cell.coordinate].value
+
+    if section == 'production' and 'Asian Chicken Sandwich' in included:
+        # Make the first recipe table its own worksheet and place it directly
+        # before the original marination worksheet. Copying after formulas are
+        # frozen guarantees that both pages use the same calculated snapshot.
+        marination_ws = wb['Asian Chicken Sandwich']
+        recipe_ws = wb.copy_worksheet(marination_ws)
+        recipe_ws.title = 'Asian Sandwich Recipe'
+        recipe_ws.print_area = 'B2:H8'
+        _page_setup(recipe_ws, day_no, section)
+        recipe_ws.oddHeader.center.text = '&B&16Asian Chicken Sandwich'
+
+        wb._sheets.remove(recipe_ws)
+        marination_index = wb._sheets.index(marination_ws)
+        wb._sheets.insert(marination_index, recipe_ws)
+        included.insert(included.index('Asian Chicken Sandwich'), recipe_ws.title)
+        page_total += 1
+
+    included_set = set(included)
     for ws in list(wb.worksheets):
         if ws.title not in included_set:
             wb.remove(ws)
@@ -290,7 +329,36 @@ def _merge_pdfs(paths: list[Path], destination: Path) -> Path:
     with destination.open('wb') as handle:
         writer.write(handle)
     writer.close()
+    _stamp_global_page_numbers(destination)
     return destination
+
+
+def _stamp_global_page_numbers(pdf_path: Path) -> None:
+    """Stamp one continuous ``Page X of N`` footer on the merged PDF."""
+    source = PdfReader(io.BytesIO(pdf_path.read_bytes()))
+    writer = PdfWriter()
+    total = len(source.pages)
+
+    for page_no, page in enumerate(source.pages, start=1):
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        overlay_stream = io.BytesIO()
+        overlay_canvas = canvas.Canvas(overlay_stream, pagesize=(width, height))
+        overlay_canvas.setFont('Helvetica-Bold', 8)
+        overlay_canvas.drawCentredString(
+            width / 2.0, 15.0, f'Page {page_no} of {total}'
+        )
+        overlay_canvas.save()
+        overlay_stream.seek(0)
+        overlay = PdfReader(overlay_stream).pages[0]
+        page.merge_page(overlay)
+        writer.add_page(page)
+
+    temporary = pdf_path.with_suffix('.numbered.tmp.pdf')
+    with temporary.open('wb') as handle:
+        writer.write(handle)
+    writer.close()
+    temporary.replace(pdf_path)
 
 
 def _make_libreoffice_copy(source: Path, destination: Path) -> Path:

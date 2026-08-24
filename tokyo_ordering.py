@@ -12,6 +12,7 @@ import tempfile
 import os
 import re
 import json
+import math
 from datetime import datetime
 from openpyxl import load_workbook
 
@@ -22,6 +23,10 @@ SHEET_NAME_COL = 37  # AK
 COUNT_COL = 44    # AR
 GRAMS_COL = 45    # AS
 SAFETY_COL = 39   # AM
+
+ASIAN_POTATO_GRAMS_PER_PORTION = 90.0
+ASIAN_POTATO_BATCH_GRAMS = 1400.0
+ASIAN_POTATO_SAFETY_ROUNDING_GRAMS = 10.0
 
 # Recipe tabs whose operational upload name is deliberately different from
 # the English tab name. Values are searched in both Arabic and English names
@@ -623,6 +628,36 @@ def _add_day1_derived_inputs(meals):
     meals['Jollof Sauce'] = (0.0, 18170.0)
 
 
+def _write_recipe_control_inputs(recipe, sheet_name, count, grams, safety):
+    """Write the controls expected by each recipe tab.
+
+    Most recipe tabs use ``Z1`` as a gram input. Asian Potato Cubes is the
+    exception: its own formulas multiply ``Z1`` and ``AB1`` by the 90-gram
+    side portion, so writing the already-derived gram value there multiplies
+    the result by 90 a second time.
+
+    For that derived side, Safety is an operational percentage of its 1.4kg
+    base batch. The extra is rounded up to the next 10 grams, matching the
+    approved production figure (4,230g base + Safety 3 = 4,280g).
+    """
+    if sheet_name == 'Asian Potato Cubes':
+        base_count = _number(count)
+        safety_percent = max(0.0, _number(safety))
+        safety_grams = 0.0
+        if safety_percent:
+            unrounded = ASIAN_POTATO_BATCH_GRAMS * safety_percent / 100.0
+            safety_grams = (
+                math.ceil(unrounded / ASIAN_POTATO_SAFETY_ROUNDING_GRAMS)
+                * ASIAN_POTATO_SAFETY_ROUNDING_GRAMS
+            )
+        recipe['Z1'] = base_count
+        recipe['AB1'] = safety_grams / ASIAN_POTATO_GRAMS_PER_PORTION
+    elif grams is not None:
+        recipe['Z1'] = float(grams)
+    if count is not None:
+        recipe['AD1'] = float(count)
+
+
 def _read_sheet1_shifts(wb, file_storage, fallback_day_no=None):
     layout = _find_sheet1_shift_layout(wb)
     if not layout:
@@ -1194,10 +1229,13 @@ def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
         # ننقل القيم مباشرة من غير تغيير أي معادلة أو تنسيق في الوصفة.
         if sheet_name in wb.sheetnames:
             recipe = wb[sheet_name]
-            if grams is not None:
-                recipe['Z1'] = float(grams)
-            if count is not None:
-                recipe['AD1'] = float(count)
+            _write_recipe_control_inputs(
+                recipe,
+                sheet_name,
+                count,
+                grams,
+                ws.cell(row=r, column=SAFETY_COL).value,
+            )
         matched.append({
             'row': r, 'name': sheet_name or key, 'input_name': matched_input,
             'count': count, 'grams': grams,
