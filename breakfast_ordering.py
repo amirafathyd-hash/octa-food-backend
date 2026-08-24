@@ -1,8 +1,11 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -177,6 +180,195 @@ def _english_first_title(value):
 
 def _norm_text(value):
     return " ".join(str(value or "").replace("\u00a0", " ").split()).strip().lower()
+
+
+def _norm_recipe_text(value):
+    """Normalize Arabic/English recipe labels without depending on tab names."""
+    text = unicodedata.normalize("NFKC", str(value or "")).lower()
+    text = re.sub(r"[\u064b-\u065f\u0670\u0640]", "", text)
+    text = text.translate(str.maketrans({
+        "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي", "ة": "ه",
+    }))
+    text = re.sub(r"[^0-9a-z\u0600-\u06ff]+", " ", text)
+    return " ".join(text.split()).strip()
+
+
+def _breakfast_aliases(item):
+    sheet = str(item.get("sheet") or "").strip()
+    name = str(item.get("name") or "").strip()
+    aliases = {sheet, name}
+    for value in (sheet, name):
+        aliases.update(part.strip() for part in re.split(r"\s+-\s+|/", value) if part.strip())
+
+    # Known operational wording may differ from the recipe-tab wording while
+    # still referring to the exact same breakfast recipe.
+    operational_aliases = {
+        "foul": {"فول"},
+        "egg and cheese sandwich": {
+            "ساندوتش بيض بالجبن", "ساندوتش بيض بالجبنة", "ساندوتش بيض وجبنة",
+        },
+        "croissant spinach and cheese": {
+            "كرواسون جبنة بالسبانخ", "كرواسون جبنه بالسبانخ",
+            "كروسوان سبانخ وجبنة", "كروسان سبانخ وجبنة",
+        },
+        "club sandwich": {"كلوب ساندوتش", "ساندوتش كلوب"},
+    }
+    aliases.update(operational_aliases.get(sheet.lower(), set()))
+    return {_norm_recipe_text(value) for value in aliases if _norm_recipe_text(value)}
+
+
+def _match_uploaded_recipe(recipe_name, breakfasts):
+    wanted = _norm_recipe_text(recipe_name)
+    if not wanted:
+        return None
+
+    best_item = None
+    best_score = 0.0
+    wanted_tokens = set(wanted.split())
+    for item in breakfasts:
+        for alias in _breakfast_aliases(item):
+            if wanted == alias:
+                return item
+            alias_tokens = set(alias.split())
+            union = wanted_tokens | alias_tokens
+            token_score = len(wanted_tokens & alias_tokens) / len(union) if union else 0.0
+            text_score = SequenceMatcher(None, wanted, alias).ratio()
+            score = max(text_score, token_score)
+            if score > best_score:
+                best_score = score
+                best_item = item
+    return best_item if best_score >= 0.67 else None
+
+
+def _header_index(values, *needles):
+    for index, value in enumerate(values, 1):
+        normalized = _norm_recipe_text(value)
+        if all(needle in normalized for needle in needles):
+            return index
+    return None
+
+
+def _extract_sheet1_shift_counts(upload_path):
+    """Read final morning/evening counts from Sheet1 by semantic headers."""
+    wb = load_workbook(upload_path, data_only=True, read_only=True)
+    try:
+        if "Sheet1" not in wb.sheetnames:
+            raise ValueError("ملف يوم التشغيل لازم يحتوي على التاب Sheet1")
+        ws = wb["Sheet1"]
+        header_row = None
+        recipe_col = morning_col = evening_col = None
+        for row_no in range(1, min(ws.max_row, 20) + 1):
+            values = [ws.cell(row_no, col).value for col in range(1, ws.max_column + 1)]
+            recipe = _header_index(values, "recipe") or _header_index(values, "اسم", "وجبه")
+            morning = (
+                _header_index(values, "final", "morning", "count")
+                or _header_index(values, "نهائي", "صباح", "عدد")
+            )
+            evening = (
+                _header_index(values, "final", "evening", "count")
+                or _header_index(values, "نهائي", "مساء", "عدد")
+            )
+            if recipe and morning and evening:
+                header_row, recipe_col, morning_col, evening_col = row_no, recipe, morning, evening
+                break
+        if header_row is None:
+            raise ValueError(
+                "لم أجد أعمدة Recipe وFinal Morning Count وFinal Evening Count داخل Sheet1"
+            )
+
+        rows = []
+        for row_no in range(header_row + 1, ws.max_row + 1):
+            recipe_name = str(ws.cell(row_no, recipe_col).value or "").strip()
+            if not recipe_name or recipe_name in {"-", "—"}:
+                continue
+            morning = _as_number(ws.cell(row_no, morning_col).value)
+            evening = _as_number(ws.cell(row_no, evening_col).value)
+            if morning is None and evening is None:
+                continue
+            rows.append({
+                "row": row_no,
+                "recipe": recipe_name,
+                "morning": _rounded(morning or 0),
+                "evening": _rounded(evening or 0),
+            })
+        if not rows:
+            raise ValueError("Sheet1 لا يحتوي على أعداد صباحية أو مسائية قابلة للقراءة")
+        return rows
+    finally:
+        wb.close()
+
+
+def _template_day_breakfasts(template_path, day_no):
+    wb = load_workbook(template_path, data_only=True, read_only=True)
+    try:
+        breakfasts = []
+        for entry in _day_recipe_entries(wb, day_no):
+            ws = wb[entry["sheet"]]
+            breakfasts.append({
+                "sheet": entry["sheet"],
+                "row": entry["map_row"],
+                "name": ws["B2"].value or entry["sheet"],
+                "fill": _fill_rgb(ws["B2"]),
+            })
+        return breakfasts
+    finally:
+        wb.close()
+
+
+def analyze_breakfast_shift_upload(file_storage, day_no=1, template_path=BREAKFAST_TEMPLATE_PATH):
+    """Map Sheet1 final counts to the selected breakfast day and split shifts."""
+    if not os.path.exists(template_path):
+        raise FileNotFoundError("ملف Tokyo_Breakfast.xlsm غير موجود في data")
+    suffix = os.path.splitext(file_storage.filename or "")[1].lower()
+    if suffix not in (".xlsx", ".xlsm"):
+        raise ValueError("ملف يوم التشغيل لازم يكون Excel بصيغة XLSX أو XLSM")
+    upload_path = tempfile.NamedTemporaryFile(suffix=suffix, delete=False).name
+    file_storage.seek(0)
+    file_storage.save(upload_path)
+
+    day = max(1, int(_as_number(day_no) or 1))
+    breakfasts = _template_day_breakfasts(template_path, day)
+    source_rows = _extract_sheet1_shift_counts(upload_path)
+    matched = {}
+    unmatched = []
+    for source in source_rows:
+        item = _match_uploaded_recipe(source["recipe"], breakfasts)
+        if not item:
+            unmatched.append({"row": source["row"], "recipe": source["recipe"]})
+            continue
+        matched[item["sheet"]] = source
+
+    if not matched:
+        raise ValueError("لم أجد في Sheet1 وجبات فطار مطابقة لوصفات اليوم المختار")
+
+    shifts = {"morning": [], "evening": []}
+    missing = []
+    for item in breakfasts:
+        source = matched.get(item["sheet"])
+        if source is None:
+            missing.append(item["name"])
+            continue
+        for shift in ("morning", "evening"):
+            base_count = _rounded(source[shift])
+            shifts[shift].append({
+                **item,
+                "base_count": base_count,
+                "required_count": base_count,
+                "safety_count": 0,
+                "final_count": base_count,
+                "source_row": source["row"],
+                "source_recipe": source["recipe"],
+                "shift": shift,
+            })
+
+    return {
+        "day": day,
+        "source_file": os.path.basename(file_storage.filename or "day.xlsx"),
+        "shifts": shifts,
+        "matched_count": len(matched),
+        "missing_recipes": missing,
+        "unmatched_rows": unmatched,
+    }
 
 
 def _extract_uploaded_counts(upload_path, known_breakfasts):

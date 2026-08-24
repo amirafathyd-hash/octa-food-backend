@@ -62,6 +62,7 @@ from dessert_ordering import (
     update_dessert_ordering_from_upload,
 )
 from breakfast_ordering import (
+    analyze_breakfast_shift_upload,
     export_breakfast_excel_with_edits,
     export_breakfast_pdf_with_edits,
     get_breakfast_template_state,
@@ -857,6 +858,22 @@ def breakfast_ordering_replace_template():
         return jsonify({'error': str(exc)}), 500
 
 
+@app.route('/api/breakfast-ordering/analyze-shifts', methods=['POST'])
+def breakfast_ordering_analyze_shifts():
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف يوم التشغيل باسم file'}), 400
+    try:
+        day_no = request.form.get('day_no') or 1
+        state = analyze_breakfast_shift_upload(uploaded, day_no=day_no)
+        return jsonify({'ok': True, 'state': state})
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('breakfast_ordering_analyze_shifts failed')
+        return jsonify({'error': str(exc)}), 500
+
+
 @app.route('/api/breakfast-ordering/recalculate', methods=['POST'])
 def breakfast_ordering_recalculate():
     payload = request.get_json(silent=True) or {}
@@ -875,13 +892,18 @@ def breakfast_ordering_export_pdf():
     payload = request.get_json(silent=True) or {}
     try:
         day_no = payload.get('day_no') or 1
+        shift = str(payload.get('shift') or '').strip().lower()
+        shift_label = {'morning': 'Morning', 'evening': 'Evening'}.get(shift)
         pdf_path, report = export_breakfast_pdf_with_edits(
             payload.get('edits') or [], day_no=day_no
         )
         response = send_file(
             pdf_path,
             as_attachment=True,
-            download_name=f"Day{report['day_no']}_Breakfast.pdf",
+            download_name=(
+                f"Day{report['day_no']}_Breakfast {shift_label}.pdf"
+                if shift_label else f"Day{report['day_no']}_Breakfast.pdf"
+            ),
             mimetype='application/pdf',
         )
         response.headers['X-Breakfast-Pdf-Report'] = json.dumps(report, ensure_ascii=True)
