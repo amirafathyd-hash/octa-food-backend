@@ -143,6 +143,30 @@ def _names_match(left, right):
     return len(overlap) >= max(1, needed - 1)
 
 
+def _names_strict_match(left, right):
+    left_norm = _norm_text(left)
+    right_norm = _norm_text(right)
+    if not left_norm or not right_norm:
+        return left_norm == right_norm
+    if left_norm == right_norm:
+        return True
+
+    left_tokens = _name_tokens(left_norm)
+    right_tokens = _name_tokens(right_norm)
+    if not left_tokens or not right_tokens:
+        return False
+
+    overlap = left_tokens & right_tokens
+    shorter = min(len(left_tokens), len(right_tokens))
+
+    # Sada/Tokyo meal names can contain extra words, but sharing one generic
+    # word like "دجاج" or "برجر" is not enough to trust a cooking weight.  A
+    # non-exact fallback must fully cover the shorter meaningful name.
+    if shorter < 2:
+        return False
+    return len(overlap) == shorter
+
+
 def _arabic_name(ws):
     preferred_cells = ((2, 37), (62, 2), (63, 2), (2, 2), (25, 18))
     for row, col in preferred_cells:
@@ -367,8 +391,8 @@ def _resolve_planned_value(item, value_index, diagnostics):
     related = [
         candidate for candidate in diagnostics
         if candidate.get('component') == wanted_component
-        and (not wanted_detail or _names_match(wanted_detail, candidate.get('detail') or ''))
-        and _names_match(item.get('base') or '', candidate.get('name') or '')
+        and (not wanted_detail or _names_strict_match(wanted_detail, candidate.get('detail') or ''))
+        and _names_strict_match(item.get('base') or '', candidate.get('name') or '')
     ]
     has_batch_specific = any(str(candidate.get('batch') or '').strip() for candidate in related)
 
@@ -380,9 +404,7 @@ def _resolve_planned_value(item, value_index, diagnostics):
             return planned
 
     exact_batch_matches = []
-    same_part_matches = []
     loose_matches = []
-    wanted_part = _batch_part(wanted_batch)
     for candidate in related:
         if candidate.get('component') != wanted_component:
             continue
@@ -390,16 +412,12 @@ def _resolve_planned_value(item, value_index, diagnostics):
         if wanted_batch:
             if candidate_batch == wanted_batch:
                 exact_batch_matches.append(candidate)
-            elif wanted_part is not None and _batch_part(candidate_batch) == wanted_part:
-                same_part_matches.append(candidate)
             elif not candidate_batch and not has_batch_specific:
                 loose_matches.append(candidate)
         else:
             loose_matches.append(candidate)
     if len(exact_batch_matches) == 1:
         return exact_batch_matches[0].get('value')
-    if len(same_part_matches) == 1:
-        return same_part_matches[0].get('value')
     if len(loose_matches) == 1:
         return loose_matches[0].get('value')
     return None
