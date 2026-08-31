@@ -405,7 +405,7 @@ def export_sauce_pdf_with_edits(edits, day_no=1, template_path=SAUCE_TEMPLATE_PA
                     )
                     cell.border = border
                     if isinstance(value, (int, float)):
-                        cell.number_format = "#,##0.##"
+                        cell.number_format = "0%" if col == 6 else "#,##0.##"
                 out_row += 1
 
             ws.column_dimensions["A"].width = 18

@@ -336,7 +336,7 @@ def _pdf_source(calculated_path, day_no):
                     )
                     cell.border = border
                     if isinstance(value, (int, float)):
-                        cell.number_format = '#,##0.##'
+                        cell.number_format = '0%' if column == 6 else '#,##0.##'
                 ws.row_dimensions[output_row].height = 21
                 output_row += 1
 
