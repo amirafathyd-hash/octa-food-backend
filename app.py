@@ -4776,6 +4776,113 @@ def _riyadh_today_date():
     return (datetime.now(timezone.utc) + timedelta(hours=3)).date().isoformat()
 
 
+def _veg_inventory_photo_data_url(file_storage):
+    if not file_storage or not file_storage.filename:
+        return ''
+    mime = (file_storage.mimetype or '').lower()
+    if not mime.startswith('image/'):
+        raise ValueError('ارفع صورة فقط لإثبات المخزون')
+    raw = file_storage.read()
+    if len(raw) > 8 * 1024 * 1024:
+        raise ValueError('الصورة أكبر من 8 ميجا')
+    try:
+        with Image.open(io.BytesIO(raw)) as source_image:
+            image = ImageOps.exif_transpose(source_image)
+            image.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+            if image.mode not in ('RGB', 'L'):
+                background = Image.new('RGB', image.size, 'white')
+                if 'A' in image.getbands():
+                    background.paste(image, mask=image.getchannel('A'))
+                else:
+                    background.paste(image)
+                image = background
+            output = io.BytesIO()
+            image.save(output, format='JPEG', quality=82, optimize=True)
+            return 'data:image/jpeg;base64,' + base64.b64encode(output.getvalue()).decode('ascii')
+    except Exception:
+        return f"data:{mime or 'image/jpeg'};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def _veg_inventory_proofs_for_dates(sb, dates):
+    dates = sorted({str(d or '').strip() for d in dates if str(d or '').strip()})
+    if not dates:
+        return {}
+    result = {}
+    try:
+        res = execute_with_retry(
+            sb.table('upload_log')
+            .select('id,file_name,item_date,message,created_at')
+            .eq('file_type', 'veg_inventory_proof')
+            .in_('item_date', dates)
+            .order('created_at', desc=True)
+        )
+    except Exception:
+        return {}
+    for row in res.data or []:
+        payload = _read_upload_log_message(row)
+        entry_date = str(payload.get('entry_date') or row.get('item_date') or '').strip()
+        item_name = str(payload.get('item_name') or row.get('file_name') or '').strip()
+        if not entry_date or not item_name:
+            continue
+        key = (entry_date, item_name)
+        if key in result:
+            continue
+        result[key] = {
+            'proof_id': row.get('id'),
+            'proof_url': f"/api/veg-inventory/proof/{row.get('id')}",
+            'proof_thumb_url': f"/api/veg-inventory/proof/{row.get('id')}?thumb=1",
+            'proof_updated_at': payload.get('updated_at') or row.get('created_at'),
+        }
+    return result
+
+
+def _veg_inventory_existing_proofs(sb, entry_date):
+    return _veg_inventory_proofs_for_dates(sb, [entry_date])
+
+
+@app.route('/api/veg-inventory/proof/<int:proof_id>', methods=['GET'])
+def veg_inventory_proof_image(proof_id):
+    sb = get_client()
+    res = execute_with_retry(
+        sb.table('upload_log')
+        .select('message')
+        .eq('id', proof_id)
+        .eq('file_type', 'veg_inventory_proof')
+        .limit(1)
+    )
+    rows = res.data or []
+    if not rows:
+        return jsonify({'error': 'الصورة غير موجودة'}), 404
+    data_url = _read_upload_log_message(rows[0]).get('photo_base64') or ''
+    if not data_url:
+        return jsonify({'error': 'الصورة غير موجودة'}), 404
+    try:
+        header, b64data = data_url.split(',', 1)
+        mime = header.split(':')[1].split(';')[0]
+        img_bytes = base64.b64decode(b64data)
+    except Exception:
+        return jsonify({'error': 'الصورة تالفة'}), 400
+    if request.args.get('thumb') in {'1', 'true', 'yes'}:
+        try:
+            with Image.open(io.BytesIO(img_bytes)) as source_image:
+                image = ImageOps.exif_transpose(source_image)
+                image.thumbnail((320, 320), Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                if image.mode not in ('RGB', 'L'):
+                    background = Image.new('RGB', image.size, 'white')
+                    if 'A' in image.getbands():
+                        background.paste(image, mask=image.getchannel('A'))
+                    else:
+                        background.paste(image)
+                    image = background
+                image.save(output, format='JPEG', quality=78, optimize=True)
+                img_bytes = output.getvalue()
+                mime = 'image/jpeg'
+        except Exception:
+            pass
+    return send_file(io.BytesIO(img_bytes), mimetype=mime, download_name=f'veg-proof-{proof_id}.jpg', max_age=3600)
+
+
 @app.route('/api/veg-inventory/items', methods=['GET'])
 def veg_inventory_items_list():
     """قايمة الأصناف الثابتة (خضروات/أعشاب/فواكه) بالترتيب - للعامل بتوكينه."""
@@ -4911,10 +5018,16 @@ def veg_inventory_today_get():
         .eq('entry_date', today)
     )
     rows = res.data or []
+    proofs = _veg_inventory_existing_proofs(sb, today)
     last_updated = max((r['updated_at'] for r in rows), default=None)
     return jsonify({
         'date': today,
         'entries': {r['item_name']: r['remaining_stock'] for r in rows},
+        'proofs': {
+            name: proof
+            for (entry_date, name), proof in proofs.items()
+            if entry_date == today
+        },
         'last_updated': last_updated,
     })
 
@@ -4925,14 +5038,36 @@ def veg_inventory_today_save():
     { "token": "...", "entries": { "اسم الصنف": 1200, ... } }"""
     if not _veg_inventory_worker_ok():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
-    payload = request.get_json(silent=True) or {}
+    if request.content_type and request.content_type.startswith('multipart/form-data'):
+        try:
+            payload = json.loads(request.form.get('payload') or '{}')
+        except Exception:
+            return jsonify({'error': 'بيانات الحفظ غير صحيحة'}), 400
+    else:
+        payload = request.get_json(silent=True) or {}
     entries = payload.get('entries') or {}
+    photo_keys = payload.get('photo_keys') or {}
     if not isinstance(entries, dict) or not entries:
         return jsonify({'error': 'مفيش قيم للحفظ'}), 400
 
     today = _riyadh_today_date()
     now = datetime.now(timezone.utc).isoformat()
+    sb = get_client()
+    existing_proofs = _veg_inventory_existing_proofs(sb, today)
+    try:
+        existing_entries_res = execute_with_retry(
+            sb.table('veg_inventory_entries')
+            .select('item_name,remaining_stock')
+            .eq('entry_date', today)
+        )
+        existing_entries = {
+            str(row.get('item_name') or ''): row.get('remaining_stock')
+            for row in existing_entries_res.data or []
+        }
+    except Exception:
+        existing_entries = {}
     rows = []
+    proof_rows = []
     for item_name, value in entries.items():
         if value is None or str(value).strip() == '':
             continue
@@ -4940,16 +5075,55 @@ def veg_inventory_today_save():
             val = float(value)
         except (TypeError, ValueError):
             return jsonify({'error': f'قيمة غير صحيحة للصنف "{item_name}"'}), 400
+        field_name = str(photo_keys.get(item_name) or '').strip()
+        photo_file = request.files.get(field_name) if field_name else None
+        photo_base64 = ''
+        if photo_file and photo_file.filename:
+            try:
+                photo_base64 = _veg_inventory_photo_data_url(photo_file)
+            except ValueError as exc:
+                return jsonify({'error': f'{item_name}: {exc}'}), 400
+        old_value = existing_entries.get(item_name)
+        try:
+            value_changed = old_value is None or abs(float(old_value) - val) > 0.000001
+        except (TypeError, ValueError):
+            value_changed = True
+        elif_missing_or_changed = not existing_proofs.get((today, item_name)) or value_changed
+        if not photo_base64 and elif_missing_or_changed:
+            return jsonify({'error': f'ارفع صورة إثبات للصنف "{item_name}" قبل الحفظ'}), 400
         rows.append({'entry_date': today, 'item_name': item_name, 'remaining_stock': val, 'updated_at': now})
+        if photo_base64:
+            proof_rows.append({
+                'file_type': 'veg_inventory_proof',
+                'file_name': item_name,
+                'item_date': today,
+                'message': json.dumps({
+                    'entry_date': today,
+                    'item_name': item_name,
+                    'remaining_stock': val,
+                    'photo_base64': photo_base64,
+                    'updated_at': now,
+                }, ensure_ascii=False),
+                'level': 'info',
+            })
 
     if not rows:
         return jsonify({'error': 'مفيش قيم صحيحة للحفظ'}), 400
 
-    sb = get_client()
     try:
         execute_with_retry(
             sb.table('veg_inventory_entries').upsert(rows, on_conflict='entry_date,item_name')
         )
+        for proof in proof_rows:
+            execute_with_retry(
+                sb.table('upload_log')
+                .delete()
+                .eq('file_type', 'veg_inventory_proof')
+                .eq('item_date', today)
+                .eq('file_name', proof['file_name'])
+            )
+        if proof_rows:
+            execute_with_retry(sb.table('upload_log').insert(proof_rows))
     except Exception as e:
         return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
     return jsonify({'ok': True, 'date': today, 'updated_at': now, 'count': len(rows)})
@@ -4969,7 +5143,13 @@ def veg_inventory_list_all():
     items_res = execute_with_retry(
         sb.table('veg_inventory_items').select('item_name, category, unit').order('sort_order')
     )
-    return jsonify({'entries': entries_res.data or [], 'items': items_res.data or []})
+    entries = entries_res.data or []
+    proofs = _veg_inventory_proofs_for_dates(sb, [r.get('entry_date') for r in entries])
+    for row in entries:
+        proof = proofs.get((str(row.get('entry_date') or ''), str(row.get('item_name') or '')))
+        if proof:
+            row.update(proof)
+    return jsonify({'entries': entries, 'items': items_res.data or []})
 
 
 @app.route('/api/veg-inventory/entry/<int:entry_id>', methods=['PUT'])
