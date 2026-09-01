@@ -13,7 +13,7 @@ BUNDLED_TEMPLATE_PATH = os.path.join(APP_DIR, 'tokyo_ordering_template.xlsm')
 BUNDLED_BASELINE_PATH = os.path.join(APP_DIR, 'tokyo_template_baseline.json')
 BUNDLED_DESSERT_TEMPLATE_PATH = os.path.join(APP_DIR, 'data', 'Tokyo_Dessert_Ordering.xlsm')
 DESSERT_TEMPLATE_REVISION = '20260816-day3-profiterole'
-TOKYO_TEMPLATE_REVISION = '20260816-w3-day4-explicit-mapping'
+TOKYO_TEMPLATE_REVISION = '20260831-sep-w1-master'
 
 
 def _persistent_dir():

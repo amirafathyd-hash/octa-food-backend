@@ -689,8 +689,9 @@ def _read_sheet1_shifts(wb, file_storage, fallback_day_no=None):
         )
     if not morning and not evening:
         raise ValueError('شيت Sheet1 لا يحتوي على بيانات صباحي أو مسائي')
-    _add_day1_derived_inputs(morning)
-    _add_day1_derived_inputs(evening)
+    if int(day_no) == 1:
+        _add_day1_derived_inputs(morning)
+        _add_day1_derived_inputs(evening)
     total = {}
     for source in (morning, evening):
         for name, (count, grams) in source.items():

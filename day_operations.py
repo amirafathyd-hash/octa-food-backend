@@ -21,6 +21,7 @@ from decision_station import (
     read_subscribers_invoice,
 )
 from tokyo_ordering import merge_day_into_template, read_day_file_payload
+from tokyo_storage import TOKYO_TEMPLATE_PATH as ACTIVE_TOKYO_TEMPLATE_PATH
 from tokyo_production_reports import build_tokyo_day_package
 from rice_ordering import build_rice_day_files
 from rice_storage import RICE_TEMPLATE_PATH
@@ -1228,7 +1229,9 @@ def process_day_operations(file_storage, day_label_override=None):
     tokyo_report = None
     tokyo_error = None
     tokyo_zip_path = None
-    tokyo_template_path = DAY_OPS_TEMPLATES['tokyo'] if os.path.exists(DAY_OPS_TEMPLATES['tokyo']) else TOKYO_TEMPLATE_PATH
+    tokyo_template_path = ACTIVE_TOKYO_TEMPLATE_PATH if os.path.exists(ACTIVE_TOKYO_TEMPLATE_PATH) else (
+        DAY_OPS_TEMPLATES['tokyo'] if os.path.exists(DAY_OPS_TEMPLATES['tokyo']) else TOKYO_TEMPLATE_PATH
+    )
     if os.path.exists(tokyo_template_path):
         try:
             file_storage.seek(0)

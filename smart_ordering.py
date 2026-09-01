@@ -28,11 +28,14 @@ from tokyo_storage import TOKYO_BASELINE_PATH, TOKYO_TEMPLATE_PATH
 
 PORTIONS_PATH = os.path.join(os.path.dirname(__file__), 'meal_portions_data.json')
 PACKAGES_PATH = os.path.join(os.path.dirname(__file__), 'menu_packages.json')
-EXPECTED_TEMPLATE_SHA256 = '7c1e23430735ab09fc6a784f06ab02dd8a737aa89076b391daf9888ba3f67666'
-EXPECTED_VBA_SHA256 = '7fd64a068ae257d2b862ed22fc946a3f3624521d2767e2285cea78ed2c56b21c'
+DAY_OPS_TOKYO_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(__file__), 'data', 'day_ops_templates', 'tokyo_ordering_template.xlsm'
+)
+EXPECTED_TEMPLATE_SHA256 = '07a7d8053671496adccf258d3faedaaadd1ba5ee268317c42f0f00b25bea0e57'
+EXPECTED_VBA_SHA256 = '28793d605ac56a37ff6e6e7e279a8d1e331079b490d4510660b2dbe90eb69f76'
 EXPECTED_SHEET_COUNT = 100
-EXPECTED_FORMULA_COUNT = 33556
-ALLOWED_FORMULA_COUNTS = {33556, 33555}  # original XML / openpyxl-normalized XML
+EXPECTED_FORMULA_COUNT = 11198
+ALLOWED_FORMULA_COUNTS = {11198, 11197}  # original XML / openpyxl-normalized XML
 
 with open(PORTIONS_PATH, encoding='utf-8') as f:
     # { meal_name: [portion_grams_per_order, arabic_name] }
@@ -120,6 +123,14 @@ def _refresh_live_meal_portions(force=False):
         MEAL_PORTIONS = _load_live_meal_portions()
         _MEAL_PORTIONS_MTIME = current_mtime
     return MEAL_PORTIONS
+
+
+def _sync_tokyo_template_copies():
+    """Keep legacy bundled Tokyo copies aligned with the active uploaded master."""
+    if not os.path.exists(TOKYO_TEMPLATE_PATH):
+        return
+    os.makedirs(os.path.dirname(DAY_OPS_TOKYO_TEMPLATE_PATH), exist_ok=True)
+    shutil.copy2(TOKYO_TEMPLATE_PATH, DAY_OPS_TOKYO_TEMPLATE_PATH)
 
 
 def _template_recipe_sheet_names():
@@ -330,6 +341,7 @@ def replace_tokyo_template(file_storage):
                 os.unlink(TOKYO_BASELINE_PATH)
             _refresh_live_meal_portions(force=True)
             raise ValueError('فشل فحص النسخة الجديدة بعد الحفظ: ' + ' — '.join(integrity.get('errors') or []))
+        _sync_tokyo_template_copies()
         return integrity
     finally:
         for path in (candidate_path, baseline_candidate):

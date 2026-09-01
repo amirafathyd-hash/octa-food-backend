@@ -135,6 +135,30 @@ def _batch_ranges(ws_values) -> list[str]:
     return ranges
 
 
+def _format_scaling_factor_columns(ws) -> None:
+    """Show Scaling Factor as a percentage in printable copies.
+
+    The approved Tokyo model stores factors as workbook numbers such as 1,
+    0.75 and 1.75.  The PDF should render them as 100%, 75% and 175% like the
+    reference sheets, without changing the underlying formulas.
+    """
+    max_row = min(ws.max_row, 500)
+    max_col = min(ws.max_column, 40)
+    for row in range(1, max_row + 1):
+        for col in range(1, max_col + 1):
+            label = str(ws.cell(row, col).value or '').strip().lower()
+            if 'scaling factor' not in label:
+                continue
+            for body_row in range(row + 1, min(max_row, row + 80) + 1):
+                cell = ws.cell(body_row, col)
+                if cell.value in (None, ''):
+                    if body_row > row + 1:
+                        break
+                    continue
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '0%'
+
+
 def _special_range(ws_values) -> str | None:
     ceiling = min(30, ws_values.max_row)
     for row in range(5, ceiling + 1):
@@ -246,7 +270,7 @@ def _make_block_workbook(source: Path, values_path: Path, destination: Path,
                 ranges = ['A62:H65']
             else:
                 ranges = _batch_ranges(wsv)
-                if not ranges and name in SPECIAL_SHEETS:
+                if not ranges:
                     found = _special_range(wsv)
                     ranges = [found] if found else []
         elif section == 'batch':
@@ -290,6 +314,7 @@ def _make_block_workbook(source: Path, values_path: Path, destination: Path,
             for cell in row:
                 if isinstance(cell.value, str) and cell.value.startswith('='):
                     cell.value = value_ws[cell.coordinate].value
+        _format_scaling_factor_columns(ws)
 
     if section == 'production' and 'Asian Chicken Sandwich' in included:
         # Make the first recipe table its own worksheet and place it directly
