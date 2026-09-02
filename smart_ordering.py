@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from openpyxl import load_workbook
 from pycel import ExcelCompiler
-from tokyo_storage import TOKYO_BASELINE_PATH, TOKYO_TEMPLATE_PATH
+from tokyo_storage import TOKYO_BASELINE_PATH, TOKYO_TEMPLATE_PATH, mark_tokyo_template_user_uploaded
 
 PORTIONS_PATH = os.path.join(os.path.dirname(__file__), 'meal_portions_data.json')
 PACKAGES_PATH = os.path.join(os.path.dirname(__file__), 'menu_packages.json')
@@ -236,6 +236,9 @@ def get_template_integrity():
         'has_vba': bool(vba_sha256),
         'vba_sha256': vba_sha256,
         'template_sha256': template_sha256,
+        'template_updated_at': datetime.fromtimestamp(
+            os.path.getmtime(TOKYO_TEMPLATE_PATH), timezone.utc
+        ).isoformat(),
         'is_baseline_template': template_sha256 == baseline.get('template_sha256'),
         'approved_at': baseline.get('approved_at'),
         'approved_filename': baseline.get('original_filename'),
@@ -341,6 +344,7 @@ def replace_tokyo_template(file_storage):
                 os.unlink(TOKYO_BASELINE_PATH)
             _refresh_live_meal_portions(force=True)
             raise ValueError('فشل فحص النسخة الجديدة بعد الحفظ: ' + ' — '.join(integrity.get('errors') or []))
+        mark_tokyo_template_user_uploaded()
         _sync_tokyo_template_copies()
         return integrity
     finally:

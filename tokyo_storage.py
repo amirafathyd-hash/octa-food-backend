@@ -6,6 +6,7 @@ only, the bundled files are migrated into the persistent location.
 """
 import os
 import shutil
+from datetime import datetime, timezone
 
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -60,13 +61,31 @@ def _install_tokyo_revision():
         installed = ''
     if installed == TOKYO_TEMPLATE_REVISION or not os.path.exists(BUNDLED_TEMPLATE_PATH):
         return
-    # Install the approved W3 master once. The marker prevents refreshes and
-    # worker restarts from replacing a newer workbook uploaded by the user.
+    if os.path.exists(TOKYO_TEMPLATE_PATH):
+        # Never overwrite an already active workbook during code startup.  The
+        # dashboard upload is the only safe way to approve a new Tokyo master.
+        # This preserves files uploaded by the user across worker restarts and
+        # deployments instead of silently rolling them back to the bundled copy.
+        with open(TOKYO_REVISION_PATH, 'w', encoding='utf-8') as stream:
+            stream.write(TOKYO_TEMPLATE_REVISION)
+        return
+    # Install the approved master only when persistent storage is empty.
     shutil.copy2(BUNDLED_TEMPLATE_PATH, TOKYO_TEMPLATE_PATH)
     if os.path.exists(BUNDLED_BASELINE_PATH):
         shutil.copy2(BUNDLED_BASELINE_PATH, TOKYO_BASELINE_PATH)
     with open(TOKYO_REVISION_PATH, 'w', encoding='utf-8') as stream:
         stream.write(TOKYO_TEMPLATE_REVISION)
+
+
+def mark_tokyo_template_user_uploaded():
+    """Record that the active Tokyo workbook was intentionally uploaded.
+
+    The value only needs to exist; startup migration respects any existing
+    active workbook and will not replace it with a bundled copy.
+    """
+    os.makedirs(TOKYO_STORAGE_DIR, exist_ok=True)
+    with open(TOKYO_REVISION_PATH, 'w', encoding='utf-8') as stream:
+        stream.write(f'user-uploaded:{datetime.now(timezone.utc).isoformat()}')
 
 
 def ensure_tokyo_storage():
