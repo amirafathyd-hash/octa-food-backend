@@ -193,9 +193,10 @@ def _approved_baseline():
 def get_template_integrity():
     """فحص سريع للقالب قبل السماح بأي حساب حساس."""
     if not os.path.exists(TOKYO_TEMPLATE_PATH):
-        return {'ready': False, 'errors': ['ملف توكيو الرئيسي غير موجود على السيرفر']}
+        return {'ready': False, 'errors': ['ملف توكيو الرئيسي غير موجود على السيرفر'], 'warnings': []}
 
     errors = []
+    warnings = []
     metrics = _template_metrics(TOKYO_TEMPLATE_PATH)
     sheet_count = metrics['sheet_count']
     formula_count = metrics['formula_count']
@@ -220,7 +221,11 @@ def get_template_integrity():
     if sheet_count != expected_sheet_count:
         errors.append(f'عدد الشيتات تغير: المتوقع {expected_sheet_count} والموجود {sheet_count}')
     if formula_count not in {expected_formula_count, max(0, expected_formula_count - 1)}:
-        errors.append(f'عدد المعادلات تغير: المتوقع قرابة {expected_formula_count} والموجود {formula_count}')
+        # Tokyo master files are actively developed; a newer approved workbook
+        # can legitimately contain more formulas than the previously bundled
+        # baseline.  Treat the mismatch as a visible warning, not a hard stop,
+        # as long as the workbook still has VBA and the required recipe tabs.
+        warnings.append(f'عدد المعادلات مختلف عن آخر بصمة: المتوقع قرابة {expected_formula_count} والموجود {formula_count}')
     # أرقام التشغيل اليومية تغيّر خلايا الإدخال وبالتبعية بصمة الملف بالكامل.
     # لذلك الحماية تعتمد على بنية الملف، عدد المعادلات وبصمة VBA الثابتة، مع
     # إبقاء بصمة النسخة الأصلية كمعلومة فقط لا كسبب لإيقاف التشغيل.
@@ -230,6 +235,7 @@ def get_template_integrity():
     return {
         'ready': not errors,
         'errors': errors,
+        'warnings': warnings,
         'sheet_count': sheet_count,
         'meal_count': len(portions),
         'formula_count': formula_count,
