@@ -333,6 +333,7 @@ def replace_tokyo_template(file_storage):
         if os.path.exists(TOKYO_BASELINE_PATH):
             shutil.copy2(TOKYO_BASELINE_PATH, previous_baseline)
         os.replace(candidate_path, TOKYO_TEMPLATE_PATH)
+        os.utime(TOKYO_TEMPLATE_PATH, None)
         try:
             os.replace(baseline_candidate, TOKYO_BASELINE_PATH)
         except Exception:
