@@ -211,6 +211,11 @@ def _breakfast_aliases(item):
             "كرواسون جبنة بالسبانخ", "كرواسون جبنه بالسبانخ",
             "كروسوان سبانخ وجبنة", "كروسان سبانخ وجبنة",
         },
+        "croissant scrambled egg": {
+            "كرواسون بيض مخفوق", "كروسوان بيض مخفوق", "كروسان بيض مخفوق",
+            "كرواسون سكرامبلد ايج", "كروسوان سكرامبلد ايج",
+            "croissant scrambled eggs", "scrambled egg croissant",
+        },
         "club sandwich": {"كلوب ساندوتش", "ساندوتش كلوب"},
     }
     aliases.update(operational_aliases.get(sheet.lower(), set()))
