@@ -28,6 +28,10 @@ STOP_WORDS = {
     'قبل', 'بعد', 'الطبخ', 'دفعه', 'دفعة', 'مع', 'بدون', 'الصوص', 'صوص',
     'الاضافي', 'اضافي', 'اضافى', 'بال', 'و',
 }
+GENERIC_TOKENS = {
+    'دجاج', 'لحم', 'سمك', 'ارز', 'برجر', 'ساندوتش', 'صوص', 'خضار',
+    'بطاطس', 'طبق', 'وجبه', 'وجبة',
+}
 GROUP_FILLS = [
     'EAF4FF',
     'FFF2CC',
@@ -65,6 +69,7 @@ def _norm_text(value):
     text = text.replace('بالجار', 'بالبخار').replace('باجار', 'بخار')
     text = text.replace('مهروسة', 'مهروسه')
     text = re.sub(r'[ـ،,()\[\]{}]+', ' ', text)
+    text = re.sub(r'\bبال(?=[\u0600-\u06FF]{3,})', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.lower().strip()
 
@@ -167,6 +172,18 @@ def _names_strict_match(left, right):
     return len(overlap) == shorter
 
 
+def _names_safe_match(left, right):
+    if _names_strict_match(left, right):
+        return True
+    left_tokens = _name_tokens(left)
+    right_tokens = _name_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = left_tokens & right_tokens
+    distinctive = overlap - GENERIC_TOKENS
+    return len(overlap) >= 2 and bool(distinctive)
+
+
 def _arabic_name(ws):
     preferred_cells = ((2, 37), (62, 2), (63, 2), (2, 2), (25, 18))
     for row, col in preferred_cells:
@@ -179,10 +196,14 @@ def _arabic_name(ws):
 
 
 def _find_day_meals(wb, day_no):
+    return [record['sheet'] for record in _find_day_meal_records(wb, day_no)]
+
+
+def _find_day_meal_records(wb, day_no):
     if 'All_Ingredients' not in wb.sheetnames:
         return []
     ws = wb['All_Ingredients']
-    day_col = name_col = header_row = None
+    day_col = name_col = meal_col = header_row = None
     for row in range(1, min(ws.max_row, 200) + 1):
         for col in range(1, min(ws.max_column, 80) + 1):
             value = str(ws.cell(row, col).value or '').strip()
@@ -191,21 +212,27 @@ def _find_day_meals(wb, day_no):
                 header_row = row
             elif value == 'Sheet Name':
                 name_col = col
+            elif value in ('Meal Name', 'Recipe Name', 'Meal', 'الوجبة', 'اسم الوجبة'):
+                meal_col = col
         if day_col and name_col:
             break
     if not day_col or not name_col or not header_row:
         return []
 
-    names = []
+    records = []
+    seen = set()
     for row in range(header_row + 1, min(ws.max_row, 500) + 1):
         try:
             same_day = int(ws.cell(row, day_col).value or 0) == int(day_no)
         except (TypeError, ValueError):
             same_day = False
         name = str(ws.cell(row, name_col).value or '').strip()
-        if same_day and name and name in wb.sheetnames and name not in names:
-            names.append(name)
-    return names
+        if not same_day or not name or name not in wb.sheetnames or name in seen:
+            continue
+        seen.add(name)
+        meal_name = str(ws.cell(row, meal_col).value or '').strip() if meal_col else ''
+        records.append({'sheet': name, 'meal': meal_name})
+    return records
 
 
 def _find_nearest_banner(ws, before_row):
@@ -320,45 +347,86 @@ def _candidate_key(base, batch, component, detail=''):
     return f'{_norm_text(base)}|{batch or ""}|{component}|{_norm_text(detail)}'
 
 
+def _unique_aliases(*values):
+    aliases = []
+    seen = set()
+    for value in values:
+        for item in (value if isinstance(value, (list, tuple, set)) else [value]):
+            text = str(item or '').strip()
+            if not text:
+                continue
+            for alias in (text, _clean_base_text(text), _clean_output_name(text), _arabic_part(text)):
+                norm = _norm_text(alias)
+                if norm and norm not in seen:
+                    aliases.append(alias)
+                    seen.add(norm)
+    return aliases
+
+
+def _add_index_value(index, diagnostics, aliases, batch, component, value, detail=''):
+    if value is None:
+        return
+    aliases = _unique_aliases(aliases)
+    if not aliases:
+        return
+    primary = aliases[0]
+    for alias in aliases:
+        index[_candidate_key(alias, batch, component, detail)] = value
+    diagnostics.append({
+        'name': primary,
+        'aliases': aliases,
+        'batch': batch or '',
+        'component': component,
+        'detail': detail or '',
+        'value': value,
+    })
+
+
+def _candidate_names(candidate):
+    names = [candidate.get('name') or '']
+    aliases = candidate.get('aliases') or []
+    if isinstance(aliases, (list, tuple, set)):
+        names.extend(aliases)
+    return [name for name in names if str(name or '').strip()]
+
+
 def _build_tokyo_value_index(wb, day_no):
     index = {}
     diagnostics = []
-    for sheet_name in _find_day_meals(wb, day_no):
+    for record in _find_day_meal_records(wb, day_no):
+        sheet_name = record['sheet']
         ws = wb[sheet_name]
         sheet_ar = _arabic_name(ws) or sheet_name
+        sheet_aliases = _unique_aliases(sheet_ar, sheet_name, record.get('meal'))
         simple_rows = _simple_batch_rows(ws)
         for item in simple_rows:
             value = item.get('value')
             batch = item.get('batch') or ''
             if value is not None:
-                index[_candidate_key(sheet_ar, batch, 'simple')] = value
-                diagnostics.append({'name': sheet_ar, 'batch': batch, 'component': 'simple', 'value': value})
+                _add_index_value(index, diagnostics, sheet_aliases, batch, 'simple', value)
         if simple_rows:
             total_value = round(sum(item['value'] for item in simple_rows), 3)
-            index[_candidate_key(sheet_ar, '', 'simple')] = total_value
-            diagnostics.append({'name': sheet_ar, 'batch': '', 'component': 'simple', 'value': total_value})
+            _add_index_value(index, diagnostics, sheet_aliases, '', 'simple', total_value)
         for item in _simple_ingredient_rows(ws):
             value = item.get('value')
             detail = item.get('detail') or ''
             if value is not None and detail:
-                index[_candidate_key(sheet_ar, '', 'ingredient', detail)] = value
-                diagnostics.append({'name': sheet_ar, 'batch': '', 'component': 'ingredient', 'detail': detail, 'value': value})
+                _add_index_value(index, diagnostics, sheet_aliases, '', 'ingredient', value, detail)
         for item in _total_rows(ws):
             banner = item.get('banner') or {}
             base_ar = _strip_batch(banner.get('arabic') or sheet_ar)
+            aliases = _unique_aliases(base_ar, sheet_aliases)
             batch = banner.get('batch') or (f"{item['part']}/1" if item.get('part') else '')
             if item.get('simple'):
                 value = item.get('value')
                 if value is not None:
-                    index[_candidate_key(base_ar, batch, 'simple')] = value
-                    index[_candidate_key(base_ar, '', 'simple')] = value
-                    diagnostics.append({'name': base_ar, 'batch': batch, 'component': 'simple', 'value': value})
+                    _add_index_value(index, diagnostics, aliases, batch, 'simple', value)
+                    _add_index_value(index, diagnostics, aliases, '', 'simple', value)
                 continue
             for component in ('protein', 'total_sauce', 'topping', 'protein_mix'):
                 value = item.get(component)
                 if value is not None:
-                    index[_candidate_key(base_ar, batch, component)] = value
-                    diagnostics.append({'name': base_ar, 'batch': batch, 'component': component, 'value': value})
+                    _add_index_value(index, diagnostics, aliases, batch, component, value)
     return index, diagnostics
 
 
@@ -392,7 +460,7 @@ def _resolve_planned_value(item, value_index, diagnostics):
         candidate for candidate in diagnostics
         if candidate.get('component') == wanted_component
         and (not wanted_detail or _names_strict_match(wanted_detail, candidate.get('detail') or ''))
-        and _names_strict_match(item.get('base') or '', candidate.get('name') or '')
+        and any(_names_safe_match(item.get('base') or '', name) for name in _candidate_names(candidate))
     ]
     has_batch_specific = any(str(candidate.get('batch') or '').strip() for candidate in related)
 
@@ -404,7 +472,9 @@ def _resolve_planned_value(item, value_index, diagnostics):
             return planned
 
     exact_batch_matches = []
+    same_part_matches = []
     loose_matches = []
+    wanted_part = _batch_part(wanted_batch)
     for candidate in related:
         if candidate.get('component') != wanted_component:
             continue
@@ -412,12 +482,16 @@ def _resolve_planned_value(item, value_index, diagnostics):
         if wanted_batch:
             if candidate_batch == wanted_batch:
                 exact_batch_matches.append(candidate)
+            elif wanted_part is not None and _batch_part(candidate_batch) == wanted_part:
+                same_part_matches.append(candidate)
             elif not candidate_batch and not has_batch_specific:
                 loose_matches.append(candidate)
         else:
             loose_matches.append(candidate)
     if len(exact_batch_matches) == 1:
         return exact_batch_matches[0].get('value')
+    if len(same_part_matches) == 1:
+        return same_part_matches[0].get('value')
     if len(loose_matches) == 1:
         return loose_matches[0].get('value')
     return None
