@@ -10,8 +10,11 @@ from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-
-SAUCE_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "Tokyo_Sauce.xlsm")
+try:
+    from sauce_storage import SAUCE_TEMPLATE_PATH, ensure_sauce_storage
+    ensure_sauce_storage()
+except Exception:
+    SAUCE_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "Tokyo_Sauce.xlsm")
 
 
 def _as_number(value):

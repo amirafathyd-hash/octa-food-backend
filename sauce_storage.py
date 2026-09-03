@@ -5,7 +5,7 @@ import shutil
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BUNDLED_SAUCE_TEMPLATE_PATH = os.path.join(APP_DIR, 'data', 'Tokyo_Sauce.xlsm')
-SAUCE_TEMPLATE_REVISION = '20260817-approved-count-driven-sauce-master'
+SAUCE_TEMPLATE_REVISION = '20260903-central-sauce-template-v2'
 
 
 def _persistent_dir():
