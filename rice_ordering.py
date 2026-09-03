@@ -93,9 +93,49 @@ def _meal_grams_lookup(meals):
         else:
             grams = _number(pair)
         key = _name_key(name)
-        if key and key not in lookup:
-            lookup[key] = grams
+        if key:
+            lookup[key] = lookup.get(key, 0.0) + grams
     return lookup
+
+
+def _without_arabic_article(key):
+    parts = []
+    for token in str(key or '').split():
+        if token.startswith('ال') and len(token) > 3:
+            parts.append(token[2:])
+        else:
+            parts.append(token)
+    return ' '.join(parts).strip()
+
+
+def _lookup_grams(lookup, source_name):
+    source_key = _name_key(source_name)
+    if not source_key:
+        return 0.0, False, source_key
+    if source_key in lookup:
+        return _number(lookup[source_key]), True, source_key
+
+    source_loose = _without_arabic_article(source_key)
+    matches = []
+    for key, grams in lookup.items():
+        key_loose = _without_arabic_article(key)
+        if key_loose == source_loose:
+            matches.append((key, grams))
+        elif len(source_loose.split()) >= 2 and source_loose in key_loose:
+            matches.append((key, grams))
+        elif len(key_loose.split()) >= 2 and key_loose in source_loose:
+            matches.append((key, grams))
+    if not matches:
+        return 0.0, False, source_key
+    return sum(_number(grams) for _, grams in matches), True, source_key
+
+
+def _extra_sources_for_rice_sheet(sheet_name):
+    key = _name_key(sheet_name)
+    extras = []
+    if 'برياني' in key and 'زعفران' in key:
+        extras.extend(['الأرز البرياني', 'الأرز بالزعفران'])
+    return extras
 
 
 def _compute_day_grams(wb, day_no, meals):
@@ -113,10 +153,7 @@ def _compute_day_grams(wb, day_no, meals):
             source_row = int(row_text)
             label_column = SOURCE_COLUMN_MAP[value_column]
             source_name = str(ordering[f'{label_column}{source_row}'].value or '').strip()
-            source_key = _name_key(source_name)
-            grams = lookup.get(source_key)
-            found = grams is not None
-            grams = _number(grams)
+            grams, found, source_key = _lookup_grams(lookup, source_name)
             # The daily Update parser already aggregates duplicate meal names.
             # Some approved formulas reference two rows carrying the same meal
             # name, so counting by reference would double the daily grams.
@@ -127,6 +164,14 @@ def _compute_day_grams(wb, day_no, meals):
             if source_name and source_name != '-' and not found:
                 missing.append(source_name)
             ordering[f'{value_column}{source_row}'] = grams
+        for source_name in _extra_sources_for_rice_sheet(mapping['sheet']):
+            grams, found, source_key = _lookup_grams(lookup, source_name)
+            if source_key and source_key not in counted_source_names:
+                total += grams
+                counted_source_names.add(source_key)
+                sources.append({'name': source_name, 'grams': grams, 'found': found, 'added_by_rule': True})
+            if source_name and not found:
+                missing.append(source_name)
         results.append({**mapping, 'input_grams': round(total, 3), 'sources': sources})
     return results, sorted(set(missing), key=_name_key)
 
@@ -458,6 +503,24 @@ def build_rice_day_files(file_storage, template_path=RICE_TEMPLATE_PATH, safety_
     excel_path, pdf_path, report = _files_from_inputs(day_no, inputs, template_path)
     report.update({'input_report': input_report, 'missing_sources': missing, 'inputs': inputs})
     return excel_path, pdf_path, report
+
+
+def analyze_rice_day_file(file_storage, template_path=RICE_TEMPLATE_PATH, expected_day_no=None):
+    day_no, meals, input_report = read_day_file_payload(file_storage)
+    if expected_day_no is not None and int(_number(expected_day_no)) != int(day_no):
+        raise ValueError(f'ملف اليوم يخص يوم {day_no} بينما اليوم المختار في لوحة الأرز هو {int(_number(expected_day_no))}')
+    wb = load_workbook(template_path, data_only=False, keep_vba=True)
+    try:
+        inputs, missing = _compute_day_grams(wb, day_no, meals)
+    finally:
+        wb.close()
+    return {
+        'day_no': int(day_no),
+        'day_name': DAY_NAMES.get(int(day_no), ''),
+        'items': inputs,
+        'missing_sources': missing,
+        'input_report': input_report,
+    }
 
 
 def build_rice_manual_files(day_no, items, template_path=RICE_TEMPLATE_PATH):

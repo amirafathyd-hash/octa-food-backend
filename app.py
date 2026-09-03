@@ -99,6 +99,7 @@ from sauce_production import (
     save_sauce_mappings,
 )
 from rice_ordering import (
+    analyze_rice_day_file,
     build_rice_day_files,
     build_rice_manual_files,
     get_rice_template_state,
@@ -1159,6 +1160,22 @@ def rice_ordering_template():
         return jsonify({'ok': True, 'state': get_rice_template_state(day_no=day_no)})
     except Exception as e:
         app.logger.exception('rice_ordering_template failed')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rice-ordering/analyze-day', methods=['POST'])
+def rice_ordering_analyze_day():
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف اليوم باسم file'}), 400
+    try:
+        report = analyze_rice_day_file(
+            uploaded,
+            expected_day_no=request.form.get('day_no'),
+        )
+        return jsonify({'ok': True, 'report': report})
+    except Exception as e:
+        app.logger.exception('rice_ordering_analyze_day failed')
         return jsonify({'error': str(e)}), 500
 
 

@@ -222,6 +222,11 @@ def _breakfast_aliases(item):
     return {_norm_recipe_text(value) for value in aliases if _norm_recipe_text(value)}
 
 
+def _is_manual_breakfast(item):
+    text = _norm_recipe_text(f"{item.get('sheet', '')} {item.get('name', '')}")
+    return "pancake" in text or "بانكيك" in text or "بان كيك" in text
+
+
 def _match_uploaded_recipe(recipe_name, breakfasts):
     wanted = _norm_recipe_text(recipe_name)
     if not wanted:
@@ -341,6 +346,8 @@ def analyze_breakfast_shift_upload(file_storage, day_no=1, template_path=BREAKFA
         if not item:
             unmatched.append({"row": source["row"], "recipe": source["recipe"]})
             continue
+        if item["sheet"] in matched:
+            continue
         matched[item["sheet"]] = source
 
     if not matched:
@@ -350,20 +357,21 @@ def analyze_breakfast_shift_upload(file_storage, day_no=1, template_path=BREAKFA
     missing = []
     for item in breakfasts:
         source = matched.get(item["sheet"])
-        if source is None:
+        manual_entry = _is_manual_breakfast(item)
+        if source is None or manual_entry:
             missing.append(item["name"])
-            continue
         for shift in ("morning", "evening"):
-            base_count = _rounded(source[shift])
+            base_count = 0 if source is None or manual_entry else _rounded(source[shift])
             shifts[shift].append({
                 **item,
                 "base_count": base_count,
                 "required_count": base_count,
                 "safety_count": 0,
                 "final_count": base_count,
-                "source_row": source["row"],
-                "source_recipe": source["recipe"],
+                "source_row": source["row"] if source else None,
+                "source_recipe": "إدخال يدوي" if source is None or manual_entry else source["recipe"],
                 "shift": shift,
+                "manual_entry": bool(source is None or manual_entry),
             })
 
     return {
@@ -566,13 +574,17 @@ def export_breakfast_pdf_with_edits(edits, day_no=1, template_path=BREAKFAST_TEM
     out_wb = Workbook()
     out_wb.remove(out_wb.active)
     dark_fill = PatternFill("solid", fgColor="303D4D")
+    yellow_fill = PatternFill("solid", fgColor="FFC000")
     green_fill = PatternFill("solid", fgColor="C6E0B4")
     white_font = Font(color="FFFFFF", bold=True, size=11)
+    black_title_font = Font(color="000000", bold=True, size=12)
     title_font = Font(color="000000", bold=True, size=16)
     body_font = Font(color="000000", size=10)
     body_bold = Font(color="000000", bold=True, size=10)
     thin = Side(style="thin", color="000000")
+    medium = Side(style="medium", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_border = Border(left=medium, right=medium, top=medium, bottom=medium)
     try:
         total_pages = len(selected)
         for page_index, sheet_name in enumerate(selected, 1):
@@ -593,11 +605,14 @@ def export_breakfast_pdf_with_edits(edits, day_no=1, template_path=BREAKFAST_TEM
             meal_title = vals["B3"].value or ""
             ws.merge_cells("B4:H4")
             ws["B4"] = breakfast_title
-            ws["B4"].fill = dark_fill
-            ws["B4"].font = white_font
+            ws["B4"].fill = yellow_fill
+            ws["B4"].font = black_title_font
             ws["B4"].alignment = Alignment(horizontal="center", vertical="center")
             ws["A4"].fill = dark_fill
-            ws["A4"].border = border
+            ws["A4"].border = header_border
+            for col in range(2, 9):
+                ws.cell(row=4, column=col).fill = yellow_fill
+                ws.cell(row=4, column=col).border = header_border
             if meal_title:
                 ws["I4"] = meal_title
                 ws["I4"].font = body_bold
@@ -612,7 +627,7 @@ def export_breakfast_pdf_with_edits(edits, day_no=1, template_path=BREAKFAST_TEM
                 cell.fill = green_fill if col in (5, 6) else dark_fill
                 cell.font = Font(color="000000" if col in (5, 6) else "FFFFFF", bold=True, size=10)
                 cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                cell.border = border
+                cell.border = header_border
 
             out_row = 6
             for src_row in range(5, vals.max_row + 1):
