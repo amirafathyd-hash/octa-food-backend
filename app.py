@@ -5100,14 +5100,6 @@ def veg_inventory_today_save():
                 photo_base64 = _veg_inventory_photo_data_url(photo_file)
             except ValueError as exc:
                 return jsonify({'error': f'{item_name}: {exc}'}), 400
-        old_value = existing_entries.get(item_name)
-        try:
-            value_changed = old_value is None or abs(float(old_value) - val) > 0.000001
-        except (TypeError, ValueError):
-            value_changed = True
-        elif_missing_or_changed = not existing_proofs.get((today, item_name)) or value_changed
-        if not photo_base64 and elif_missing_or_changed:
-            return jsonify({'error': f'ارفع صورة إثبات للصنف "{item_name}" قبل الحفظ'}), 400
         rows.append({'entry_date': today, 'item_name': item_name, 'remaining_stock': val, 'updated_at': now})
         if photo_base64:
             proof_rows.append({
