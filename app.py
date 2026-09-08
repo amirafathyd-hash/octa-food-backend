@@ -1,4 +1,4 @@
-# OCTA BACKEND RELEASE: octa-backend-2026-08-21-packaging-image-excel-v3
+# OCTA BACKEND RELEASE: octa-backend-2026-08-09-v18
 import os
 import requests
 import io
@@ -36,7 +36,6 @@ from tokyo_ordering import (
     UnmappedTokyoMealsError,
     list_tokyo_recipe_sheet_names,
     read_day_file_payload,
-    read_day_file_shifts,
     read_day_safety_fields,
     save_raw_tokyo_mappings,
     validate_raw_targets_for_day,
@@ -61,14 +60,6 @@ from dessert_ordering import (
     replace_dessert_template,
     update_dessert_ordering_from_upload,
 )
-from breakfast_ordering import (
-    analyze_breakfast_shift_upload,
-    export_breakfast_excel_with_edits,
-    export_breakfast_pdf_with_edits,
-    get_breakfast_template_state,
-    recalculate_breakfast_with_edits,
-    replace_breakfast_template,
-)
 from salads_ordering import (
     export_salads_cost_report_pdf_with_edits,
     export_salads_cost_report_with_edits,
@@ -89,23 +80,6 @@ from sauce_ordering import (
     replace_sauce_template,
     update_sauce_counts_from_upload,
 )
-from sauce_production import (
-    SauceMappingRequiredError,
-    build_sauce_day_files,
-    build_sauce_manual_files,
-    get_sauce_production_state,
-    package_sauce_files,
-    replace_sauce_production_template,
-    save_sauce_mappings,
-)
-from rice_ordering import (
-    analyze_rice_day_file,
-    build_rice_day_files,
-    build_rice_manual_files,
-    get_rice_template_state,
-    package_rice_files,
-    replace_rice_template,
-)
 from xlsx_to_images import add_workbook_images_to_zip
 from veg_screenshot_ocr import extract_vegetable_rows
 from invoice_receipts_api import invoice_receipts_bp, configure_invoice_receipts
@@ -124,12 +98,10 @@ from receipt_pricing import (
 )
 from kitchen_live import register_kitchen_live_routes
 from vegetable_cutting import vegetable_cutting_bp
-from packaging_orders import packaging_orders_bp
-from kitchen_violations import kitchen_violations_bp, configure_kitchen_violations
-from tokyo_storage import TOKYO_TEMPLATE_PATH
 
+TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-08-21-packaging-image-excel-v3'
+BACKEND_RELEASE = 'octa-backend-2026-08-09-v18'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -146,8 +118,6 @@ app.register_blueprint(appointments_bp)
 app.register_blueprint(invoice_receipts_bp)
 app.register_blueprint(veg_comparison_bp)
 app.register_blueprint(vegetable_cutting_bp)
-app.register_blueprint(packaging_orders_bp)
-app.register_blueprint(kitchen_violations_bp)
 register_kitchen_live_routes(app)
 
 
@@ -160,8 +130,8 @@ def _ensure_cors_headers(response):
     origin = request.headers.get('Origin')
     if origin:
         response.headers.setdefault('Access-Control-Allow-Origin', origin)
-        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token, X-Invoice-Receipt-Token, X-Kitchen-Violation-Token')
-        response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token, X-Invoice-Receipt-Token')
+        response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
         response.headers.setdefault('Access-Control-Expose-Headers', 'X-Match-Report, X-Decision-Report, X-Day-Operations-Report, Content-Disposition')
     return response
 
@@ -584,7 +554,7 @@ def tokyo_ordering_update_from_day_file():
 @app.route('/api/tokyo-production/process-day', methods=['POST'])
 def tokyo_production_process_day():
     """يرفع ملف تشغيل يوم واحد ويُرجع حزمة الإنتاج الكاملة بنفس جداول
-    ملف توكيو: PDF القسم الساخن + نسخة XLSM محدّثة."""
+    ملف توكيو: PDF القسم الساخن + PDF التتبيلات + نسخة XLSM محدّثة."""
     if not os.path.exists(TOKYO_TEMPLATE_PATH):
         return jsonify({'error': 'ملف توكيو الرئيسي غير موجود على السيرفر'}), 404
     uploaded = request.files.get('file')
@@ -672,29 +642,6 @@ def tokyo_production_analyze_day():
     if not uploaded:
         return jsonify({'error': 'ارفع ملف اليوم بصيغة Excel'}), 400
     try:
-        split_result = read_day_file_shifts(uploaded)
-        if split_result:
-            day_no, shifts, input_report = split_result
-            fields = read_day_safety_fields(TOKYO_TEMPLATE_PATH, day_no)
-            return jsonify({
-                'day_no': day_no,
-                'day_name': DAY_NAMES.get(day_no, str(day_no)),
-                'meal_count': len(shifts['total']),
-                # Keep this field for older frontend versions while exposing
-                # two independent Safety groups to the current interface.
-                'safety_fields': fields,
-                'safety_mode': 'split',
-                'safety_groups': {
-                    'morning': fields,
-                    'evening': fields,
-                },
-                'shift_meal_counts': {
-                    'morning': len(shifts['morning']),
-                    'evening': len(shifts['evening']),
-                },
-                'input': input_report,
-            })
-
         day_no, meals, input_report = read_day_file_payload(uploaded)
         if input_report.get('kind') == 'repeat_update':
             validate_raw_targets_for_day(TOKYO_TEMPLATE_PATH, day_no, meals)
@@ -830,108 +777,6 @@ def day_operations_archive_download(archive_id):
     except Exception as exc:
         return jsonify({'error': f'تعذر فتح الأرشيف: {exc}'}), 500
     return send_file(path, as_attachment=True, download_name=f'Day_Operations_Archive_{archive_id}.zip', mimetype='application/zip')
-
-
-@app.route('/api/breakfast-ordering/template', methods=['GET'])
-def breakfast_ordering_template():
-    try:
-        day_no = request.args.get('day_no') or 1
-        return jsonify({'ok': True, 'state': get_breakfast_template_state(day_no=day_no)})
-    except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
-    except Exception as exc:
-        app.logger.exception('breakfast_ordering_template failed')
-        return jsonify({'error': str(exc)}), 500
-
-
-@app.route('/api/breakfast-ordering/replace-template', methods=['POST'])
-def breakfast_ordering_replace_template():
-    uploaded = request.files.get('file')
-    if not uploaded:
-        return jsonify({'error': 'ارفع ملف الشيت الرئيسي الجديد باسم file'}), 400
-    try:
-        state, report = replace_breakfast_template(uploaded)
-        return jsonify({'ok': True, 'state': state, 'report': report})
-    except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
-    except Exception as exc:
-        app.logger.exception('breakfast_ordering_replace_template failed')
-        return jsonify({'error': str(exc)}), 500
-
-
-@app.route('/api/breakfast-ordering/analyze-shifts', methods=['POST'])
-def breakfast_ordering_analyze_shifts():
-    uploaded = request.files.get('file')
-    if not uploaded:
-        return jsonify({'error': 'ارفع ملف يوم التشغيل باسم file'}), 400
-    try:
-        day_no = request.form.get('day_no') or 1
-        state = analyze_breakfast_shift_upload(uploaded, day_no=day_no)
-        return jsonify({'ok': True, 'state': state})
-    except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
-    except Exception as exc:
-        app.logger.exception('breakfast_ordering_analyze_shifts failed')
-        return jsonify({'error': str(exc)}), 500
-
-
-@app.route('/api/breakfast-ordering/recalculate', methods=['POST'])
-def breakfast_ordering_recalculate():
-    payload = request.get_json(silent=True) or {}
-    try:
-        return jsonify({
-            'ok': True,
-            'state': recalculate_breakfast_with_edits(payload.get('edits') or []),
-        })
-    except Exception as exc:
-        app.logger.exception('breakfast_ordering_recalculate failed')
-        return jsonify({'error': str(exc)}), 500
-
-
-@app.route('/api/breakfast-ordering/export-pdf', methods=['POST'])
-def breakfast_ordering_export_pdf():
-    payload = request.get_json(silent=True) or {}
-    try:
-        day_no = payload.get('day_no') or 1
-        shift = str(payload.get('shift') or '').strip().lower()
-        shift_label = {'morning': 'Morning', 'evening': 'Evening'}.get(shift)
-        pdf_path, report = export_breakfast_pdf_with_edits(
-            payload.get('edits') or [], day_no=day_no
-        )
-        response = send_file(
-            pdf_path,
-            as_attachment=True,
-            download_name=(
-                f"Day{report['day_no']}_Breakfast {shift_label}.pdf"
-                if shift_label else f"Day{report['day_no']}_Breakfast.pdf"
-            ),
-            mimetype='application/pdf',
-        )
-        response.headers['X-Breakfast-Pdf-Report'] = json.dumps(report, ensure_ascii=True)
-        return response
-    except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
-    except Exception as exc:
-        app.logger.exception('breakfast_ordering_export_pdf failed')
-        return jsonify({'error': str(exc)}), 500
-
-
-@app.route('/api/breakfast-ordering/export-excel', methods=['POST'])
-def breakfast_ordering_export_excel():
-    payload = request.get_json(silent=True) or {}
-    try:
-        excel_path, report = export_breakfast_excel_with_edits(payload.get('edits') or [])
-        response = send_file(
-            excel_path,
-            as_attachment=True,
-            download_name=f"Day{report['day_no']}_Breakfast_Updated.xlsx",
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        )
-        response.headers['X-Breakfast-Excel-Report'] = json.dumps(report, ensure_ascii=True)
-        return response
-    except Exception as exc:
-        app.logger.exception('breakfast_ordering_export_excel failed')
-        return jsonify({'error': str(exc)}), 500
 
 
 @app.route('/api/dessert-ordering/update', methods=['POST'])
@@ -1146,96 +991,9 @@ def salads_ordering_export_cost_report_pdf():
 @app.route('/api/sauce-ordering/template', methods=['GET'])
 def sauce_ordering_template():
     try:
-        day_no = request.args.get('day_no') or 1
-        return jsonify({'ok': True, 'state': get_sauce_production_state(day_no=day_no)})
+        return jsonify({'ok': True, 'state': get_sauce_template_state()})
     except Exception as e:
         app.logger.exception('sauce_ordering_template failed')
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/rice-ordering/template', methods=['GET'])
-def rice_ordering_template():
-    try:
-        day_no = request.args.get('day_no')
-        return jsonify({'ok': True, 'state': get_rice_template_state(day_no=day_no)})
-    except Exception as e:
-        app.logger.exception('rice_ordering_template failed')
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/rice-ordering/analyze-day', methods=['POST'])
-def rice_ordering_analyze_day():
-    uploaded = request.files.get('file')
-    if not uploaded:
-        return jsonify({'error': 'ارفع ملف اليوم باسم file'}), 400
-    try:
-        report = analyze_rice_day_file(
-            uploaded,
-            expected_day_no=request.form.get('day_no'),
-        )
-        return jsonify({'ok': True, 'report': report})
-    except Exception as e:
-        app.logger.exception('rice_ordering_analyze_day failed')
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/rice-ordering/process-day', methods=['POST'])
-def rice_ordering_process_day():
-    uploaded = request.files.get('file')
-    if not uploaded:
-        return jsonify({'error': 'ارفع ملف اليوم باسم file'}), 400
-    try:
-        safety_items = json.loads(request.form.get('safety_items') or '[]')
-        excel_path, pdf_path, report = build_rice_day_files(
-            uploaded,
-            safety_items=safety_items,
-            expected_day_no=request.form.get('day_no'),
-        )
-        package = package_rice_files(excel_path, pdf_path, report['day_no'])
-        response = send_file(
-            package,
-            as_attachment=True,
-            download_name=f"Day{report['day_no']}_Rice.zip",
-            mimetype='application/zip',
-        )
-        response.headers['X-Rice-Report'] = json.dumps(report, ensure_ascii=True)[:7000]
-        return response
-    except Exception as e:
-        app.logger.exception('rice_ordering_process_day failed')
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/rice-ordering/export-manual', methods=['POST'])
-def rice_ordering_export_manual():
-    payload = request.get_json(silent=True) or {}
-    try:
-        excel_path, pdf_path, report = build_rice_manual_files(
-            payload.get('day_no'), payload.get('items') or []
-        )
-        package = package_rice_files(excel_path, pdf_path, report['day_no'])
-        response = send_file(
-            package,
-            as_attachment=True,
-            download_name=f"Day{report['day_no']}_Rice.zip",
-            mimetype='application/zip',
-        )
-        response.headers['X-Rice-Report'] = json.dumps(report, ensure_ascii=True)[:7000]
-        return response
-    except Exception as e:
-        app.logger.exception('rice_ordering_export_manual failed')
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/rice-ordering/replace-template', methods=['POST'])
-def rice_ordering_replace_template():
-    uploaded = request.files.get('file')
-    if not uploaded:
-        return jsonify({'error': 'ارفع ملف الشيت الأساسي باسم file'}), 400
-    try:
-        state, report = replace_rice_template(uploaded)
-        return jsonify({'ok': True, 'state': state, 'report': report})
-    except Exception as e:
-        app.logger.exception('rice_ordering_replace_template failed')
         return jsonify({'error': str(e)}), 500
 
 
@@ -1268,75 +1026,10 @@ def sauce_ordering_replace_template():
     if not f:
         return jsonify({'error': 'ارفع ملف الشيت الرئيسي الجديد باسم file'}), 400
     try:
-        state, report = replace_sauce_production_template(f)
+        state, report = replace_sauce_template(f)
         return jsonify({'ok': True, 'report': report, 'state': state})
     except Exception as e:
         app.logger.exception('sauce_ordering_replace_template failed')
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/sauce-ordering/process-day', methods=['POST'])
-def sauce_ordering_process_day():
-    uploaded = request.files.get('file')
-    if not uploaded:
-        return jsonify({'error': 'ارفع ملف اليوم باسم file'}), 400
-    try:
-        safety_items = json.loads(request.form.get('safety_items') or '[]')
-        excel_path, pdf_path, report = build_sauce_day_files(
-            uploaded,
-            safety_items=safety_items,
-            expected_day_no=request.form.get('day_no'),
-        )
-        package = package_sauce_files(excel_path, pdf_path, report['day_no'])
-        response = send_file(
-            package,
-            as_attachment=True,
-            download_name=f"Day{report['day_no']}_Sauce.zip",
-            mimetype='application/zip',
-        )
-        response.headers['X-Sauce-Report'] = json.dumps(report, ensure_ascii=True)[:7000]
-        return response
-    except SauceMappingRequiredError as e:
-        return jsonify({
-            'error': str(e),
-            'code': 'sauce_mapping_required',
-            'missing_groups': e.missing_groups,
-            'available_meals': e.available_meals,
-        }), 422
-    except Exception as e:
-        app.logger.exception('sauce_ordering_process_day failed')
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/sauce-ordering/save-mappings', methods=['POST'])
-def sauce_ordering_save_mappings():
-    payload = request.get_json(silent=True) or {}
-    try:
-        report = save_sauce_mappings(payload.get('mappings') or [])
-        return jsonify({'ok': True, 'report': report})
-    except Exception as e:
-        app.logger.exception('sauce_ordering_save_mappings failed')
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/sauce-ordering/export-manual', methods=['POST'])
-def sauce_ordering_export_manual():
-    payload = request.get_json(silent=True) or {}
-    try:
-        excel_path, pdf_path, report = build_sauce_manual_files(
-            payload.get('day_no'), payload.get('items') or []
-        )
-        package = package_sauce_files(excel_path, pdf_path, report['day_no'])
-        response = send_file(
-            package,
-            as_attachment=True,
-            download_name=f"Day{report['day_no']}_Sauce.zip",
-            mimetype='application/zip',
-        )
-        response.headers['X-Sauce-Report'] = json.dumps(report, ensure_ascii=True)[:7000]
-        return response
-    except Exception as e:
-        app.logger.exception('sauce_ordering_export_manual failed')
         return jsonify({'error': str(e)}), 500
 
 
@@ -2785,20 +2478,7 @@ def _require_auth():
     if permissions.get('enabled') is False:
         return None, (jsonify({'error': 'تم إيقاف هذا الحساب من الأدمن'}), 403)
     role = permissions.get('role') or ADMIN_ROLE
-    pages = permissions.get('pages') if isinstance(permissions.get('pages'), list) else []
-    normalized_pages = {
-        str(page or '').strip().lower().removesuffix('.html')
-        for page in pages
-        if str(page or '').strip()
-    }
-    # REVIEW_ROLE كان في الأصل لحساب تقييمات العملاء فقط. بعد إضافة الصلاحيات
-    # التفصيلية أصبح نفس الدور يُستخدم أيضًا للحسابات المحدودة الأخرى. لذلك نطبّق
-    # الحظر القديم على حساب التقييمات فقط، لا على مستخدم مُنح صفحات أخرى صراحة.
-    legacy_review_only = role == REVIEW_ROLE and (
-        not normalized_pages
-        or normalized_pages.issubset({'index', 'customer-reviews'})
-    )
-    if legacy_review_only:
+    if role == REVIEW_ROLE:
         path = request.path or ''
         allowed_paths = (
             '/api/customer-reviews',
@@ -2814,21 +2494,8 @@ def _require_auth():
     return username, None
 
 
-def _require_action(action):
-    """يتأكد أن المستخدم مسموح له بالإجراء الإداري المطلوب، وليس مسجّلًا فقط."""
-    username, err = _require_auth()
-    if err:
-        return None, err
-    permissions = _permissions_for_username(username)
-    actions = permissions.get('actions') if isinstance(permissions.get('actions'), list) else []
-    if '*' not in actions and action not in actions:
-        return None, (jsonify({'error': 'ليس لديك صلاحية لتنفيذ هذا الإجراء'}), 403)
-    return username, None
-
-
 configure_invoice_receipts(_require_auth)
 configure_veg_comparison(_require_auth)
-configure_kitchen_violations(_require_auth)
 
 
 def _price_center_row_from_payload(payload, partial=False):
@@ -3269,7 +2936,7 @@ def logout():
 
 @app.route('/api/users', methods=['GET'])
 def list_users():
-    _, err = _require_action('manage_users')
+    _, err = _require_auth()
     if err:
         return err
     sb = get_client()
@@ -3294,7 +2961,7 @@ def list_users():
 
 @app.route('/api/users', methods=['POST'])
 def create_user():
-    _, err = _require_action('manage_users')
+    _, err = _require_auth()
     if err:
         return err
     payload = request.get_json(silent=True) or {}
@@ -3331,7 +2998,7 @@ def create_user():
 def update_user_permissions(user_id):
     """بيحدّث الصلاحيات التفصيلية (القوائم + الإجراءات) لمستخدم موجود - محتاج
     تسجيل دخول أدمن. Body: { role, enabled, pages: [...], actions: [...] }"""
-    _, err = _require_action('manage_users')
+    _, err = _require_auth()
     if err:
         return err
     sb = get_client()
@@ -3357,7 +3024,7 @@ def update_user_permissions(user_id):
 
 @app.route('/api/users/<int:user_id>', methods=['DELETE'])
 def delete_user(user_id):
-    _, err = _require_action('manage_users')
+    _, err = _require_auth()
     if err:
         return err
     sb = get_client()
@@ -3367,7 +3034,7 @@ def delete_user(user_id):
 
 @app.route('/api/users/<int:user_id>/password', methods=['PUT'])
 def change_user_password(user_id):
-    _, err = _require_action('manage_users')
+    _, err = _require_auth()
     if err:
         return err
     payload = request.get_json(silent=True) or {}
@@ -4793,113 +4460,6 @@ def _riyadh_today_date():
     return (datetime.now(timezone.utc) + timedelta(hours=3)).date().isoformat()
 
 
-def _veg_inventory_photo_data_url(file_storage):
-    if not file_storage or not file_storage.filename:
-        return ''
-    mime = (file_storage.mimetype or '').lower()
-    if not mime.startswith('image/'):
-        raise ValueError('ارفع صورة فقط لإثبات المخزون')
-    raw = file_storage.read()
-    if len(raw) > 8 * 1024 * 1024:
-        raise ValueError('الصورة أكبر من 8 ميجا')
-    try:
-        with Image.open(io.BytesIO(raw)) as source_image:
-            image = ImageOps.exif_transpose(source_image)
-            image.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
-            if image.mode not in ('RGB', 'L'):
-                background = Image.new('RGB', image.size, 'white')
-                if 'A' in image.getbands():
-                    background.paste(image, mask=image.getchannel('A'))
-                else:
-                    background.paste(image)
-                image = background
-            output = io.BytesIO()
-            image.save(output, format='JPEG', quality=82, optimize=True)
-            return 'data:image/jpeg;base64,' + base64.b64encode(output.getvalue()).decode('ascii')
-    except Exception:
-        return f"data:{mime or 'image/jpeg'};base64,{base64.b64encode(raw).decode('ascii')}"
-
-
-def _veg_inventory_proofs_for_dates(sb, dates):
-    dates = sorted({str(d or '').strip() for d in dates if str(d or '').strip()})
-    if not dates:
-        return {}
-    result = {}
-    try:
-        res = execute_with_retry(
-            sb.table('upload_log')
-            .select('id,file_name,item_date,message,created_at')
-            .eq('file_type', 'veg_inventory_proof')
-            .in_('item_date', dates)
-            .order('created_at', desc=True)
-        )
-    except Exception:
-        return {}
-    for row in res.data or []:
-        payload = _read_upload_log_message(row)
-        entry_date = str(payload.get('entry_date') or row.get('item_date') or '').strip()
-        item_name = str(payload.get('item_name') or row.get('file_name') or '').strip()
-        if not entry_date or not item_name:
-            continue
-        key = (entry_date, item_name)
-        if key in result:
-            continue
-        result[key] = {
-            'proof_id': row.get('id'),
-            'proof_url': f"/api/veg-inventory/proof/{row.get('id')}",
-            'proof_thumb_url': f"/api/veg-inventory/proof/{row.get('id')}?thumb=1",
-            'proof_updated_at': payload.get('updated_at') or row.get('created_at'),
-        }
-    return result
-
-
-def _veg_inventory_existing_proofs(sb, entry_date):
-    return _veg_inventory_proofs_for_dates(sb, [entry_date])
-
-
-@app.route('/api/veg-inventory/proof/<int:proof_id>', methods=['GET'])
-def veg_inventory_proof_image(proof_id):
-    sb = get_client()
-    res = execute_with_retry(
-        sb.table('upload_log')
-        .select('message')
-        .eq('id', proof_id)
-        .eq('file_type', 'veg_inventory_proof')
-        .limit(1)
-    )
-    rows = res.data or []
-    if not rows:
-        return jsonify({'error': 'الصورة غير موجودة'}), 404
-    data_url = _read_upload_log_message(rows[0]).get('photo_base64') or ''
-    if not data_url:
-        return jsonify({'error': 'الصورة غير موجودة'}), 404
-    try:
-        header, b64data = data_url.split(',', 1)
-        mime = header.split(':')[1].split(';')[0]
-        img_bytes = base64.b64decode(b64data)
-    except Exception:
-        return jsonify({'error': 'الصورة تالفة'}), 400
-    if request.args.get('thumb') in {'1', 'true', 'yes'}:
-        try:
-            with Image.open(io.BytesIO(img_bytes)) as source_image:
-                image = ImageOps.exif_transpose(source_image)
-                image.thumbnail((320, 320), Image.Resampling.LANCZOS)
-                output = io.BytesIO()
-                if image.mode not in ('RGB', 'L'):
-                    background = Image.new('RGB', image.size, 'white')
-                    if 'A' in image.getbands():
-                        background.paste(image, mask=image.getchannel('A'))
-                    else:
-                        background.paste(image)
-                    image = background
-                image.save(output, format='JPEG', quality=78, optimize=True)
-                img_bytes = output.getvalue()
-                mime = 'image/jpeg'
-        except Exception:
-            pass
-    return send_file(io.BytesIO(img_bytes), mimetype=mime, download_name=f'veg-proof-{proof_id}.jpg', max_age=3600)
-
-
 @app.route('/api/veg-inventory/items', methods=['GET'])
 def veg_inventory_items_list():
     """قايمة الأصناف الثابتة (خضروات/أعشاب/فواكه) بالترتيب - للعامل بتوكينه."""
@@ -5035,16 +4595,10 @@ def veg_inventory_today_get():
         .eq('entry_date', today)
     )
     rows = res.data or []
-    proofs = _veg_inventory_existing_proofs(sb, today)
     last_updated = max((r['updated_at'] for r in rows), default=None)
     return jsonify({
         'date': today,
         'entries': {r['item_name']: r['remaining_stock'] for r in rows},
-        'proofs': {
-            name: proof
-            for (entry_date, name), proof in proofs.items()
-            if entry_date == today
-        },
         'last_updated': last_updated,
     })
 
@@ -5055,36 +4609,14 @@ def veg_inventory_today_save():
     { "token": "...", "entries": { "اسم الصنف": 1200, ... } }"""
     if not _veg_inventory_worker_ok():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
-    if request.content_type and request.content_type.startswith('multipart/form-data'):
-        try:
-            payload = json.loads(request.form.get('payload') or '{}')
-        except Exception:
-            return jsonify({'error': 'بيانات الحفظ غير صحيحة'}), 400
-    else:
-        payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True) or {}
     entries = payload.get('entries') or {}
-    photo_keys = payload.get('photo_keys') or {}
     if not isinstance(entries, dict) or not entries:
         return jsonify({'error': 'مفيش قيم للحفظ'}), 400
 
     today = _riyadh_today_date()
     now = datetime.now(timezone.utc).isoformat()
-    sb = get_client()
-    existing_proofs = _veg_inventory_existing_proofs(sb, today)
-    try:
-        existing_entries_res = execute_with_retry(
-            sb.table('veg_inventory_entries')
-            .select('item_name,remaining_stock')
-            .eq('entry_date', today)
-        )
-        existing_entries = {
-            str(row.get('item_name') or ''): row.get('remaining_stock')
-            for row in existing_entries_res.data or []
-        }
-    except Exception:
-        existing_entries = {}
     rows = []
-    proof_rows = []
     for item_name, value in entries.items():
         if value is None or str(value).strip() == '':
             continue
@@ -5092,47 +4624,16 @@ def veg_inventory_today_save():
             val = float(value)
         except (TypeError, ValueError):
             return jsonify({'error': f'قيمة غير صحيحة للصنف "{item_name}"'}), 400
-        field_name = str(photo_keys.get(item_name) or '').strip()
-        photo_file = request.files.get(field_name) if field_name else None
-        photo_base64 = ''
-        if photo_file and photo_file.filename:
-            try:
-                photo_base64 = _veg_inventory_photo_data_url(photo_file)
-            except ValueError as exc:
-                return jsonify({'error': f'{item_name}: {exc}'}), 400
         rows.append({'entry_date': today, 'item_name': item_name, 'remaining_stock': val, 'updated_at': now})
-        if photo_base64:
-            proof_rows.append({
-                'file_type': 'veg_inventory_proof',
-                'file_name': item_name,
-                'item_date': today,
-                'message': json.dumps({
-                    'entry_date': today,
-                    'item_name': item_name,
-                    'remaining_stock': val,
-                    'photo_base64': photo_base64,
-                    'updated_at': now,
-                }, ensure_ascii=False),
-                'level': 'info',
-            })
 
     if not rows:
         return jsonify({'error': 'مفيش قيم صحيحة للحفظ'}), 400
 
+    sb = get_client()
     try:
         execute_with_retry(
             sb.table('veg_inventory_entries').upsert(rows, on_conflict='entry_date,item_name')
         )
-        for proof in proof_rows:
-            execute_with_retry(
-                sb.table('upload_log')
-                .delete()
-                .eq('file_type', 'veg_inventory_proof')
-                .eq('item_date', today)
-                .eq('file_name', proof['file_name'])
-            )
-        if proof_rows:
-            execute_with_retry(sb.table('upload_log').insert(proof_rows))
     except Exception as e:
         return jsonify({'error': f'تعذر الحفظ: {e}'}), 400
     return jsonify({'ok': True, 'date': today, 'updated_at': now, 'count': len(rows)})
@@ -5152,13 +4653,7 @@ def veg_inventory_list_all():
     items_res = execute_with_retry(
         sb.table('veg_inventory_items').select('item_name, category, unit').order('sort_order')
     )
-    entries = entries_res.data or []
-    proofs = _veg_inventory_proofs_for_dates(sb, [r.get('entry_date') for r in entries])
-    for row in entries:
-        proof = proofs.get((str(row.get('entry_date') or ''), str(row.get('item_name') or '')))
-        if proof:
-            row.update(proof)
-    return jsonify({'entries': entries, 'items': items_res.data or []})
+    return jsonify({'entries': entries_res.data or [], 'items': items_res.data or []})
 
 
 @app.route('/api/veg-inventory/entry/<int:entry_id>', methods=['PUT'])
@@ -5407,68 +4902,13 @@ STATION_TAB_NAMES = {
 PURPLE_FILL = PatternFill(fill_type='solid', fgColor='6600FF')
 
 
-def _normalise_workbook_label(value):
-    """Normalise a tab/header label without depending on spaces or punctuation."""
-    text = str(value or '').strip().casefold().replace('_', ' ')
-    return re.sub(r'[^0-9a-z\u0600-\u06ff]+', ' ', text).strip()
-
-
-def _sheet_row_has_groups(ws, groups, max_rows=15, max_cols=16):
-    """Return True when one early row contains every requested header group."""
-    for row in ws.iter_rows(
-        min_row=1, max_row=min(max_rows, ws.max_row),
-        min_col=1, max_col=min(max_cols, ws.max_column), values_only=True,
-    ):
-        cells = [_normalise_workbook_label(value) for value in row if value is not None]
-        if not cells:
-            continue
-        if all(
-            any(any(alias == cell or alias in cell for alias in aliases) for cell in cells)
-            for aliases in groups
-        ):
-            return True
-    return False
-
-
-def _find_ordering_sheet_name(wb):
-    """Find the actual ordering table even if its tab was harmlessly renamed."""
-    groups = (
-        ('items', 'item', 'الأصناف', 'الصنف'),
-        ('category', 'التصنيف'),
-        ('unit', 'الوحدة'),
-        ('daily weight', 'الوزن اليومي'),
-    )
-    # Prefer the established tab, then fall back to its table structure.
-    for name in wb.sheetnames:
-        if _normalise_workbook_label(name) == 'ordering':
-            return name
-    for name in wb.sheetnames:
-        if _sheet_row_has_groups(wb[name], groups):
-            return name
-    return None
-
-
-def _resolve_station_sheet_name(wb, requested_name):
-    """Resolve a processing tab by meaning; unrelated tab renames are ignored."""
-    if requested_name in wb.sheetnames:
-        return requested_name
-    requested_norm = _normalise_workbook_label(requested_name)
-    for name in wb.sheetnames:
-        if _normalise_workbook_label(name) == requested_norm:
-            return name
-    if requested_norm == 'ordering':
-        return _find_ordering_sheet_name(wb)
-    return None
-
-
 def _read_station_rows(file_storage, sheet_name):
     """بيرجّع dict: name -> {'unit':..,'category':..,'weekly':..} من شيت المحطة
     المحدّد بالاسم (عشان ملف توكيو فيه أكتر من شيت محتمل، ولازم نحدد الصحيح
     لكل محطة بالاسم مش بالتخمين).
     أعمدة المصدر: A=الاسم، B=الفئة، C=الوحدة، D=الوزن اليومي، E=الوزن الأسبوعي."""
     wb = openpyxl.load_workbook(file_storage, data_only=True)
-    sheet_name = _resolve_station_sheet_name(wb, sheet_name)
-    if not sheet_name:
+    if sheet_name not in wb.sheetnames:
         return None, {}
     ws = wb[sheet_name]
     out = {}
@@ -5653,8 +5093,8 @@ def _add_station_tab(wb, station_key, file_storage):
     """بيضيف تاب لمحطة بنفس التنسيق الكامل (A:E)، باستخدام نفس منطق extract-sheet-range."""
     file_storage.seek(0)
     src_wb = openpyxl.load_workbook(file_storage, data_only=True)
-    sheet_name = _resolve_station_sheet_name(src_wb, STATION_SHEET_MAP[station_key])
-    if not sheet_name:
+    sheet_name = STATION_SHEET_MAP[station_key]
+    if sheet_name not in src_wb.sheetnames:
         return None
     src_ws = src_wb[sheet_name]
     out_ws = wb.create_sheet(title=STATION_TAB_NAMES[station_key])
@@ -5741,8 +5181,7 @@ def _read_vegetable_rows(file_storage, sheet_name):
     M (وحدة الطلب)، وبتشيل أي صف وزنه اليومي صفر بالظبط (زي باقي Daily Ordering)."""
     file_storage.seek(0)
     wb = openpyxl.load_workbook(file_storage, data_only=True)
-    sheet_name = _resolve_station_sheet_name(wb, sheet_name)
-    if not sheet_name:
+    if sheet_name not in wb.sheetnames:
         return []
     ws = wb[sheet_name]
     out = []
@@ -5906,8 +5345,8 @@ def _add_station_tab_daily(wb, station_key, file_storage):
     (اللي عمود D فيها فاضي) بتفضل زي ما هي."""
     file_storage.seek(0)
     src_wb = openpyxl.load_workbook(file_storage, data_only=True)
-    sheet_name = _resolve_station_sheet_name(src_wb, STATION_SHEET_MAP[station_key])
-    if not sheet_name:
+    sheet_name = STATION_SHEET_MAP[station_key]
+    if sheet_name not in src_wb.sheetnames:
         return None
     src_ws = src_wb[sheet_name]
     out_ws = wb.create_sheet(title=STATION_TAB_NAMES[station_key])
@@ -5937,8 +5376,7 @@ def _add_station_tab_daily(wb, station_key, file_storage):
     return out_ws
 
 
-def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num_override=None,
-                              vegetable_summary_rows=None, inventory_date=None):
+def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num_override=None, vegetable_summary_rows=None):
     """بتبني zip فيه Daily_Ordering + Vegetables (إكسيل) + صورة PNG لكل تاب
     فيهم لو with_images=True (لو توليد الصور فشل لأي سبب - مثلاً LibreOffice
     مش متظبط على السيرفر - بيرجع الإكسيل عادي بدون ما يكسر الطلب كله).
@@ -5951,31 +5389,17 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
         zf.writestr(f'Daily_Ordering_{today}.xlsx', buf1.getvalue())
         buf2 = io.BytesIO(); wb_veg.save(buf2)
         zf.writestr(f'Vegetables_{today}.xlsx', buf2.getvalue())
-        wb_after_inventory = None
-        wb_remaining_summary = None
-        if vegetable_summary_rows and inventory_date:
+        if vegetable_summary_rows:
             try:
-                wb_after_inventory, selected_inventory_date = _build_vegetables_after_inventory_workbook(
-                    vegetable_summary_rows,
-                    inventory_date,
-                )
+                wb_after_inventory, previous_date = _build_vegetables_after_inventory_workbook(vegetable_summary_rows, today)
                 buf3 = io.BytesIO(); wb_after_inventory.save(buf3)
-                zf.writestr(
-                    f'Vegetables_After_Inventory_{selected_inventory_date}_{today}.xlsx',
-                    buf3.getvalue(),
-                )
-                wb_remaining_summary = _build_remaining_inventory_summary_workbook(wb_after_inventory)
-                buf4 = io.BytesIO(); wb_remaining_summary.save(buf4)
-                zf.writestr(
-                    f'Vegetables_Remaining_Summary_{selected_inventory_date}_{today}.xlsx',
-                    buf4.getvalue(),
-                )
+                zf.writestr(f'Vegetables_After_Yesterday_Inventory_{today}.xlsx', buf3.getvalue())
             except Exception as e:
-                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم يوم المخزون المختار')
-                zf.writestr('Vegetables_After_Inventory_ERROR.txt',
-                             f'حصل خطأ أثناء خصم يوم المخزون المختار: {e}')
+                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم مخزون أمس')
+                zf.writestr('Vegetables_After_Yesterday_Inventory_ERROR.txt',
+                             f'حصل خطأ أثناء خصم مخزون أمس: {e}')
                 wb_after_inventory = None
-                selected_inventory_date = None
+                previous_date = None
 
         if with_images:
             try:
@@ -5990,14 +5414,6 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
                         today,
                         prefix='Vegetables_After_Yesterday_Inventory_',
                         day_num_override=_inventory_sheet_day_override(day_num_override),
-                    )
-                if wb_remaining_summary:
-                    add_workbook_images_to_zip(
-                        zf,
-                        wb_remaining_summary,
-                        today,
-                        prefix='Vegetables_Remaining_',
-                        day_num_override=_remaining_summary_day_override(day_num_override),
                     )
             except Exception as e:
                 app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
@@ -6024,8 +5440,7 @@ def _build_daily_ordering_zip(wb_daily, wb_veg, today, with_images=True, day_num
 
 
 def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_override=None,
-                               vegetable_summary_rows=None, bakery_summary_image=False,
-                               inventory_date=None):
+                               vegetable_summary_rows=None, bakery_summary_image=False):
     """زي _build_daily_ordering_zip بالظبط بس لملف واحد بس (مش اتنين) — مستخدمة
     في زرار "Daily Ordering" أو "Vegetables" لوحدهم، عشان صور التابات PNG
     تفضل متضافة زي ما كانت أول ما الزرارين كانوا مدموجين في واحد."""
@@ -6034,28 +5449,15 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
         buf = io.BytesIO(); wb.save(buf)
         zf.writestr(f'{file_label}_{today}.xlsx', buf.getvalue())
         wb_after_inventory = None
-        wb_remaining_summary = None
-        if vegetable_summary_rows and inventory_date:
+        if vegetable_summary_rows:
             try:
-                wb_after_inventory, selected_inventory_date = _build_vegetables_after_inventory_workbook(
-                    vegetable_summary_rows,
-                    inventory_date,
-                )
+                wb_after_inventory, previous_date = _build_vegetables_after_inventory_workbook(vegetable_summary_rows, today)
                 buf2 = io.BytesIO(); wb_after_inventory.save(buf2)
-                zf.writestr(
-                    f'Vegetables_After_Inventory_{selected_inventory_date}_{today}.xlsx',
-                    buf2.getvalue(),
-                )
-                wb_remaining_summary = _build_remaining_inventory_summary_workbook(wb_after_inventory)
-                buf3 = io.BytesIO(); wb_remaining_summary.save(buf3)
-                zf.writestr(
-                    f'Vegetables_Remaining_Summary_{selected_inventory_date}_{today}.xlsx',
-                    buf3.getvalue(),
-                )
+                zf.writestr(f'Vegetables_After_Yesterday_Inventory_{today}.xlsx', buf2.getvalue())
             except Exception as e:
-                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم يوم المخزون المختار')
-                zf.writestr('Vegetables_After_Inventory_ERROR.txt',
-                             f'حصل خطأ أثناء خصم يوم المخزون المختار: {e}')
+                app.logger.exception('تعذر تجهيز طلبية الخضار بعد خصم مخزون أمس')
+                zf.writestr('Vegetables_After_Yesterday_Inventory_ERROR.txt',
+                             f'حصل خطأ أثناء خصم مخزون أمس: {e}')
         try:
             add_workbook_images_to_zip(zf, wb, today, prefix=image_prefix,
                                         day_num_override=day_num_override)
@@ -6066,14 +5468,6 @@ def _build_single_workbook_zip(wb, today, file_label, image_prefix, day_num_over
                     today,
                     prefix='Vegetables_After_Yesterday_Inventory_',
                     day_num_override=_inventory_sheet_day_override(day_num_override),
-                )
-            if wb_remaining_summary:
-                add_workbook_images_to_zip(
-                    zf,
-                    wb_remaining_summary,
-                    today,
-                    prefix='Vegetables_Remaining_',
-                    day_num_override=_remaining_summary_day_override(day_num_override),
                 )
         except Exception as e:
             app.logger.exception('تعذر توليد صور التابات (الإكسيل نزل عادي بدونها)')
@@ -6108,13 +5502,6 @@ def _inventory_sheet_day_override(day_num_override):
     if day_num_override:
         return day_num_override
     return None
-
-
-def _remaining_summary_day_override(day_num_override):
-    if isinstance(day_num_override, dict):
-        day_num = day_num_override.get('Summary') or next(iter(day_num_override.values()), None)
-        return {'Summary': day_num} if day_num else None
-    return {'Summary': day_num_override} if day_num_override else None
 
 
 def _bakery_sheet_day_override(day_num_override):
@@ -6206,17 +5593,18 @@ def _normalize_inventory_qty(qty, inventory_unit, order_unit):
     return qty
 
 
-def _load_selected_day_veg_inventory(inventory_date):
+def _load_previous_day_veg_inventory(target_date):
     try:
-        selected_date = datetime.strptime(str(inventory_date or '').strip(), '%Y-%m-%d').date().isoformat()
+        target_dt = datetime.strptime(target_date, '%Y-%m-%d').date()
     except (TypeError, ValueError):
-        raise ValueError('اختر يوم المخزون الذي تريد الخصم منه أولًا')
+        target_dt = datetime.now(timezone.utc).date()
+    previous_date = (target_dt - timedelta(days=1)).isoformat()
 
     sb = get_client()
     entries_res = execute_with_retry(
         sb.table('veg_inventory_entries')
         .select('item_name, remaining_stock')
-        .eq('entry_date', selected_date)
+        .eq('entry_date', previous_date)
     )
     items_res = execute_with_retry(
         sb.table('veg_inventory_items')
@@ -6247,11 +5635,11 @@ def _load_selected_day_veg_inventory(inventory_date):
         for alias in _vegetable_match_aliases(item_name):
             inventory[alias] = record
 
-    return selected_date, inventory
+    return previous_date, inventory
 
 
-def _build_vegetables_after_inventory_workbook(summary_rows, inventory_date):
-    selected_inventory_date, inventory = _load_selected_day_veg_inventory(inventory_date)
+def _build_vegetables_after_inventory_workbook(summary_rows, target_date):
+    previous_date, inventory = _load_previous_day_veg_inventory(target_date)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -6271,7 +5659,7 @@ def _build_vegetables_after_inventory_workbook(summary_rows, inventory_date):
     center = Alignment(horizontal='center', vertical='center', wrap_text=True)
     right = Alignment(horizontal='right', vertical='center', wrap_text=True)
 
-    headers = ['الصنف', 'طلب اليوم', 'مخزون اليوم المختار', 'الطلب المتبقي', 'الوحدة', 'حالة الخصم', 'التصنيف']
+    headers = ['الصنف', 'طلب اليوم', 'مخزون أمس', 'الطلب المتبقي', 'الوحدة', 'حالة الخصم', 'التصنيف']
     widths = [44, 16, 16, 18, 12, 22, 18]
     for col, (header, width) in enumerate(zip(headers, widths), 1):
         cell = ws.cell(row=1, column=col, value=header)
@@ -6296,7 +5684,7 @@ def _build_vegetables_after_inventory_workbook(summary_rows, inventory_date):
         stock_qty = 0.0 if unit_mismatch else normalized_stock
         remaining = max(order_qty - stock_qty, 0.0)
         if not inventory:
-            status = 'لا توجد كميات مسجلة في اليوم المختار'
+            status = 'لا يوجد مخزون أمس'
         elif unit_mismatch:
             status = 'وحدة مختلفة'
         elif inv_record:
@@ -6329,64 +5717,7 @@ def _build_vegetables_after_inventory_workbook(summary_rows, inventory_date):
                 cell.number_format = '#,##0.000'
 
     ws.freeze_panes = 'A2'
-    return wb, selected_inventory_date
-
-
-def _build_remaining_inventory_summary_workbook(after_inventory_wb):
-    """ملخص إضافي فقط للكميات المتبقية بعد الخصم.
-
-    لا يغيّر تقرير الخصم الأصلي، ولا يضيف أعمدة الاستلام أو الإمضاء.
-    """
-    source = after_inventory_wb['الطلب المتبقي']
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = 'Summary'
-    ws.sheet_view.rightToLeft = False
-    ws.freeze_panes = 'A2'
-
-    purple_fill = PatternFill('solid', start_color='6600FF')
-    even_fill = PatternFill('solid', start_color='F2EEFF')
-    odd_fill = PatternFill('solid', start_color='FFFFFF')
-    header_font = Font(name='Tahoma', bold=True, color='FFFFFF', size=11)
-    data_font = Font(name='Tahoma', size=11)
-    number_font = Font(name='Tahoma', bold=True, size=11)
-    thin = Side(style='thin', color='D0C8F0')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    right = Alignment(horizontal='right', vertical='center', wrap_text=True)
-
-    headers = ['ITEMS', 'Category', 'Remaining Order', 'Order Unit']
-    widths = [48, 16, 16, 14]
-    for col, (header, width) in enumerate(zip(headers, widths), start=1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.fill = purple_fill
-        cell.font = header_font
-        cell.alignment = center
-        cell.border = border
-        ws.column_dimensions[get_column_letter(col)].width = width
-    ws.row_dimensions[1].height = 24
-
-    out_row = 2
-    for source_row in range(2, source.max_row + 1):
-        item_name = source.cell(source_row, 1).value
-        if not item_name:
-            continue
-        category = source.cell(source_row, 7).value or ''
-        remaining = _to_number(source.cell(source_row, 4).value)
-        order_unit = source.cell(source_row, 5).value or ''
-        fill = even_fill if out_row % 2 == 0 else odd_fill
-        values = [item_name, category, remaining, order_unit]
-        for col, value in enumerate(values, start=1):
-            cell = ws.cell(row=out_row, column=col, value=value)
-            cell.fill = fill
-            cell.font = number_font if col == 3 else data_font
-            cell.alignment = right if col == 1 else center
-            cell.border = border
-            if col == 3:
-                cell.number_format = '#,##0.000'
-        out_row += 1
-
-    return wb
+    return wb, previous_date
 
 
 def _detect_uploaded_station_files(uploaded):
@@ -6566,16 +5897,6 @@ def daily_ordering():
     if missing:
         return jsonify({'error': f'محطات ناقصة: {", ".join(missing)}'}), 400
 
-    skip_inventory = str(request.form.get('skip_inventory') or request.args.get('skip_inventory') or '').strip().lower() in {'1', 'true', 'yes'}
-    inventory_date = (request.form.get('inventory_date') or request.args.get('inventory_date') or '').strip()
-    if skip_inventory:
-        inventory_date = None
-    else:
-        try:
-            inventory_date = datetime.strptime(inventory_date, '%Y-%m-%d').date().isoformat()
-        except (TypeError, ValueError):
-            return jsonify({'error': 'اختر يوم المخزون الذي تريد الخصم منه، أو اختر التنزيل بدون خصم'}), 400
-
     try:
         wb_daily = openpyxl.Workbook()
         wb_daily.remove(wb_daily.active)
@@ -6591,8 +5912,8 @@ def daily_ordering():
             # جمع كل الأصناف من الـ Ordering sheet لعمل Summary
             request.files[key].seek(0)
             src_wb = openpyxl.load_workbook(request.files[key], data_only=True)
-            sheet_name = _resolve_station_sheet_name(src_wb, STATION_SHEET_MAP[key])
-            if sheet_name:
+            sheet_name = STATION_SHEET_MAP[key]
+            if sheet_name in src_wb.sheetnames:
                 src_ws = src_wb[sheet_name]
                 for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row, min_col=1, max_col=13, values_only=True):
                     name = row[0]
@@ -6667,7 +5988,6 @@ def daily_ordering():
             today,
             day_num_override=day_num_by_tab,
             vegetable_summary_rows=_vegetable_summary_rows_from_station_data(vegetable_data),
-            inventory_date=inventory_date,
         )
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
@@ -6756,59 +6076,23 @@ def _build_summary_sheet(ws, rows, with_unit_col=False):
 
 
 def _detect_station_from_workbook(wb):
-    """Detect a station from stable workbook content, not fragile secondary tabs.
-
-    Exact primary tabs remain the fastest signal.  For Ordering-based workbooks,
-    table headers and recipe content provide the fallback, so renaming an
-    unrelated tab never blocks the whole upload.
-    """
+    """بتحدد نوع المحطة من الشيتات الموجودة في الملف — بدون الاعتماد على اسم الملف.
+    الأولوية بالترتيب عشان الفحص يكون دقيق ومحدد."""
     sheets = set(wb.sheetnames)
-    normalised_sheets = {_normalise_workbook_label(name): name for name in wb.sheetnames}
-
-    def has_tab(label):
-        return _normalise_workbook_label(label) in normalised_sheets
-
-    def workbook_has_row(groups, max_rows=15, max_cols=16):
-        return any(
-            _sheet_row_has_groups(wb[name], groups, max_rows=max_rows, max_cols=max_cols)
-            for name in wb.sheetnames
-        )
-
-    has_all_ingredients = has_tab('All_Ingredients')
-    has_marination = has_tab('Marination_Ordering')
-    ordering_sheet = _find_ordering_sheet_name(wb)
-
-    if has_all_ingredients and has_marination:
+    if 'All_Ingredients' in sheets and 'Marination_Ordering' in sheets:
         return 'tokyo'  # ملف توكيو الرئيسي (فيه الاتنين مع بعض)
-    if has_marination:
+    if 'Marination_Ordering' in sheets:
         return 'marination'
-    if has_all_ingredients:
+    if 'All_Ingredients' in sheets:
         return 'hot'
-
-    # سلطة: نعتمد على محتوى جداول السلطة/الاستلام، ولا نشترط أسماء
-    # Recipe أو User أو أي تاب ثانوي لا يدخل في استخراج الطلب.
-    salad_recipe_signature = workbook_has_row((
-        ('salad name', 'اسم السلطة'),
-        ('quantity needed salad', 'الكمية المطلوبة من السلطة'),
-    ))
-    salad_receiving_signature = workbook_has_row((
-        ('items', 'item', 'الأصناف', 'الصنف'),
-        ('category', 'التصنيف'),
-        ('daily order', 'طلب اليوم'),
-        ('order unit', 'وحدة الطلب'),
-        ('quantity received', 'الاستلام'),
-    ))
-    if has_tab('User') and has_tab('Usage'):
-        return 'salads'  # التوقيع القديم لملف السلطات
-    if ordering_sheet and (salad_recipe_signature or salad_receiving_signature):
-        return 'salads'
-
+    if 'User' in sheets and 'Usage' in sheets:
+        return 'salads'  # ملف السلطات عنده شيت User + Usage مميزين
     # الملفات اللي عندها شيت Ordering + شيتات وجبات عربية
-    if ordering_sheet:
+    if 'Ordering' in sheets:
         ar_count = sum(1 for s in sheets if any('\u0600' <= c <= '\u06FF' for c in s))
         if ar_count >= 3:
             return 'rice'  # شيت الأرز فيه أسماء شيتات عربية كتير
-        if has_tab('List of Meals'):
+        if 'List of Meals' in sheets:
             return 'sauce'
         # بعض نسخ ملف الصوص الجديدة لم تعد تحتوي على تاب List of Meals،
         # لكنها تحتوي على عدة تابات وصفات صوص واضحة بجانب Ordering.
@@ -6820,20 +6104,12 @@ def _detect_station_from_workbook(wb):
         if sauce_sheet_count >= 2:
             return 'sauce'
         # فطار أو حلويات — نفرق بينهم من اسم أول شيت بعد Ordering
-        others = [s for s in wb.sheetnames if s != ordering_sheet]
+        others = [s for s in wb.sheetnames if s != 'Ordering']
         if others:
-            all_recipe_names = ' '.join(_normalise_workbook_label(s) for s in others)
-            breakfast_score = sum(
-                all_recipe_names.count(w)
-                for w in ('foul', 'fool', 'egg', 'croissant', 'sandwich', 'omelette', 'oatmeal')
-            )
-            dessert_score = sum(
-                all_recipe_names.count(w)
-                for w in ('pie', 'cake', 'cookie', 'brownie', 'dessert', 'profiterole', 'muffin')
-            )
-            if breakfast_score >= 2 and breakfast_score > dessert_score:
+            first = others[0].lower()
+            if any(w in first for w in ('foul', 'egg', 'croissant', 'sandwich', 'omelette', 'fool')):
                 return 'breakfast'
-            if dessert_score >= 2 and dessert_score > breakfast_score:
+            if any(w in first for w in ('pie', 'cake', 'cookie', 'brownie', 'dessert', 'zatar')):
                 return 'desserts'
     return None
 
@@ -6874,17 +6150,6 @@ def auto_detect_stations():
         }), 400
     detected_keys = list(station_files.keys())
 
-    only = request.args.get('only')
-    skip_inventory = str(request.form.get('skip_inventory') or request.args.get('skip_inventory') or '').strip().lower() in {'1', 'true', 'yes'}
-    inventory_date = (request.form.get('inventory_date') or request.args.get('inventory_date') or '').strip()
-    if skip_inventory:
-        inventory_date = None
-    elif only != 'daily':
-        try:
-            inventory_date = datetime.strptime(inventory_date, '%Y-%m-%d').date().isoformat()
-        except (TypeError, ValueError):
-            return jsonify({'error': 'اختر يوم المخزون الذي تريد الخصم منه، أو اختر التنزيل بدون خصم'}), 400
-
     # خطوة 2: نفس منطق daily_ordering بالضبط
     try:
         wb_daily = openpyxl.Workbook()
@@ -6900,8 +6165,8 @@ def auto_detect_stations():
             vegetable_data[key] = _read_vegetable_rows(f, STATION_SHEET_MAP[key])
             f.seek(0)
             src_wb = openpyxl.load_workbook(f, data_only=True)
-            sheet_name = _resolve_station_sheet_name(src_wb, STATION_SHEET_MAP[key])
-            if sheet_name:
+            sheet_name = STATION_SHEET_MAP[key]
+            if sheet_name in src_wb.sheetnames:
                 src_ws = src_wb[sheet_name]
                 for row in src_ws.iter_rows(min_row=1, max_row=src_ws.max_row,
                                              min_col=1, max_col=13, values_only=True):
@@ -6941,6 +6206,7 @@ def auto_detect_stations():
         # ?only=daily أو ?only=vegetables — بيرجّع zip فيه ملف واحد بس + صوره،
         # عشان الواجهة تقدر تفصل زرار "Daily Ordering" عن زرار "Vegetables" لوحدهم
         # (لسه بيرجع zip مش xlsx خام، عشان صور التابات متضاعش زي الأول).
+        only = request.args.get('only')
         if only == 'daily':
             zip_buf = _build_single_workbook_zip(
                 wb_daily,
@@ -6961,7 +6227,6 @@ def auto_detect_stations():
                 'Vegetables_',
                 day_num_override,
                 vegetable_summary_rows=_vegetable_summary_rows_from_station_data(vegetable_data),
-                inventory_date=inventory_date,
             )
             return send_file(zip_buf, as_attachment=True,
                               download_name=f'Vegetables_{today}.zip',
@@ -6973,7 +6238,6 @@ def auto_detect_stations():
             today,
             day_num_override=day_num_override,
             vegetable_summary_rows=_vegetable_summary_rows_from_station_data(vegetable_data),
-            inventory_date=inventory_date,
         )
         return send_file(zip_buf, as_attachment=True,
                           download_name=f'Daily_Ordering_{today}.zip',
@@ -7137,6 +6401,36 @@ def _as_float_for_receipt(value):
         return 0
 
 
+def _find_existing_vegetables_receipt_log(sb, receipt_id, department, selected_date):
+    """Find the latest matching vegetables receipt log so edits update the day instead of duplicating it."""
+    receipt_id = str(receipt_id or '').strip()
+    department = str(department or '').strip().lower()
+    selected_date = str(selected_date or '').strip()
+    if not receipt_id and not (department and selected_date):
+        return None, {}
+    try:
+        rows = execute_with_retry(
+            sb.table('upload_log').select('*')
+            .eq('file_type', 'vegetables_receipt')
+            .order('created_at', desc=True).limit(500),
+            max_attempts=2,
+        ).data or []
+    except Exception as exc:
+        app.logger.warning('vegetables receipt duplicate lookup failed: %s', exc)
+        return None, {}
+    for row in rows:
+        meta = _read_upload_log_message(row)
+        same_receipt = receipt_id and str(meta.get('receipt_id') or '').strip() == receipt_id
+        same_day_department = (
+            selected_date
+            and str(meta.get('selected_date') or '').strip() == selected_date
+            and str(meta.get('department') or '').strip().lower() == department
+        )
+        if same_receipt or same_day_department:
+            return row, meta
+    return None, {}
+
+
 @app.route('/api/vegetables-receipt/submit', methods=['POST'])
 def vegetables_receipt_submit():
     payload = request.get_json(silent=True) or {}
@@ -7159,6 +6453,7 @@ def vegetables_receipt_submit():
     }[department]
     payload_log = {
         'kind': 'vegetables_receipt',
+        'receipt_type': department,
         'receipt_id': str(payload.get('receipt_id') or '').strip(),
         'department': department,
         'department_label': department_label,
@@ -7176,10 +6471,39 @@ def vegetables_receipt_submit():
         'total_received': round(total_received, 3),
         'rows': rows,
     }
+    sb = get_client()
+    existing_row, existing_meta = _find_existing_vegetables_receipt_log(
+        sb,
+        payload_log.get('receipt_id'),
+        department,
+        payload_log.get('selected_date'),
+    )
+    if existing_row:
+        try:
+            previous_count = int(existing_meta.get('edit_count') or 1)
+        except Exception:
+            previous_count = 1
+        payload_log['edit_count'] = previous_count + 1
+        payload_log['updated_existing_receipt'] = True
+        payload_log['previous_log_id'] = existing_row.get('id')
+        execute_with_retry(
+            sb.table('upload_log').update({
+                'file_name': department_label,
+                'item_date': payload_log.get('selected_date') or None,
+                'message': json.dumps(payload_log, ensure_ascii=False),
+                'level': 'info',
+            }).eq('id', existing_row.get('id')),
+            max_attempts=2,
+        )
+        _push_log_notification('vegetables_receipt', department_label, json.dumps(payload_log, ensure_ascii=False))
+        return jsonify({'ok': True, 'submitted_at': now_iso, **payload_log})
+
+    payload_log['edit_count'] = 1
+    payload_log['updated_existing_receipt'] = False
     _log(
         'vegetables_receipt',
-        'استلام الخضروات',
-        None,
+        department_label,
+        payload_log.get('selected_date') or None,
         json.dumps(payload_log, ensure_ascii=False),
         level='info',
     )
