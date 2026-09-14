@@ -39,6 +39,7 @@ weekly_purchasing_bp = Blueprint("weekly_purchasing", __name__)
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "data", "weekly_purchasing_template.xlsx")
 RUN_LOG_TYPE = "weekly_purchasing_run"
 INVENTORY_LOG_TYPE = "weekly_inventory_snapshot"
+CONTROL_LOG_TYPE = "weekly_purchasing_control"
 MAX_UPLOAD_FILES = 12
 CAIRO_TZ = ZoneInfo("Africa/Cairo")
 FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
@@ -351,6 +352,32 @@ def _inventory_for_run(run_id=None, fallback_to_latest=True):
     return _latest_payload(INVENTORY_LOG_TYPE)
 
 
+def weekly_control_for_run(run_id):
+    return _latest_payload(CONTROL_LOG_TYPE, run_id)
+
+
+def weekly_run_state(run_id):
+    control = weekly_control_for_run(run_id)
+    state = _clean(control.get("state")) or "active"
+    if state == "updating":
+        try:
+            lock_until = datetime.fromisoformat(str(control.get("lock_until") or "").replace("Z", "+00:00"))
+            if lock_until.tzinfo is None:
+                lock_until = lock_until.replace(tzinfo=CAIRO_TZ)
+            if datetime.now(CAIRO_TZ) >= lock_until.astimezone(CAIRO_TZ):
+                state = "active"
+        except (TypeError, ValueError):
+            pass
+    payload = _latest_payload(RUN_LOG_TYPE, run_id)
+    exists = bool(payload.get("rows")) and state != "deleted"
+    return {
+        "exists": exists,
+        "state": state if exists or state == "deleted" else "deleted",
+        "revision": payload.get("revision") or payload.get("updated_at") or payload.get("created_at") or "",
+        "updated_at": control.get("updated_at") or payload.get("updated_at") or payload.get("created_at") or "",
+    }
+
+
 def _previous_expected_stock(snapshot):
     previous_run_id = _clean(snapshot.get("run_id"))
     if not previous_run_id:
@@ -399,6 +426,7 @@ def prepare_weekly_run(files):
         "new_items": new_items,
         "inventory_source_run_id": snapshot.get("run_id") or "",
         "inventory_updated_at": snapshot.get("submitted_at") or snapshot.get("created_at") or "",
+        "revision": 1,
     }
     _log_event(RUN_LOG_TYPE, run_id, payload)
     return payload
@@ -745,7 +773,7 @@ def weekly_purchasing_prepare():
             "new_items": payload["new_items"],
             "source_tables_count": sum(len(source["tables"]) for source in payload["sources"]),
             "download_path": f"/api/weekly-purchasing/{run_id}/xlsx",
-            "inventory_path": f"/weekly-inventory.html?id={run_id}&v=25",
+            "inventory_path": f"/weekly-inventory.html?id={run_id}&v=26",
         })
     except WeeklyPurchasingError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -796,6 +824,9 @@ def weekly_purchasing_pdf(run_id):
 @weekly_purchasing_bp.route("/api/weekly-inventory/<run_id>", methods=["GET"])
 def weekly_inventory_get(run_id):
     try:
+        state = weekly_run_state(run_id)
+        if not state["exists"] or state["state"] != "active":
+            return jsonify({"error": "جاري تحديث البيانات", **state}), 409
         payload = _run_payload(run_id)
         run_snapshot = _inventory_for_run(run_id, fallback_to_latest=False)
         snapshot = run_snapshot or _inventory_for_run()
@@ -812,6 +843,7 @@ def weekly_inventory_get(run_id):
             "completed": completed,
             "download_path": f"/api/weekly-purchasing/{run_id}/xlsx",
             "pdf_path": f"/api/weekly-purchasing/{run_id}/pdf" if completed else "",
+            "revision": state["revision"],
             "rows": [{
                 "key": row.get("key"),
                 "item": row.get("item"),
@@ -831,6 +863,9 @@ def weekly_inventory_get(run_id):
 @weekly_purchasing_bp.route("/api/weekly-inventory/<run_id>", methods=["POST"])
 def weekly_inventory_submit(run_id):
     try:
+        state = weekly_run_state(run_id)
+        if not state["exists"] or state["state"] != "active":
+            return jsonify({"error": "جاري تحديث البيانات", **state}), 409
         run_payload = _run_payload(run_id)
         incoming = request.get_json(silent=True) or {}
         worker_name = _clean(incoming.get("worker_name"))
@@ -885,3 +920,9 @@ def weekly_inventory_submit(run_id):
     except Exception as exc:
         current_app.logger.exception("weekly inventory submit failed")
         return jsonify({"error": f"تعذر حفظ المخزون: {str(exc)[:180]}"}), 500
+
+
+@weekly_purchasing_bp.route("/api/weekly-inventory/<run_id>/status", methods=["GET"])
+def weekly_inventory_status(run_id):
+    state = weekly_run_state(run_id)
+    return jsonify(state), 200 if state["exists"] and state["state"] == "active" else 409

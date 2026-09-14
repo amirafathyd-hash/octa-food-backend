@@ -1,4 +1,4 @@
-# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v25-weekly-live-mobile
+# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v26-weekly-admin-control
 import os
 import requests
 import io
@@ -98,12 +98,23 @@ from receipt_pricing import (
 )
 from kitchen_live import register_kitchen_live_routes
 from packaging_orders import packaging_orders_bp
-from weekly_purchasing import weekly_purchasing_bp
+from weekly_purchasing import (
+    CONTROL_LOG_TYPE,
+    INVENTORY_LOG_TYPE,
+    RUN_LOG_TYPE,
+    _display_number as weekly_display_number,
+    _inventory_for_run as weekly_inventory_for_run,
+    _log_event as weekly_log_event,
+    _number as weekly_number,
+    _run_payload as weekly_run_payload,
+    weekly_control_for_run,
+    weekly_purchasing_bp,
+)
 from vegetable_cutting import vegetable_cutting_bp
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-09-15-v25-weekly-live-mobile'
+BACKEND_RELEASE = 'octa-backend-2026-09-15-v26-weekly-admin-control'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -135,7 +146,7 @@ def _ensure_cors_headers(response):
     if origin:
         response.headers.setdefault('Access-Control-Allow-Origin', origin)
         response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Token, X-Invoice-Receipt-Token')
-        response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
         response.headers.setdefault('Access-Control-Expose-Headers', 'X-Match-Report, X-Decision-Report, X-Day-Operations-Report, Content-Disposition')
     return response
 
@@ -1370,16 +1381,32 @@ def weekly_purchasing_runs():
         .order('created_at', desc=True).limit(2000),
         max_attempts=2,
     )
+    controls_res = execute_with_retry(
+        sb.table('upload_log').select('id,file_name,message,created_at')
+        .eq('file_type', CONTROL_LOG_TYPE)
+        .order('created_at', desc=True).limit(2000),
+        max_attempts=2,
+    )
     latest_snapshots = {}
     for row in snapshots_res.data or []:
         run_id = str(row.get('file_name') or '').strip()
         if run_id and run_id not in latest_snapshots:
             latest_snapshots[run_id] = {**_read_upload_log_message(row), '_log_id': row.get('id')}
+    latest_controls = {}
+    for row in controls_res.data or []:
+        run_id = str(row.get('file_name') or '').strip()
+        if run_id and run_id not in latest_controls:
+            latest_controls[run_id] = _read_upload_log_message(row)
     result = []
+    seen_run_ids = set()
     for row in runs_res.data or []:
         payload = _read_upload_log_message(row)
         run_id = str(payload.get('run_id') or row.get('file_name') or '').strip()
-        if not run_id:
+        if not run_id or run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(run_id)
+        control = latest_controls.get(run_id) or {}
+        if control.get('state') == 'deleted':
             continue
         snapshot = latest_snapshots.get(run_id) or {}
         rows_count = len(payload.get('rows') or [])
@@ -1395,11 +1422,155 @@ def weekly_purchasing_runs():
             'submitted_at': snapshot.get('submitted_at') or '',
             'worker_name': snapshot.get('worker_name') or '',
             'inventory_items_count': len(snapshot.get('items') or {}),
-            'inventory_path': f'/weekly-inventory.html?id={run_id}&v=25',
+            'inventory_path': f'/weekly-inventory.html?id={run_id}&v=26',
             'xlsx_path': f'/api/weekly-purchasing/{run_id}/xlsx',
             'pdf_path': f'/api/weekly-purchasing/{run_id}/pdf' if completed else '',
+            'control_state': control.get('state') or 'active',
+            'revision': payload.get('revision') or payload.get('updated_at') or payload.get('created_at') or '',
         })
     return jsonify({'runs': result})
+
+
+def _require_weekly_admin():
+    username, err = _require_auth()
+    if err:
+        return None, err
+    if _role_for_username(username) != ADMIN_ROLE:
+        return None, (jsonify({'error': 'هذه العملية متاحة للأدمن فقط'}), 403)
+    return username, None
+
+
+def _set_weekly_control(run_id, state, username, revision='', lock_minutes=0):
+    now = datetime.now(timezone.utc)
+    payload = {
+        'run_id': run_id,
+        'state': state,
+        'updated_at': now.isoformat(),
+        'updated_by': username,
+        'revision': revision,
+    }
+    if lock_minutes:
+        payload['lock_until'] = (now + timedelta(minutes=lock_minutes)).isoformat()
+    weekly_log_event(CONTROL_LOG_TYPE, run_id, payload)
+    return payload
+
+
+@app.route('/api/weekly-purchasing/<run_id>/admin', methods=['GET'])
+def weekly_purchasing_admin_get(run_id):
+    _, err = _require_weekly_admin()
+    if err:
+        return err
+    try:
+        payload = weekly_run_payload(run_id)
+        snapshot = weekly_inventory_for_run(run_id, fallback_to_latest=False)
+        inventory = snapshot.get('items') or {}
+        return jsonify({
+            'id': run_id,
+            'date': payload.get('date') or '',
+            'worker_name': snapshot.get('worker_name') or '',
+            'revision': payload.get('revision') or payload.get('updated_at') or payload.get('created_at') or '',
+            'rows': [{
+                'key': item.get('key'),
+                'item': item.get('item'),
+                'category': item.get('category'),
+                'unit': item.get('unit'),
+                'weekly_consumption': item.get('weekly_consumption'),
+                'available_stock': inventory.get(item.get('key'), ''),
+            } for item in payload.get('rows') or []],
+        })
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 404
+
+
+@app.route('/api/weekly-purchasing/<run_id>/admin/lock', methods=['POST'])
+def weekly_purchasing_admin_lock(run_id):
+    username, err = _require_weekly_admin()
+    if err:
+        return err
+    try:
+        payload = weekly_run_payload(run_id)
+        revision = payload.get('revision') or payload.get('updated_at') or payload.get('created_at') or ''
+        return jsonify({'ok': True, **_set_weekly_control(run_id, 'updating', username, revision, lock_minutes=5)})
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 404
+
+
+@app.route('/api/weekly-purchasing/<run_id>/admin/unlock', methods=['POST'])
+def weekly_purchasing_admin_unlock(run_id):
+    username, err = _require_weekly_admin()
+    if err:
+        return err
+    payload = weekly_run_payload(run_id)
+    revision = payload.get('revision') or payload.get('updated_at') or payload.get('created_at') or ''
+    return jsonify({'ok': True, **_set_weekly_control(run_id, 'active', username, revision)})
+
+
+@app.route('/api/weekly-purchasing/<run_id>/admin', methods=['PATCH'])
+def weekly_purchasing_admin_update(run_id):
+    username, err = _require_weekly_admin()
+    if err:
+        return err
+    try:
+        incoming = request.get_json(silent=True) or {}
+        run_payload = weekly_run_payload(run_id)
+        allowed_rows = {str(row.get('key') or ''): row for row in run_payload.get('rows') or []}
+        inventory = {}
+        for row in incoming.get('rows') or []:
+            key = str(row.get('key') or '')
+            if key not in allowed_rows or row.get('available_stock') in ('', None):
+                continue
+            value = weekly_number(row.get('available_stock'), default=float('nan'))
+            if value != value or value < 0:
+                return jsonify({'error': f"قيمة المخزون غير صحيحة للصنف {allowed_rows[key].get('item') or key}"}), 400
+            inventory[key] = weekly_display_number(value)
+        date_value = str(incoming.get('date') or run_payload.get('date') or '').strip()
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date_value):
+            return jsonify({'error': 'تاريخ الدورة غير صحيح'}), 400
+        now = datetime.now(timezone.utc).isoformat()
+        updated_payload = {key: value for key, value in run_payload.items() if not str(key).startswith('_')}
+        updated_payload.update({
+            'date': date_value,
+            'updated_at': now,
+            'updated_by': username,
+            'revision': int(run_payload.get('revision') or 1) + 1,
+        })
+        weekly_log_event(RUN_LOG_TYPE, run_id, updated_payload)
+        snapshot = {
+            'run_id': run_id,
+            'date': date_value,
+            'created_at': now,
+            'submitted_at': now if len(inventory) == len(allowed_rows) else '',
+            'worker_name': str(incoming.get('worker_name') or 'عامل المخزون').strip() or 'عامل المخزون',
+            'items_count': len(inventory),
+            'items': inventory,
+            'edited_by_admin': True,
+        }
+        weekly_log_event(INVENTORY_LOG_TYPE, run_id, snapshot)
+        _set_weekly_control(run_id, 'active', username, str(updated_payload['revision']))
+        return jsonify({'ok': True, 'revision': updated_payload['revision'], 'items_count': len(inventory)})
+    except Exception as exc:
+        app.logger.exception('weekly admin update failed')
+        return jsonify({'error': f'تعذر حفظ التعديل: {str(exc)[:180]}'}), 500
+
+
+@app.route('/api/weekly-purchasing/<run_id>/admin', methods=['DELETE'])
+def weekly_purchasing_admin_delete(run_id):
+    username, err = _require_weekly_admin()
+    if err:
+        return err
+    try:
+        weekly_run_payload(run_id)
+        _set_weekly_control(run_id, 'deleted', username)
+        sb = get_client()
+        for file_type in (RUN_LOG_TYPE, INVENTORY_LOG_TYPE):
+            execute_with_retry(
+                sb.table('upload_log').delete().eq('file_type', file_type).eq('file_name', run_id),
+                max_attempts=2,
+            )
+        return jsonify({'ok': True})
+    except Exception as exc:
+        app.logger.exception('weekly admin delete failed')
+        return jsonify({'error': f'تعذر حذف الدورة: {str(exc)[:180]}'}), 500
 
 
 @app.route('/api/receipt-notifications/list', methods=['GET'])
