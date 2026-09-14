@@ -34,11 +34,15 @@ DAY_AR = {
     "Tuesday": "الثلاثاء", "Wednesday": "الأربعاء", "Thursday": "الخميس",
     "Manual": "إدخال يدوي",
 }
-PACKING_ALIASES = {
-    "morning": ("Morning Packing", "Morn Packing", "Packing Morn"),
-    "evening": ("Evening Packing", "Even Packing", "Packing Even"),
-}
-COUNT_ITEM_COLUMNS = ((3, 4), (5, 6), (7, 8), (9, 10), (11, 12))
+COUNT_HEADERS = ("count", "qty", "quantity", "عدد", "العدد", "كمية", "الكميه")
+ITEM_HEADERS = (
+    "dish name", "item", "item name", "package", "packaging", "container",
+    "اسم الطبق", "اسم الصنف", "الصنف", "العبوة", "العبوه",
+)
+PACKAGING_ITEM_MARKERS = (
+    "صحن", "علبه", "علب", "كيس", "اونز", "ملعق", "شوكه", "منديل", "غطاء",
+    "container", "tray", "bowl", "bag", "spoon", "fork", "napkin", "lid",
+)
 FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 CUSTOMER_COUNT_VISION_PROMPT = """\
@@ -113,24 +117,101 @@ def _canonical_item(value):
     return raw
 
 
-def _find_sheet(wb, aliases):
-    exact = {_key(name): name for name in wb.sheetnames}
-    for alias in aliases:
-        if _key(alias) in exact:
-            return exact[_key(alias)]
-    # Structural fallback: only accept sheets whose first cell identifies a packing schedule.
-    for name in wb.sheetnames:
-        title = _key(wb[name].cell(1, 1).value)
-        if "pack" in _key(name) and ("schedule" in title or "جدول" in title):
-            wanted_morning = any("morn" in _key(alias) for alias in aliases)
-            is_morning = "morn" in _key(name) or "صباح" in title
-            if wanted_morning == is_morning:
-                return name
-    return None
+def _header_kind(value):
+    key = _key(value)
+    if not key:
+        return ""
+    if any(key == _key(label) or _key(label) in key for label in COUNT_HEADERS):
+        return "count"
+    if any(key == _key(label) or _key(label) in key for label in ITEM_HEADERS):
+        return "item"
+    return ""
+
+
+def _looks_like_packaging_item(value):
+    key = _key(value)
+    return bool(key and any(marker in key for marker in PACKAGING_ITEM_MARKERS))
+
+
+def _detect_count_item_columns(ws):
+    """Find repeated quantity/item column pairs from headers inside the sheet."""
+    max_row = min(ws.max_row or 0, 30)
+    max_col = min(ws.max_column or 0, 40)
+    if not max_row or not max_col:
+        return 0, ()
+    for row_index, values in enumerate(ws.iter_rows(
+        min_row=1, max_row=max_row, min_col=1, max_col=max_col,
+        values_only=True,
+    ), 1):
+        kinds = [_header_kind(value) for value in values]
+        count_then_item = []
+        item_then_count = []
+        for index in range(len(kinds) - 1):
+            if kinds[index] == "count" and kinds[index + 1] == "item":
+                count_then_item.append((index + 1, index + 2))
+            elif kinds[index] == "item" and kinds[index + 1] == "count":
+                item_then_count.append((index + 2, index + 1))
+        pairs = count_then_item if len(count_then_item) >= len(item_then_count) else item_then_count
+        if len(pairs) >= 2:
+            return row_index, tuple(pairs)
+    return 0, ()
+
+
+def _infer_count_item_columns(ws):
+    """Recover packaging grids even if their header wording was edited."""
+    max_row = min(ws.max_row or 0, 250)
+    max_col = min(ws.max_column or 0, 40)
+    hits = {}
+    first_data_row = {}
+    if not max_row or max_col < 2:
+        return 0, ()
+    for row_index, values in enumerate(ws.iter_rows(
+        min_row=1, max_row=max_row, min_col=1, max_col=max_col,
+        values_only=True,
+    ), 1):
+        for index in range(len(values) - 1):
+            if _number(values[index]) > 0 and _looks_like_packaging_item(values[index + 1]):
+                pair = (index + 1, index + 2)
+                hits[pair] = hits.get(pair, 0) + 1
+                first_data_row.setdefault(pair, row_index)
+    pairs = tuple(sorted(pair for pair, count in hits.items() if count >= 3))
+    if len(pairs) < 2:
+        return 0, ()
+    return max(0, min(first_data_row[pair] for pair in pairs) - 1), pairs
+
+
+def _shift_from_content(ws):
+    max_row = min(ws.max_row or 0, 8)
+    max_col = min(ws.max_column or 0, 16)
+    text = " ".join(
+        _clean(value)
+        for row in ws.iter_rows(
+            min_row=1, max_row=max_row, min_col=1, max_col=max_col,
+            values_only=True,
+        )
+        for value in row
+        if value is not None
+    )
+    key = _key(text)
+    if "morning" in key or "morn" in key or "صباح" in key:
+        return "morning"
+    if "evening" in key or "even" in key or "مساء" in key or "مسائي" in key:
+        return "evening"
+    return ""
 
 
 def _read_day_name(ws):
-    haystack = " ".join(_clean(ws.cell(row, col).value) for row in range(1, 4) for col in range(1, 4))
+    max_row = min(ws.max_row or 0, 8)
+    max_col = min(ws.max_column or 0, 16)
+    haystack = " ".join(
+        _clean(value)
+        for row in ws.iter_rows(
+            min_row=1, max_row=max_row, min_col=1, max_col=max_col,
+            values_only=True,
+        )
+        for value in row
+        if value is not None
+    )
     lowered = haystack.casefold()
     for day in DAY_ORDER:
         if day.casefold() in lowered:
@@ -141,21 +222,75 @@ def _read_day_name(ws):
     return ""
 
 
-def _sheet_items(ws):
+def _sheet_items(ws, column_pairs=None, header_row=None):
+    if column_pairs is None:
+        header_row, column_pairs = _detect_count_item_columns(ws)
+        if len(column_pairs) < 2:
+            header_row, column_pairs = _infer_count_item_columns(ws)
+    if not column_pairs:
+        return OrderedDict()
     items = OrderedDict()
     max_row = min(ws.max_row or 0, 5000)
-    for values in ws.iter_rows(min_row=4, max_row=max_row, min_col=1, max_col=12, values_only=True):
+    max_col = max(item_col for _, item_col in column_pairs)
+    for values in ws.iter_rows(
+        min_row=max(1, (header_row or 0) + 1), max_row=max_row,
+        min_col=1, max_col=max_col, values_only=True,
+    ):
         first = _key(values[0] if values else None)
         if first in {"total", "totals", "الاجمالي", "الاجماليات"}:
             continue
-        for qty_col, item_col in COUNT_ITEM_COLUMNS:
+        for qty_col, item_col in column_pairs:
             qty = _number(values[qty_col - 1] if len(values) >= qty_col else None)
             raw_item = _clean(values[item_col - 1] if len(values) >= item_col else None)
-            if qty <= 0 or not raw_item:
+            if qty <= 0 or not _looks_like_packaging_item(raw_item):
                 continue
             item = _canonical_item(raw_item)
             items[item] = items.get(item, 0.0) + qty
     return items
+
+
+def _packing_sheet_profile(ws):
+    header_row, column_pairs = _detect_count_item_columns(ws)
+    header_detected = len(column_pairs) >= 2
+    if not header_detected:
+        header_row, column_pairs = _infer_count_item_columns(ws)
+    if len(column_pairs) < 2:
+        return None
+    items = _sheet_items(ws, column_pairs, header_row)
+    if len(items) < 3 or sum(items.values()) <= 0:
+        return None
+    shift = _shift_from_content(ws)
+    score = len(column_pairs) * 100 + min(len(items), 50) * 5
+    score += 30 if header_detected else 0
+    score += 20 if shift else 0
+    score += 5 if ws.sheet_state == "visible" else 0
+    return {
+        "sheet": ws.title,
+        "shift": shift,
+        "header_row": header_row,
+        "column_pairs": column_pairs,
+        "items": items,
+        "score": score,
+    }
+
+
+def _find_packing_sheets(wb):
+    """Select the two operating packaging grids solely from workbook content."""
+    candidates = [
+        profile for profile in (_packing_sheet_profile(ws) for ws in wb.worksheets)
+        if profile is not None
+    ]
+    selected = []
+    for shift in ("morning", "evening"):
+        matching = [candidate for candidate in candidates if candidate["shift"] == shift]
+        if matching:
+            selected.append(max(matching, key=lambda candidate: candidate["score"]))
+    for candidate in sorted(candidates, key=lambda value: value["score"], reverse=True):
+        if candidate not in selected:
+            selected.append(candidate)
+        if len(selected) == 2:
+            break
+    return selected[:2]
 
 
 def _customer_count_from_workbook(wb):
@@ -291,7 +426,7 @@ def extract_customer_count_files(files):
             except Exception as exc:
                 raise PackagingWorkbookError(f"تعذر قراءة ملف Excel {filename}: {exc}") from exc
             try:
-                day = _day_from_workbook(workbook) or _day_from_filename(filename)
+                day = _day_from_workbook(workbook)
                 count = max(0, int(round(_customer_count_from_workbook(workbook))))
             finally:
                 workbook.close()
@@ -376,27 +511,40 @@ def extract_packaging_files(files):
             wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
         except Exception as exc:
             raise PackagingWorkbookError(f"تعذر قراءة الملف {uploaded.filename}: {exc}") from exc
-        matched = []
-        customer_count = _customer_count_from_workbook(wb)
-        day_name = ""
-        file_items = OrderedDict()
-        for shift, aliases in PACKING_ALIASES.items():
-            sheet_name = _find_sheet(wb, aliases)
-            if not sheet_name:
-                continue
-            ws = wb[sheet_name]
-            day_name = day_name or _read_day_name(ws)
-            shift_items = _sheet_items(ws)
-            for item, qty in shift_items.items():
-                file_items[item] = file_items.get(item, 0.0) + qty
-            matched.append({"shift": shift, "sheet": sheet_name, "units": round(sum(shift_items.values()), 3)})
-        wb.close()
-        if len(matched) != 2:
-            raise PackagingWorkbookError(
-                f"الملف {uploaded.filename} لازم يحتوي شيت صباح وشيت مساء للتغليف"
-            )
+        try:
+            matched = []
+            customer_count = _customer_count_from_workbook(wb)
+            day_name = _day_from_workbook(wb)
+            file_items = OrderedDict()
+            packing_sheets = _find_packing_sheets(wb)
+            if len(packing_sheets) != 2:
+                raise PackagingWorkbookError(
+                    f"تعذر التعرف على جدولَي التغليف من محتوى الملف {uploaded.filename}"
+                )
+            detected_days = {
+                detected for detected in (
+                    _read_day_name(wb[profile["sheet"]]) for profile in packing_sheets
+                ) if detected
+            }
+            if len(detected_days) > 1:
+                raise PackagingWorkbookError(
+                    f"يوجد أكثر من يوم تشغيل داخل الملف {uploaded.filename}"
+                )
+            day_name = next(iter(detected_days), day_name)
+            for index, profile in enumerate(packing_sheets, 1):
+                for item, qty in profile["items"].items():
+                    file_items[item] = file_items.get(item, 0.0) + qty
+                matched.append({
+                    "shift": profile["shift"] or f"schedule_{index}",
+                    "sheet": profile["sheet"],
+                    "units": round(sum(profile["items"].values()), 3),
+                })
+        finally:
+            wb.close()
         if not day_name:
-            raise PackagingWorkbookError(f"تعذر تحديد يوم التشغيل داخل {uploaded.filename}")
+            raise PackagingWorkbookError(
+                f"تعذر تحديد يوم التشغيل من محتوى الملف {uploaded.filename}"
+            )
         if day_name in days:
             raise PackagingWorkbookError(f"تم رفع أكثر من ملف ليوم {DAY_AR[day_name]}")
         days[day_name] = file_items
