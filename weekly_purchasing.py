@@ -745,7 +745,7 @@ def weekly_purchasing_prepare():
             "new_items": payload["new_items"],
             "source_tables_count": sum(len(source["tables"]) for source in payload["sources"]),
             "download_path": f"/api/weekly-purchasing/{run_id}/xlsx",
-            "inventory_path": f"/weekly-inventory.html?id={run_id}",
+            "inventory_path": f"/weekly-inventory.html?id={run_id}&v=25",
         })
     except WeeklyPurchasingError as exc:
         return jsonify({"error": str(exc)}), 400

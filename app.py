@@ -1,4 +1,4 @@
-# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v23-weekly-receiving
+# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v25-weekly-live-mobile
 import os
 import requests
 import io
@@ -103,7 +103,7 @@ from vegetable_cutting import vegetable_cutting_bp
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-09-15-v23-weekly-receiving'
+BACKEND_RELEASE = 'octa-backend-2026-09-15-v25-weekly-live-mobile'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -1395,7 +1395,7 @@ def weekly_purchasing_runs():
             'submitted_at': snapshot.get('submitted_at') or '',
             'worker_name': snapshot.get('worker_name') or '',
             'inventory_items_count': len(snapshot.get('items') or {}),
-            'inventory_path': f'/weekly-inventory.html?id={run_id}',
+            'inventory_path': f'/weekly-inventory.html?id={run_id}&v=25',
             'xlsx_path': f'/api/weekly-purchasing/{run_id}/xlsx',
             'pdf_path': f'/api/weekly-purchasing/{run_id}/pdf' if completed else '',
         })
@@ -1459,6 +1459,13 @@ def receipt_notifications_list():
         .order('created_at', desc=False)
         .limit(3000)
     )
+    weekly_inventory_res = execute_with_retry(
+        sb.table('upload_log')
+        .select('id,file_name,message,created_at')
+        .eq('file_type', 'weekly_inventory_snapshot')
+        .order('created_at', desc=True)
+        .limit(1000)
+    )
     sauce_receipts = _enrich_legacy_sauce_receipts(
         sauce_res.data or [],
         sauce_logs_res.data or [],
@@ -1481,11 +1488,27 @@ def receipt_notifications_list():
     for row in vegetable_links:
         receipt_id = str(row.get('file_name') or '').strip()
         row['tracking'] = vegetable_tracking.get(receipt_id, {})
+    weekly_inventory = []
+    seen_weekly_runs = set()
+    for row in weekly_inventory_res.data or []:
+        payload = _read_upload_log_message(row)
+        run_id = str(payload.get('run_id') or row.get('file_name') or '').strip()
+        if not run_id or run_id in seen_weekly_runs or not payload.get('submitted_at'):
+            continue
+        seen_weekly_runs.add(run_id)
+        weekly_inventory.append({
+            'id': row.get('id'),
+            'run_id': run_id,
+            'submitted_at': payload.get('submitted_at') or row.get('created_at') or '',
+            'worker_name': payload.get('worker_name') or 'عامل المخزون',
+            'items_count': payload.get('items_count') or len(payload.get('items') or {}),
+        })
     return jsonify({
         'sauce_receipts': sauce_receipts,
         'vegetable_receipts': vegetable_receipts,
         'vegetable_links': vegetable_links,
         'worker_links': worker_links_res.data or [],
+        'weekly_inventory': weekly_inventory,
     })
 
 
