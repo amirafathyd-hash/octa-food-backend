@@ -402,6 +402,8 @@ def build_weekly_workbook(run_payload, inventory_override=None):
     worksheet.title = _safe_sheet_title("Weekly Purchasing")
     worksheet.sheet_view.showGridLines = False
     worksheet.sheet_view.rightToLeft = False
+    worksheet.sheet_view.zoomScale = 75
+    worksheet.sheet_properties.tabColor = "0F6765"
     worksheet.freeze_panes = "D9"
 
     navy = "17324D"
@@ -418,35 +420,57 @@ def build_weekly_workbook(run_payload, inventory_override=None):
     thin = Side(style="thin", color=light_line)
     bottom = Side(style="medium", color=teal)
 
-    worksheet["A2"] = "Weekly Purchasing"
-    worksheet["A2"].font = Font(name="Arial", size=16, bold=True, color=navy)
-    worksheet["A3"] = "خطة الشراء الأسبوعية المحدثة من ملفات التشغيل والمخزون الفعلي"
-    worksheet["A3"].font = Font(name="Arial", size=10, italic=True, color=grey)
-    worksheet["A4"] = f"تاريخ التجهيز: {run_payload.get('date') or ''}"
-    worksheet["A4"].font = Font(name="Arial", size=9, color=grey)
-
     last_row = 8 + len(rows)
-    cards = (
-        ("A5", "عدد الأصناف", "B5", f"=COUNTA(A9:A{last_row})", "0"),
-        ("D5", "أصناف مطلوب شراؤها", "E5", f'=COUNTIF(L9:L{last_row},">0")', "0"),
-        ("G5", "إجمالي تكلفة الطلب", "H5", f"=SUM(Q9:Q{last_row})", '#,##0.00 "ر.س"'),
-        ("J5", "آخر تحديث للمخزون", "K5", run_payload.get("inventory_updated_at") or "لم يسجل بعد", "General"),
-    )
-    for label_cell, label, value_cell, value, number_format in cards:
-        worksheet[label_cell] = label
-        worksheet[value_cell] = value
-        for coordinate in (label_cell, value_cell):
-            cell = worksheet[coordinate]
-            cell.fill = PatternFill("solid", fgColor=pale_teal)
-            cell.border = Border(bottom=bottom)
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        worksheet[label_cell].font = Font(name="Arial", size=9, bold=True, color=teal)
-        worksheet[value_cell].font = Font(name="Arial", size=11, bold=True, color=navy)
-        worksheet[value_cell].number_format = number_format
-    worksheet.row_dimensions[5].height = 34
+    for column in range(1, 18):
+        worksheet.cell(1, column).fill = PatternFill("solid", fgColor=orange if column <= 2 else navy)
+    worksheet.row_dimensions[1].height = 8
+    for row_number in (2, 3, 4):
+        worksheet.merge_cells(start_row=row_number, start_column=1, end_row=row_number, end_column=17)
+        for column in range(1, 18):
+            worksheet.cell(row_number, column).fill = PatternFill("solid", fgColor=navy)
+    worksheet["A2"] = "WEEKLY PURCHASING  |  المشتريات الأسبوعية"
+    worksheet["A2"].font = Font(name="Arial", size=22, bold=True, color=white)
+    worksheet["A2"].alignment = Alignment(horizontal="left", vertical="center")
+    worksheet["A3"] = "خطة شراء ذكية محدثة من استهلاك محطات التشغيل والمخزون الفعلي"
+    worksheet["A3"].font = Font(name="Arial", size=11, color="CFE7E3")
+    worksheet["A3"].alignment = Alignment(horizontal="left", vertical="center")
+    worksheet["A4"] = f"تاريخ التجهيز: {run_payload.get('date') or ''}   •   أدخل المخزون في العمود الأصفر وستتحدث الكميات والتكلفة تلقائيًا"
+    worksheet["A4"].font = Font(name="Arial", size=9, bold=True, color="FFD99F")
+    worksheet["A4"].alignment = Alignment(horizontal="left", vertical="center")
+    worksheet.row_dimensions[2].height = 36
+    worksheet.row_dimensions[3].height = 22
+    worksheet.row_dimensions[4].height = 25
 
-    worksheet["A7"] = "الخلايا الصفراء للمخزون قابلة للتعديل. الأصناف الجديدة تظهر تلقائيًا ويجب استكمال المورد والسعر عند أول ظهور."
-    worksheet["A7"].font = Font(name="Arial", size=9, italic=True, color=grey)
+    cards = (
+        (1, 4, "عدد الأصناف", f"=COUNTA(A9:A{last_row})", "0"),
+        (5, 8, "أصناف مطلوب شراؤها", f'=COUNTIF(L9:L{last_row},">0")', "0"),
+        (9, 12, "إجمالي تكلفة الطلب", f"=SUM(Q9:Q{last_row})", '#,##0.00 "ر.س"'),
+        (13, 17, "آخر تحديث للمخزون", run_payload.get("inventory_updated_at") or "لم يسجل بعد", "General"),
+    )
+    for start_column, end_column, label, value, number_format in cards:
+        worksheet.merge_cells(start_row=5, start_column=start_column, end_row=5, end_column=end_column)
+        worksheet.merge_cells(start_row=6, start_column=start_column, end_row=6, end_column=end_column)
+        label_cell = worksheet.cell(5, start_column, label)
+        value_cell = worksheet.cell(6, start_column, value)
+        for row_number in (5, 6):
+            for column in range(start_column, end_column + 1):
+                cell = worksheet.cell(row_number, column)
+                cell.fill = PatternFill("solid", fgColor=pale_teal)
+                cell.border = Border(bottom=bottom)
+        label_cell.font = Font(name="Arial", size=9, bold=True, color=teal)
+        value_cell.font = Font(name="Arial", size=14, bold=True, color=navy)
+        label_cell.alignment = Alignment(horizontal="center", vertical="center")
+        value_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        value_cell.number_format = number_format
+    worksheet.row_dimensions[5].height = 22
+    worksheet.row_dimensions[6].height = 31
+
+    worksheet.merge_cells("A7:Q7")
+    worksheet["A7"] = "الخلايا الصفراء فقط لإدخال المخزون. الأصناف الجديدة تظهر تلقائيًا باللون الأحمر حتى استكمال المورد والسعر."
+    worksheet["A7"].fill = PatternFill("solid", fgColor=pale_orange)
+    worksheet["A7"].font = Font(name="Arial", size=9, bold=True, color=navy)
+    worksheet["A7"].alignment = Alignment(horizontal="left", vertical="center")
+    worksheet.row_dimensions[7].height = 24
 
     headers = [
         "ITEMS", "Unit", "Category", "Order Base Unit\nوحدة الطلب الأساسية",
@@ -476,10 +500,10 @@ def build_weekly_workbook(run_payload, inventory_override=None):
             row.get("purchase_description"), row.get("price"), row.get("cost_rate"),
             row.get("weekly_consumption"), f"=H{index}", row.get("expected_stock", ""),
             _display_number(available) if available != "" else "",
-            f'=MAX(0,H{index}-(IF(K{index}="",0,K{index})-I{index}))',
-            f'=MAX(0,IF(K{index}="",0,K{index})+L{index}-H{index})',
-            row.get("supplier"), f'=IFERROR(L{index}/D{index},0)', row.get("order_unit"),
-            f'=IFERROR(O{index}*F{index},0)',
+            f'=MAX(0,(H{index}*2)-K{index})',
+            f'=MAX(0,K{index}+L{index}-H{index})',
+            row.get("supplier"), f'=IF(D{index}=0,0,L{index}/D{index})', row.get("order_unit"),
+            f'=O{index}*F{index}',
         ]
         for column, value in enumerate(values, 1):
             cell = worksheet.cell(index, column, value)
@@ -529,6 +553,7 @@ def build_weekly_workbook(run_payload, inventory_override=None):
     worksheet.print_area = f"A1:Q{last_row}"
     worksheet.protection.sheet = False
     workbook.calculation.calcMode = "auto"
+    workbook.calculation.calcId = 0
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
     return workbook
