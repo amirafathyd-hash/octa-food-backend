@@ -1,4 +1,4 @@
-# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v22-weekly-formulas-ui
+# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v23-weekly-receiving
 import os
 import requests
 import io
@@ -103,7 +103,7 @@ from vegetable_cutting import vegetable_cutting_bp
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-09-15-v22-weekly-formulas-ui'
+BACKEND_RELEASE = 'octa-backend-2026-09-15-v23-weekly-receiving'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -1352,6 +1352,56 @@ def _log_vegetables_tracking_event(receipt_id, event):
     return _log_receipt_tracking_event('vegetables_receipt_tracking', receipt_id, event)
 
 
+@app.route('/api/weekly-purchasing/runs', methods=['GET'])
+def weekly_purchasing_runs():
+    _, err = _require_auth()
+    if err:
+        return err
+    sb = get_client()
+    runs_res = execute_with_retry(
+        sb.table('upload_log').select('id,file_name,message,created_at')
+        .eq('file_type', 'weekly_purchasing_run')
+        .order('created_at', desc=True).limit(1000),
+        max_attempts=2,
+    )
+    snapshots_res = execute_with_retry(
+        sb.table('upload_log').select('id,file_name,message,created_at')
+        .eq('file_type', 'weekly_inventory_snapshot')
+        .order('created_at', desc=True).limit(2000),
+        max_attempts=2,
+    )
+    latest_snapshots = {}
+    for row in snapshots_res.data or []:
+        run_id = str(row.get('file_name') or '').strip()
+        if run_id and run_id not in latest_snapshots:
+            latest_snapshots[run_id] = {**_read_upload_log_message(row), '_log_id': row.get('id')}
+    result = []
+    for row in runs_res.data or []:
+        payload = _read_upload_log_message(row)
+        run_id = str(payload.get('run_id') or row.get('file_name') or '').strip()
+        if not run_id:
+            continue
+        snapshot = latest_snapshots.get(run_id) or {}
+        rows_count = len(payload.get('rows') or [])
+        completed = bool(snapshot.get('submitted_at')) and len(snapshot.get('items') or {}) == rows_count
+        result.append({
+            'id': run_id,
+            'date': payload.get('date') or '',
+            'created_at': payload.get('created_at') or row.get('created_at') or '',
+            'items_count': rows_count,
+            'new_items_count': len(payload.get('new_items') or []),
+            'source_tables_count': sum(len(source.get('tables') or []) for source in payload.get('sources') or []),
+            'status': 'completed' if completed else 'pending',
+            'submitted_at': snapshot.get('submitted_at') or '',
+            'worker_name': snapshot.get('worker_name') or '',
+            'inventory_items_count': len(snapshot.get('items') or {}),
+            'inventory_path': f'/weekly-inventory.html?id={run_id}',
+            'xlsx_path': f'/api/weekly-purchasing/{run_id}/xlsx',
+            'pdf_path': f'/api/weekly-purchasing/{run_id}/pdf' if completed else '',
+        })
+    return jsonify({'runs': result})
+
+
 @app.route('/api/receipt-notifications/list', methods=['GET'])
 def receipt_notifications_list():
     _, err = _require_auth()
@@ -1520,6 +1570,33 @@ def home_notifications():
             )
     except Exception as exc:
         app.logger.warning('home_notifications vegetables failed: %s', exc)
+
+    try:
+        weekly_res = execute_with_retry(
+            sb.table('upload_log').select('id,file_name,message,created_at')
+            .eq('file_type', 'weekly_inventory_snapshot')
+            .order('created_at', desc=True).limit(20),
+            max_attempts=2,
+        )
+        seen_weekly_runs = set()
+        for row in weekly_res.data or []:
+            data = _read_upload_log_message(row)
+            run_id = str(data.get('run_id') or row.get('file_name') or '').strip()
+            if not run_id or run_id in seen_weekly_runs or not data.get('submitted_at'):
+                continue
+            seen_weekly_runs.add(run_id)
+            count = data.get('items_count') or len(data.get('items') or {})
+            push(
+                f"weekly-{run_id}-{data.get('submitted_at')}",
+                'weekly_inventory',
+                'تم اكتمال جرد المخزون الأسبوعي',
+                f"{data.get('worker_name') or 'العامل'} سجّل {count} صنف",
+                f"weekly-receiving?run_id={run_id}",
+                data.get('submitted_at') or row.get('created_at'),
+                'success',
+            )
+    except Exception as exc:
+        app.logger.warning('home_notifications weekly inventory failed: %s', exc)
 
     try:
         emp_res = execute_with_retry(

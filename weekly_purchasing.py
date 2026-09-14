@@ -9,13 +9,27 @@ import os
 import re
 import secrets
 import unicodedata
+from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo
 
+import arabic_reshaper
 from flask import Blueprint, current_app, jsonify, request, send_file
 import openpyxl
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Protection, Side
 from openpyxl.utils import get_column_letter
+try:
+    from bidi.algorithm import get_display
+except ImportError:
+    from bidi import get_display
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.lib.pagesizes import A3, landscape
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from db import execute_with_retry, get_client
 
@@ -27,6 +41,9 @@ RUN_LOG_TYPE = "weekly_purchasing_run"
 INVENTORY_LOG_TYPE = "weekly_inventory_snapshot"
 MAX_UPLOAD_FILES = 12
 CAIRO_TZ = ZoneInfo("Africa/Cairo")
+FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
+PDF_FONT = "OctaWeeklyArabic"
+PDF_FONT_BOLD = "OctaWeeklyArabicBold"
 
 HEADER_ALIASES = {
     "item": ("items", "item", "ingredient", "ingredients", "الصنف", "الاصناف", "المكون"),
@@ -345,7 +362,7 @@ def _previous_expected_stock(snapshot):
         key = row.get("key")
         weekly = max(0.0, _number(row.get("weekly_consumption")))
         available = max(0.0, _number(inventory.get(key)))
-        order = max(0.0, weekly + weekly - available)
+        order = max(0.0, weekly - available)
         expected[key] = round(available + order - weekly, 6)
     return expected
 
@@ -430,13 +447,13 @@ def build_weekly_workbook(run_payload, inventory_override=None):
             worksheet.cell(row_number, column).fill = PatternFill("solid", fgColor=navy)
     worksheet["A2"] = "WEEKLY PURCHASING  |  المشتريات الأسبوعية"
     worksheet["A2"].font = Font(name="Arial", size=22, bold=True, color=white)
-    worksheet["A2"].alignment = Alignment(horizontal="left", vertical="center")
+    worksheet["A2"].alignment = Alignment(horizontal="center", vertical="center")
     worksheet["A3"] = "خطة شراء ذكية محدثة من استهلاك محطات التشغيل والمخزون الفعلي"
     worksheet["A3"].font = Font(name="Arial", size=11, color="CFE7E3")
-    worksheet["A3"].alignment = Alignment(horizontal="left", vertical="center")
+    worksheet["A3"].alignment = Alignment(horizontal="center", vertical="center")
     worksheet["A4"] = f"تاريخ التجهيز: {run_payload.get('date') or ''}   •   أدخل المخزون في العمود الأصفر وستتحدث الكميات والتكلفة تلقائيًا"
     worksheet["A4"].font = Font(name="Arial", size=9, bold=True, color="FFD99F")
-    worksheet["A4"].alignment = Alignment(horizontal="left", vertical="center")
+    worksheet["A4"].alignment = Alignment(horizontal="center", vertical="center")
     worksheet.row_dimensions[2].height = 36
     worksheet.row_dimensions[3].height = 22
     worksheet.row_dimensions[4].height = 25
@@ -487,10 +504,10 @@ def build_weekly_workbook(run_payload, inventory_override=None):
             cell.fill = PatternFill("solid", fgColor=orange)
         elif column in (12, 15, 16, 17):
             cell.fill = PatternFill("solid", fgColor=green)
-        cell.font = Font(name="Arial", size=9, bold=True, color=white)
+        cell.font = Font(name="Arial", size=10, bold=True, color=white)
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = Border(left=Side(style="thin", color=white), bottom=bottom)
-    worksheet.row_dimensions[8].height = 52
+    worksheet.row_dimensions[8].height = 64
 
     for index, row in enumerate(rows, 9):
         item_key = row.get("key") or _key(row.get("item"))
@@ -500,17 +517,18 @@ def build_weekly_workbook(run_payload, inventory_override=None):
             row.get("purchase_description"), row.get("price"), row.get("cost_rate"),
             row.get("weekly_consumption"), f"=H{index}", row.get("expected_stock", ""),
             _display_number(available) if available != "" else "",
-            f'=MAX(0,(H{index}*2)-K{index})',
+            f'=MAX(0,H{index}-K{index})',
             f'=MAX(0,K{index}+L{index}-H{index})',
             row.get("supplier"), f'=IF(D{index}=0,0,L{index}/D{index})', row.get("order_unit"),
             f'=O{index}*F{index}',
         ]
         for column, value in enumerate(values, 1):
             cell = worksheet.cell(index, column, value)
-            cell.font = Font(name="Arial", size=9, color=navy, bold=column in (1, 8, 11, 12, 15, 17))
+            cell.font = Font(name="Arial", size=11, color=navy, bold=True)
             cell.alignment = Alignment(
                 horizontal="left" if column in (1, 3, 5, 14, 16) else "right" if column in (4, 6, 7, 8, 9, 10, 11, 12, 13, 15, 17) else "center",
                 vertical="center",
+                wrap_text=True,
             )
             cell.fill = PatternFill("solid", fgColor=cream if index % 2 else white)
             if column == 11:
@@ -525,7 +543,7 @@ def build_weekly_workbook(run_payload, inventory_override=None):
                 cell.number_format = '#,##0.000'
             elif column in (15, 17):
                 cell.number_format = '#,##0.00'
-        worksheet.row_dimensions[index].height = 23
+        worksheet.row_dimensions[index].height = 38
 
     worksheet.auto_filter.ref = f"A8:Q{last_row}"
     worksheet.conditional_formatting.add(
@@ -541,10 +559,9 @@ def build_weekly_workbook(run_payload, inventory_override=None):
         FormulaRule(formula=['ISNUMBER(SEARCH("يحتاج استكمال",N9))'], fill=PatternFill("solid", fgColor=pale_red)),
     )
 
-    widths = (42, 10, 18, 15, 21, 17, 17, 16, 17, 17, 15, 16, 19, 24, 15, 16, 18)
+    widths = (38, 11, 18, 18, 24, 18, 18, 18, 19, 19, 18, 18, 22, 30, 18, 20, 20)
     for column, width in enumerate(widths, 1):
         worksheet.column_dimensions[get_column_letter(column)].width = width
-    worksheet.row_dimensions[2].height = 25
     worksheet.sheet_properties.pageSetUpPr.fitToPage = True
     worksheet.page_setup.orientation = "landscape"
     worksheet.page_setup.fitToWidth = 1
@@ -557,6 +574,130 @@ def build_weekly_workbook(run_payload, inventory_override=None):
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
     return workbook
+
+
+def _register_pdf_fonts():
+    regular = os.path.join(FONT_DIR, "IBMPlexSansArabic-Regular.ttf")
+    bold = os.path.join(FONT_DIR, "IBMPlexSansArabic-Bold.ttf")
+    if not os.path.isfile(regular) or not os.path.isfile(bold):
+        raise WeeklyPurchasingError("خط PDF العربي غير موجود على الخادم")
+    if PDF_FONT not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(PDF_FONT, regular))
+    if PDF_FONT_BOLD not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(PDF_FONT_BOLD, bold))
+
+
+def _pdf_text(value):
+    text = _clean(value)
+    if re.search(r"[\u0600-\u06ff]", text):
+        text = get_display(arabic_reshaper.reshape(text))
+    return escape(text)
+
+
+def build_weekly_pdf(run_payload, inventory):
+    """Build a complete, multi-page purchasing PDF after inventory submission."""
+    _register_pdf_fonts()
+    rows = run_payload.get("rows") or []
+    if not rows:
+        raise WeeklyPurchasingError("لا توجد بيانات لإنشاء PDF")
+    output = BytesIO()
+    page_size = landscape(A3)
+    document = SimpleDocTemplate(
+        output,
+        pagesize=page_size,
+        rightMargin=12 * mm,
+        leftMargin=12 * mm,
+        topMargin=12 * mm,
+        bottomMargin=13 * mm,
+        title="Weekly Purchasing",
+        author="Octa Food",
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "WeeklyTitle", parent=styles["Title"], fontName=PDF_FONT_BOLD,
+        fontSize=24, leading=30, textColor=colors.HexColor("#17324D"), alignment=TA_CENTER,
+    )
+    subtitle_style = ParagraphStyle(
+        "WeeklySubtitle", parent=styles["Normal"], fontName=PDF_FONT,
+        fontSize=11, leading=16, textColor=colors.HexColor("#536872"), alignment=TA_CENTER,
+    )
+    cell_style = ParagraphStyle(
+        "WeeklyCell", parent=styles["Normal"], fontName=PDF_FONT_BOLD,
+        fontSize=8.5, leading=11, textColor=colors.HexColor("#17324D"), alignment=TA_RIGHT,
+    )
+    center_style = ParagraphStyle(
+        "WeeklyCenter", parent=cell_style, alignment=TA_CENTER,
+    )
+    header_style = ParagraphStyle(
+        "WeeklyHeader", parent=center_style, fontName=PDF_FONT_BOLD,
+        fontSize=9, leading=11, textColor=colors.white,
+    )
+
+    story = [
+        Paragraph(_pdf_text("المشتريات الأسبوعية - WEEKLY PURCHASING"), title_style),
+        Paragraph(_pdf_text(
+            f"تاريخ الدورة: {run_payload.get('date') or ''} | عدد الأصناف: {len(rows)} | محسوب بعد إدخال المخزون الفعلي"
+        ), subtitle_style),
+        Spacer(1, 7 * mm),
+    ]
+    headers = ["الصنف", "التصنيف", "الاستهلاك", "المخزون", "الطلب", "المتوقع", "المورد", "وحدة الطلب", "تكلفة الطلب"]
+    data = [[Paragraph(_pdf_text(value), header_style) for value in headers]]
+    total_cost = 0.0
+    for row in rows:
+        key = row.get("key") or _key(row.get("item"))
+        weekly = max(0.0, _number(row.get("weekly_consumption")))
+        available = max(0.0, _number(inventory.get(key)))
+        order = max(0.0, weekly - available)
+        expected = max(0.0, available + order - weekly)
+        base_unit = _number(row.get("base_unit"))
+        order_units = order / base_unit if base_unit > 0 else 0.0
+        cost = order_units * max(0.0, _number(row.get("price")))
+        total_cost += cost
+        values = [
+            row.get("item"), row.get("category"), f"{weekly:,.3f}", f"{available:,.3f}",
+            f"{order:,.3f}", f"{expected:,.3f}", row.get("supplier"),
+            f"{order_units:,.2f} {row.get('order_unit') or ''}", f"{cost:,.2f}",
+        ]
+        data.append([
+            Paragraph(_pdf_text(value), cell_style if index in (0, 1, 6, 7) else center_style)
+            for index, value in enumerate(values)
+        ])
+    data.append([
+        Paragraph(_pdf_text("الإجمالي"), header_style), "", "", "", "", "", "", "",
+        Paragraph(f"{total_cost:,.2f}", header_style),
+    ])
+    table = Table(
+        data,
+        repeatRows=1,
+        colWidths=[70 * mm, 29 * mm, 27 * mm, 27 * mm, 27 * mm, 27 * mm, 48 * mm, 34 * mm, 30 * mm],
+        hAlign="CENTER",
+    )
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F6765")),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#17324D")),
+        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+        ("SPAN", (0, -1), (7, -1)),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C9D9D5")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#F3F8F6")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(table)
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(PDF_FONT, 8)
+        canvas.setFillColor(colors.HexColor("#687B84"))
+        canvas.drawCentredString(page_size[0] / 2, 6 * mm, f"Octa Food | Page {doc.page}")
+        canvas.restoreState()
+
+    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    output.seek(0)
+    return output
 
 
 def _run_payload(run_id):
@@ -630,12 +771,37 @@ def weekly_purchasing_xlsx(run_id):
         return jsonify({"error": f"تعذر إنشاء ملف Excel: {str(exc)[:180]}"}), 500
 
 
+@weekly_purchasing_bp.route("/api/weekly-purchasing/<run_id>/pdf", methods=["GET"])
+def weekly_purchasing_pdf(run_id):
+    try:
+        payload = _run_payload(run_id)
+        snapshot = _inventory_for_run(run_id, fallback_to_latest=False)
+        inventory = snapshot.get("items") or {}
+        if len(inventory) != len(payload.get("rows") or []):
+            return jsonify({"error": "ملف PDF يصبح متاحًا بعد اكتمال إدخال المخزون"}), 409
+        output = build_weekly_pdf(payload, inventory)
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=f"Weekly_Purchasing_{payload.get('date') or 'week'}.pdf",
+            mimetype="application/pdf",
+        )
+    except WeeklyPurchasingError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except Exception as exc:
+        current_app.logger.exception("weekly purchasing PDF failed")
+        return jsonify({"error": f"تعذر إنشاء ملف PDF: {str(exc)[:180]}"}), 500
+
+
 @weekly_purchasing_bp.route("/api/weekly-inventory/<run_id>", methods=["GET"])
 def weekly_inventory_get(run_id):
     try:
         payload = _run_payload(run_id)
-        snapshot = _inventory_for_run(run_id) or _inventory_for_run()
+        run_snapshot = _inventory_for_run(run_id, fallback_to_latest=False)
+        snapshot = run_snapshot or _inventory_for_run()
         inventory = snapshot.get("items") or {}
+        row_count = len(payload.get("rows") or [])
+        completed = bool(run_snapshot.get("submitted_at")) and len(run_snapshot.get("items") or {}) == row_count
         return jsonify({
             "ok": True,
             "run_id": run_id,
@@ -643,6 +809,9 @@ def weekly_inventory_get(run_id):
             "created_at": payload.get("created_at"),
             "last_submitted_at": snapshot.get("submitted_at") or "",
             "last_worker_name": snapshot.get("worker_name") or "",
+            "completed": completed,
+            "download_path": f"/api/weekly-purchasing/{run_id}/xlsx",
+            "pdf_path": f"/api/weekly-purchasing/{run_id}/pdf" if completed else "",
             "rows": [{
                 "key": row.get("key"),
                 "item": row.get("item"),
@@ -695,11 +864,21 @@ def weekly_inventory_submit(run_id):
             "items": items,
         }
         _log_event(INVENTORY_LOG_TYPE, run_id, payload)
+        try:
+            from appointments_api import send_push_to_all
+            send_push_to_all(
+                "تم اكتمال جرد المخزون الأسبوعي",
+                f"{worker_name} سجّل مخزون {len(items)} صنف",
+                f"weekly-receiving?run_id={run_id}",
+            )
+        except Exception:
+            current_app.logger.warning("weekly inventory push notification failed", exc_info=True)
         return jsonify({
             "ok": True,
             "submitted_at": now,
             "items_count": len(items),
             "download_path": f"/api/weekly-purchasing/{run_id}/xlsx",
+            "pdf_path": f"/api/weekly-purchasing/{run_id}/pdf",
         })
     except WeeklyPurchasingError as exc:
         return jsonify({"error": str(exc)}), 404
