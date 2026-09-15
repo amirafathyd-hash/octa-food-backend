@@ -125,7 +125,7 @@ from rice_ordering import (
 
 TOKYO_TEMPLATE_PATH = PERSISTENT_TOKYO_TEMPLATE_PATH
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-09-15-v30-production-cycle-fixes'
+BACKEND_RELEASE = 'octa-backend-2026-09-15-v31-tokyo-main-shifts'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -6864,12 +6864,36 @@ def smart_order_export_master():
     from smart_ordering import build_macro_workbook, get_template_integrity
     payload = request.get_json(silent=True) or {}
     orders = payload.get('orders') or []
+    shifts = payload.get('shifts') if isinstance(payload.get('shifts'), dict) else None
     integrity = get_template_integrity()
     if not integrity.get('ready'):
         return jsonify({'error': 'تم إيقاف التصدير لأن فحص الملف لم ينجح', 'details': integrity.get('errors', [])}), 409
     try:
-        out_path = build_macro_workbook(orders)
         today = datetime.now().strftime('%Y-%m-%d')
+        if shifts is not None:
+            buffer = io.BytesIO()
+            shift_file_count = 0
+            with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                for shift, label in (('morning', 'Morning'), ('evening', 'Evening')):
+                    shift_orders = shifts.get(shift) if isinstance(shifts.get(shift), list) else []
+                    if not shift_orders:
+                        continue
+                    shift_path = build_macro_workbook(shift_orders)
+                    try:
+                        archive.write(shift_path, f'Tokyo_Production_{label}_{today}.xlsm')
+                        shift_file_count += 1
+                    finally:
+                        if os.path.exists(shift_path):
+                            os.unlink(shift_path)
+            if not shift_file_count:
+                return jsonify({'error': 'لا توجد كميات صباحية أو مسائية للتصدير'}), 400
+            buffer.seek(0)
+            return send_file(
+                buffer, as_attachment=True,
+                download_name=f'Tokyo_Production_Shifts_{today}.zip',
+                mimetype='application/zip',
+            )
+        out_path = build_macro_workbook(orders)
         return send_file(
             out_path,
             as_attachment=True,
