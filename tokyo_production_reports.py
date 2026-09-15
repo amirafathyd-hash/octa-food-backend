@@ -501,6 +501,41 @@ def _merge_sheet1_snapshot(template_path, day_no, meals, safety_overrides):
     )
 
 
+def build_tokyo_shift_pdf(template_path: str, uploaded_file, shift: str,
+                          safety_overrides=None, output_dir: str | None = None):
+    """Build one independent Morning or Evening Tokyo production PDF."""
+    shift = str(shift or '').strip().lower()
+    if shift not in {'morning', 'evening'}:
+        raise ValueError('فترة توكيو لازم تكون morning أو evening')
+    split_result = read_day_file_shifts(uploaded_file)
+    if not split_result:
+        raise ValueError('ملف اليوم لا يحتوي على أعمدة الصباحي والمسائي في Sheet1')
+    day_no, shifts, input_report = split_result
+    root = Path(output_dir or tempfile.mkdtemp(prefix=f'tokyo-{shift}-report-'))
+    root.mkdir(parents=True, exist_ok=True)
+    updated_xlsm, match_report = _merge_sheet1_snapshot(
+        template_path, day_no, shifts[shift], safety_overrides or {}
+    )
+    updated_xlsm = Path(updated_xlsm)
+    _stamp_selected_day(updated_xlsm, day_no)
+    label = 'Morning' if shift == 'morning' else 'Evening'
+    try:
+        pdf_path, hot_sheets, counts = _render_hot_section_pdf(
+            updated_xlsm, root, day_no, f'Day{day_no}_Tokyo_{label}.pdf', ordered=True
+        )
+    finally:
+        if updated_xlsm.exists():
+            updated_xlsm.unlink()
+    report = {
+        **match_report,
+        'shift': shift,
+        'input': input_report,
+        'hot_sheets': len(hot_sheets),
+        'pages': {**counts, 'hot_total': sum(counts.values())},
+    }
+    return str(pdf_path), report
+
+
 def build_tokyo_day_package(template_path: str, uploaded_file, output_dir: str | None = None,
                             safety_overrides=None):
     """Return ``(zip_path, updated_xlsm, report)`` for one uploaded day file."""

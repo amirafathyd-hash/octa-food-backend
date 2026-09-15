@@ -43,7 +43,7 @@ from tokyo_ordering import (
     validate_raw_targets_for_day,
     merge_day_into_template,
 )
-from tokyo_production_reports import build_tokyo_day_package
+from tokyo_production_reports import build_tokyo_day_package, build_tokyo_shift_pdf
 from decision_station import process_subscribers_invoice
 from day_operations import (
     get_day_operations_archive_path,
@@ -125,7 +125,7 @@ from rice_ordering import (
 
 TOKYO_TEMPLATE_PATH = PERSISTENT_TOKYO_TEMPLATE_PATH
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-09-15-v31-tokyo-main-shifts'
+BACKEND_RELEASE = 'octa-backend-2026-09-15-v32-tokyo-breakfast-layout'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -651,6 +651,37 @@ def tokyo_production_process_day():
     response.headers['X-Tokyo-Report'] = json.dumps(report, ensure_ascii=True)
     response.headers['Access-Control-Expose-Headers'] = 'X-Tokyo-Report, Content-Disposition'
     return response
+
+
+@app.route('/api/tokyo-production/export-shift', methods=['POST'])
+def tokyo_production_export_shift():
+    """Export one Tokyo shift exactly like the breakfast shift workflow."""
+    restore_tokyo_template_from_cloud_once()
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف يوم التشغيل أولًا'}), 400
+    shift = str(request.form.get('shift') or '').strip().lower()
+    try:
+        safety_values = json.loads(request.form.get('safety_values') or '{}')
+        if not isinstance(safety_values, dict):
+            raise ValueError('قيم Safety غير صحيحة')
+        pdf_path, report = build_tokyo_shift_pdf(
+            TOKYO_TEMPLATE_PATH, uploaded, shift, safety_overrides=safety_values
+        )
+        label = 'Morning' if shift == 'morning' else 'Evening'
+        response = send_file(
+            pdf_path, as_attachment=True,
+            download_name=f"Day{report['day_no']}_Tokyo_{label}.pdf",
+            mimetype='application/pdf',
+        )
+        response.headers['X-Tokyo-Report'] = json.dumps(report, ensure_ascii=True)
+        response.headers['Access-Control-Expose-Headers'] = 'X-Tokyo-Report, Content-Disposition'
+        return response
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('tokyo_production_export_shift failed')
+        return jsonify({'error': f'تعذر تجهيز PDF توكيو: {exc}'}), 500
 
 
 @app.route('/api/tokyo-production/mapping-options', methods=['GET'])
