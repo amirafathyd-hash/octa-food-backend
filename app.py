@@ -1,4 +1,4 @@
-# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v27-weekly-cairo-next
+# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v28-veg-inventory-save-fix
 import os
 import requests
 import io
@@ -114,7 +114,7 @@ from vegetable_cutting import vegetable_cutting_bp
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-09-15-v27-weekly-cairo-next'
+BACKEND_RELEASE = 'octa-backend-2026-09-15-v28-veg-inventory-save-fix'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -4884,7 +4884,16 @@ def veg_inventory_today_save():
     { "token": "...", "entries": { "اسم الصنف": 1200, ... } }"""
     if not _veg_inventory_worker_ok():
         return jsonify({'error': 'الرابط ده مش صحيح أو قديم'}), 403
-    payload = request.get_json(silent=True) or {}
+    # صفحة العامل ترسل multipart/FormData حتى يمكنها إرفاق صور الأصناف،
+    # بينما الاستدعاءات القديمة ترسل JSON. ندعم الاثنين بنفس المسار.
+    if request.mimetype == 'multipart/form-data':
+        raw_payload = request.form.get('payload') or '{}'
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return jsonify({'error': 'بيانات المخزون المرسلة غير صحيحة'}), 400
+    else:
+        payload = request.get_json(silent=True) or {}
     entries = payload.get('entries') or {}
     if not isinstance(entries, dict) or not entries:
         return jsonify({'error': 'مفيش قيم للحفظ'}), 400
