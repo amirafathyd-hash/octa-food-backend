@@ -36,7 +36,9 @@ from tokyo_ordering import (
     UnmappedTokyoMealsError,
     list_tokyo_recipe_sheet_names,
     read_day_file_payload,
+    read_day_file_shifts,
     read_day_safety_fields,
+    safety_fields_for_meals,
     save_raw_tokyo_mappings,
     validate_raw_targets_for_day,
     merge_day_into_template,
@@ -110,11 +112,20 @@ from weekly_purchasing import (
     weekly_control_for_run,
     weekly_purchasing_bp,
 )
+from tokyo_storage import (
+    TOKYO_TEMPLATE_PATH as PERSISTENT_TOKYO_TEMPLATE_PATH,
+    persist_tokyo_template_to_cloud,
+    restore_tokyo_template_from_cloud_once,
+)
 from vegetable_cutting import vegetable_cutting_bp
+from rice_ordering import (
+    analyze_rice_day_file, build_rice_day_files, build_rice_manual_files,
+    get_rice_template_state, package_rice_files, replace_rice_template,
+)
 
-TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
+TOKYO_TEMPLATE_PATH = PERSISTENT_TOKYO_TEMPLATE_PATH
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-09-15-v28-veg-inventory-save-fix'
+BACKEND_RELEASE = 'octa-backend-2026-09-15-v30-production-cycle-fixes'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -529,6 +540,32 @@ def invoices_export_xlsx():
                       download_name=f"octa-invoices-{datetime.now().strftime('%Y-%m-%d')}.xlsx")
 
 
+def _save_tokyo_master_update(updated_path):
+    """Replace the live Tokyo master only when its durable copy also succeeds."""
+    master_dir = os.path.dirname(TOKYO_TEMPLATE_PATH)
+    os.makedirs(master_dir, exist_ok=True)
+    backup_handle = tempfile.NamedTemporaryFile(
+        suffix='.xlsm', prefix='.tokyo-before-update-', dir=master_dir, delete=False
+    )
+    backup = backup_handle.name
+    backup_handle.close()
+    had_master = os.path.exists(TOKYO_TEMPLATE_PATH)
+    try:
+        if had_master:
+            shutil.copy2(TOKYO_TEMPLATE_PATH, backup)
+        shutil.copyfile(updated_path, TOKYO_TEMPLATE_PATH)
+        persist_tokyo_template_to_cloud(include_baseline=False)
+    except Exception:
+        if had_master and os.path.exists(backup):
+            shutil.copy2(backup, TOKYO_TEMPLATE_PATH)
+        elif os.path.exists(TOKYO_TEMPLATE_PATH):
+            os.unlink(TOKYO_TEMPLATE_PATH)
+        raise
+    finally:
+        if os.path.exists(backup):
+            os.unlink(backup)
+
+
 @app.route('/api/tokyo-ordering/update-from-day-file', methods=['POST'])
 def tokyo_ordering_update_from_day_file():
     """كارت محطة التجهيز: بترفع ملف يوم واحد بس (زي Octa_Food_Sat_....xlsx)،
@@ -537,6 +574,7 @@ def tokyo_ordering_update_from_day_file():
     نفس اليوم بس في ملف توكيو الأساسي (بيتحفظ التحديث على السيرفر عشان
     الأيام اللي بترفعها بعد كده تتراكم على بعضها)، وبيرجّعلك الملف كامل
     بالماكرو والمعادلات زي ما هي، + تقرير بالأصناف اللي اتطابقت واللي لأ."""
+    restore_tokyo_template_from_cloud_once()
     if not os.path.exists(TOKYO_TEMPLATE_PATH):
         return jsonify({'error': 'ملف القالب tokyo_ordering_template.xlsm غير موجود على السيرفر'}), 404
     f = request.files.get('file')
@@ -552,7 +590,7 @@ def tokyo_ordering_update_from_day_file():
 
     try:
         out_path, report = merge_day_into_template(TOKYO_TEMPLATE_PATH, day_no, meals)
-        shutil.copyfile(out_path, TOKYO_TEMPLATE_PATH)  # حفظ التحديث على القالب نفسه عشان يتراكم
+        _save_tokyo_master_update(out_path)
     except Exception as e:
         app.logger.exception('tokyo_ordering_update_from_day_file failed')
         return jsonify({'error': f'حصل خطأ أثناء الدمج: {e}'}), 500
@@ -570,6 +608,7 @@ def tokyo_ordering_update_from_day_file():
 def tokyo_production_process_day():
     """يرفع ملف تشغيل يوم واحد ويُرجع حزمة الإنتاج الكاملة بنفس جداول
     ملف توكيو: PDF القسم الساخن + PDF التتبيلات + نسخة XLSM محدّثة."""
+    restore_tokyo_template_from_cloud_once()
     if not os.path.exists(TOKYO_TEMPLATE_PATH):
         return jsonify({'error': 'ملف توكيو الرئيسي غير موجود على السيرفر'}), 404
     uploaded = request.files.get('file')
@@ -591,7 +630,7 @@ def tokyo_production_process_day():
             TOKYO_TEMPLATE_PATH, uploaded, safety_overrides=safety_overrides
         )
         # لا نحدّث النسخة التشغيلية إلا بعد نجاح إنشاء كل المخرجات.
-        shutil.copyfile(updated_xlsm, TOKYO_TEMPLATE_PATH)
+        _save_tokyo_master_update(updated_xlsm)
     except UnmappedTokyoMealsError as exc:
         return jsonify({
             'error': str(exc),
@@ -651,12 +690,26 @@ def tokyo_production_save_mappings():
 @app.route('/api/tokyo-production/analyze-day', methods=['POST'])
 def tokyo_production_analyze_day():
     """Read-only preflight used to ask for the day's Safety quantities."""
+    restore_tokyo_template_from_cloud_once()
     if not os.path.exists(TOKYO_TEMPLATE_PATH):
         return jsonify({'error': 'ملف توكيو الرئيسي غير موجود على السيرفر'}), 404
     uploaded = request.files.get('file')
     if not uploaded:
         return jsonify({'error': 'ارفع ملف اليوم بصيغة Excel'}), 400
     try:
+        split_result = read_day_file_shifts(uploaded)
+        if split_result:
+            day_no, shifts, input_report = split_result
+            fields = read_day_safety_fields(TOKYO_TEMPLATE_PATH, day_no)
+            shift_fields = {
+                shift: safety_fields_for_meals(fields, shifts[shift])
+                for shift in ('morning', 'evening')
+            }
+            return jsonify({
+                'day_no': day_no, 'day_name': DAY_NAMES.get(day_no, str(day_no)),
+                'meal_count': len(shifts['total']), 'safety_fields': fields,
+                'shift_safety_fields': shift_fields, 'input': input_report,
+            })
         day_no, meals, input_report = read_day_file_payload(uploaded)
         if input_report.get('kind') == 'repeat_update':
             validate_raw_targets_for_day(TOKYO_TEMPLATE_PATH, day_no, meals)
@@ -792,6 +845,67 @@ def day_operations_archive_download(archive_id):
     except Exception as exc:
         return jsonify({'error': f'تعذر فتح الأرشيف: {exc}'}), 500
     return send_file(path, as_attachment=True, download_name=f'Day_Operations_Archive_{archive_id}.zip', mimetype='application/zip')
+
+
+@app.route('/api/rice-ordering/template', methods=['GET'])
+def rice_ordering_template_state():
+    try:
+        day_no = request.args.get('day_no')
+        return jsonify({'ok': True, 'state': get_rice_template_state(day_no=day_no)})
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+
+
+@app.route('/api/rice-ordering/analyze-day', methods=['POST'])
+def rice_ordering_analyze_day():
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف اليوم أولًا'}), 400
+    try:
+        report = analyze_rice_day_file(uploaded, expected_day_no=request.form.get('day_no'))
+        return jsonify({'ok': True, 'report': report})
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+
+
+@app.route('/api/rice-ordering/process-day', methods=['POST'])
+def rice_ordering_process_day():
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'ارفع ملف اليوم أولًا'}), 400
+    try:
+        safety_items = json.loads(request.form.get('safety_items') or '[]')
+        excel_path, pdf_path, report = build_rice_day_files(
+            uploaded, safety_items=safety_items, expected_day_no=request.form.get('day_no')
+        )
+        bundle = package_rice_files(excel_path, pdf_path, report['day_no'])
+        return send_file(bundle, as_attachment=True, download_name=f"Day{report['day_no']}_Rice_Results.zip", mimetype='application/zip')
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+
+
+@app.route('/api/rice-ordering/export-manual', methods=['POST'])
+def rice_ordering_export_manual():
+    payload = request.get_json(silent=True) or {}
+    try:
+        day_no = int(payload.get('day_no'))
+        excel_path, pdf_path, report = build_rice_manual_files(day_no, payload.get('items') or [])
+        bundle = package_rice_files(excel_path, pdf_path, day_no)
+        return send_file(bundle, as_attachment=True, download_name=f'Day{day_no}_Rice_Results.zip', mimetype='application/zip')
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
+
+
+@app.route('/api/rice-ordering/replace-template', methods=['POST'])
+def rice_ordering_replace_template():
+    uploaded = request.files.get('file')
+    if not uploaded:
+        return jsonify({'error': 'اختار شيت الأرز الجديد'}), 400
+    try:
+        state, report = replace_rice_template(uploaded)
+        return jsonify({'ok': True, 'state': state, 'report': report})
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 400
 
 
 @app.route('/api/dessert-ordering/update', methods=['POST'])
@@ -6498,7 +6612,13 @@ def _find_existing_vegetables_receipt_log(sb, receipt_id, department, selected_d
 
 @app.route('/api/vegetables-receipt/submit', methods=['POST'])
 def vegetables_receipt_submit():
-    payload = request.get_json(silent=True) or {}
+    if request.mimetype == 'multipart/form-data':
+        try:
+            payload = json.loads(request.form.get('payload') or '{}')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return jsonify({'error': 'بيانات استلام الخضروات غير صحيحة'}), 400
+    else:
+        payload = request.get_json(silent=True) or {}
     rows = payload.get('rows') or []
     if not rows:
         return jsonify({'error': 'مفيش بيانات استلام خضروات مبعوتة'}), 400
@@ -6511,6 +6631,35 @@ def vegetables_receipt_submit():
     department = str(payload.get('department') or 'general').strip().lower()
     if department not in {'general', 'hot', 'salad'}:
         department = 'general'
+    photo_keys = payload.get('photo_keys') or {}
+    if isinstance(photo_keys, dict):
+        sb = get_client()
+        receipt_key = re.sub(r'[^A-Za-z0-9_-]', '', str(payload.get('receipt_id') or 'receipt'))[:80] or 'receipt'
+        for row_index, field_name in photo_keys.items():
+            try:
+                index = int(row_index)
+            except (TypeError, ValueError):
+                continue
+            photo = request.files.get(str(field_name))
+            if not photo or not photo.filename or index < 0 or index >= len(rows):
+                continue
+            photo_bytes = photo.read(6 * 1024 * 1024 + 1)
+            if len(photo_bytes) > 6 * 1024 * 1024:
+                return jsonify({'error': 'حجم صورة الخضار أكبر من 6MB'}), 400
+            ext = os.path.splitext(photo.filename)[1].lower()
+            if ext not in {'.jpg', '.jpeg', '.png', '.webp', '.heic'}:
+                ext = '.jpg'
+            storage_path = f'vegetables-receipts/{receipt_key}/{uuid.uuid4().hex}{ext}'
+            try:
+                sb.storage.from_(SYSTEM_ASSETS_BUCKET).upload(
+                    storage_path, photo_bytes,
+                    file_options={'content-type': photo.mimetype or 'image/jpeg', 'upsert': 'false'},
+                )
+            except Exception as exc:
+                app.logger.exception('vegetables receipt photo upload failed')
+                return jsonify({'error': f'تعذر حفظ صورة الخضار: {exc}'}), 500
+            rows[index]['photo_path'] = storage_path
+            rows[index]['has_photo'] = True
     department_label = {
         'general': 'استلام الخضروات',
         'hot': 'خضار القسم الساخن',
@@ -6544,6 +6693,21 @@ def vegetables_receipt_submit():
         payload_log.get('selected_date'),
     )
     if existing_row:
+        previous_rows = existing_meta.get('rows') if isinstance(existing_meta.get('rows'), list) else []
+        previous_photos = {
+            str(old.get('name') or old.get('items') or old.get('item') or '').strip().casefold(): old.get('photo_path')
+            for old in previous_rows if isinstance(old, dict) and old.get('photo_path')
+        }
+        for index, current in enumerate(rows):
+            if current.get('photo_path'):
+                continue
+            key = str(current.get('name') or current.get('items') or current.get('item') or '').strip().casefold()
+            old_path = previous_photos.get(key)
+            if not old_path and index < len(previous_rows) and isinstance(previous_rows[index], dict):
+                old_path = previous_rows[index].get('photo_path')
+            if old_path:
+                current['photo_path'] = old_path
+                current['has_photo'] = True
         try:
             previous_count = int(existing_meta.get('edit_count') or 1)
         except Exception:
@@ -6573,6 +6737,20 @@ def vegetables_receipt_submit():
         level='info',
     )
     return jsonify({'ok': True, 'submitted_at': now_iso, **payload_log})
+
+
+@app.route('/api/vegetables-receipt/photo', methods=['GET'])
+def vegetables_receipt_photo():
+    storage_path = str(request.args.get('path') or '').strip()
+    if not storage_path.startswith('vegetables-receipts/') or '..' in storage_path:
+        return jsonify({'error': 'مسار الصورة غير صحيح'}), 400
+    try:
+        content = get_client().storage.from_(SYSTEM_ASSETS_BUCKET).download(storage_path)
+        ext = os.path.splitext(storage_path)[1].lower()
+        mime = {'.png':'image/png','.webp':'image/webp','.heic':'image/heic'}.get(ext, 'image/jpeg')
+        return send_file(io.BytesIO(content), mimetype=mime, as_attachment=False, max_age=3600)
+    except Exception as exc:
+        return jsonify({'error': f'تعذر تحميل الصورة: {exc}'}), 404
 
 
 @app.route('/api/extract-sheet-range', methods=['POST'])

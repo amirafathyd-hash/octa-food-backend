@@ -24,7 +24,10 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from openpyxl import load_workbook
 from pycel import ExcelCompiler
-from tokyo_storage import TOKYO_BASELINE_PATH, TOKYO_TEMPLATE_PATH, mark_tokyo_template_user_uploaded
+from tokyo_storage import (
+    TOKYO_BASELINE_PATH, TOKYO_TEMPLATE_PATH, mark_tokyo_template_user_uploaded,
+    persist_tokyo_template_to_cloud, restore_tokyo_template_from_cloud_once,
+)
 
 PORTIONS_PATH = os.path.join(os.path.dirname(__file__), 'meal_portions_data.json')
 PACKAGES_PATH = os.path.join(os.path.dirname(__file__), 'menu_packages.json')
@@ -192,6 +195,8 @@ def _approved_baseline():
 
 def get_template_integrity():
     """فحص سريع للقالب قبل السماح بأي حساب حساس."""
+    if restore_tokyo_template_from_cloud_once():
+        _refresh_live_meal_portions(force=True)
     if not os.path.exists(TOKYO_TEMPLATE_PATH):
         return {'ready': False, 'errors': ['ملف توكيو الرئيسي غير موجود على السيرفر'], 'warnings': []}
 
@@ -253,6 +258,7 @@ def get_template_integrity():
 
 def replace_tokyo_template(file_storage):
     """Validate and atomically approve a new macro-enabled Tokyo workbook."""
+    restore_tokyo_template_from_cloud_once()
     if not file_storage:
         raise ValueError('ارفع ملف توكيو الرئيسي الجديد')
     filename = os.path.basename(file_storage.filename or '')
@@ -353,6 +359,17 @@ def replace_tokyo_template(file_storage):
             raise ValueError('فشل فحص النسخة الجديدة بعد الحفظ: ' + ' — '.join(integrity.get('errors') or []))
         mark_tokyo_template_user_uploaded()
         _sync_tokyo_template_copies()
+        try:
+            persist_tokyo_template_to_cloud(include_baseline=True)
+        except Exception as exc:
+            if os.path.exists(previous_template):
+                shutil.copy2(previous_template, TOKYO_TEMPLATE_PATH)
+            if os.path.exists(previous_baseline):
+                shutil.copy2(previous_baseline, TOKYO_BASELINE_PATH)
+            elif os.path.exists(TOKYO_BASELINE_PATH):
+                os.unlink(TOKYO_BASELINE_PATH)
+            _refresh_live_meal_portions(force=True)
+            raise ValueError(f'تعذر حفظ ملف توكيو في التخزين الدائم: {exc}')
         return integrity
     finally:
         for path in (candidate_path, baseline_candidate):

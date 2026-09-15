@@ -1142,6 +1142,24 @@ def _aggregate_recipe_inputs(sheet_name, meals_by_name, norm_lookup):
     )
 
 
+def safety_fields_for_meals(fields, meals_by_name):
+    """Attach each shift's count/grams to the matching Tokyo Safety rows."""
+    norm_lookup = {_normalize_meal_name(key): value for key, value in meals_by_name.items()}
+    matched = []
+    for field in fields or []:
+        value, source = _aggregate_recipe_inputs(field.get('name'), meals_by_name, norm_lookup)
+        if value is None:
+            continue
+        count, grams = value
+        matched.append({
+            **field,
+            'base_count': round(_number(count), 3),
+            'base_grams': round(_number(grams), 3),
+            'source_name': source or field.get('name'),
+        })
+    return matched
+
+
 def merge_day_into_template(template_path, day_no, meals_by_name, out_path=None,
                             safety_overrides=None, zero_missing=False,
                             allow_legacy_aq_fallback=True,

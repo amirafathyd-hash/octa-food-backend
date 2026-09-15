@@ -7,6 +7,7 @@ only, the bundled files are migrated into the persistent location.
 import os
 import shutil
 from datetime import datetime, timezone
+from supabase import create_client
 
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,62 @@ TOKYO_BASELINE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'tokyo_template_baseline.j
 DESSERT_TEMPLATE_PATH = os.path.join(TOKYO_STORAGE_DIR, 'Tokyo_Dessert_Ordering.xlsm')
 DESSERT_REVISION_PATH = os.path.join(TOKYO_STORAGE_DIR, '.dessert-template-revision')
 TOKYO_REVISION_PATH = os.path.join(TOKYO_STORAGE_DIR, '.tokyo-template-revision')
+TOKYO_CLOUD_BUCKET = os.environ.get('SYSTEM_ASSETS_BUCKET', 'system-assets')
+TOKYO_CLOUD_TEMPLATE_KEY = 'production-masters/tokyo_ordering_template.xlsm'
+TOKYO_CLOUD_BASELINE_KEY = 'production-masters/tokyo_template_baseline.json'
+_REMOTE_RESTORE_CHECKED = False
+
+
+def _storage_client():
+    url = str(os.environ.get('SUPABASE_URL') or '').strip()
+    key = str(os.environ.get('SUPABASE_SERVICE_KEY') or '').strip()
+    if not url or not key:
+        return None
+    return create_client(url, key).storage.from_(TOKYO_CLOUD_BUCKET)
+
+
+def persist_tokyo_template_to_cloud(include_baseline=True):
+    """Keep the approved Tokyo master outside the server filesystem."""
+    storage = _storage_client()
+    if storage is None:
+        raise RuntimeError('إعدادات التخزين الدائم غير موجودة على السيرفر')
+    with open(TOKYO_TEMPLATE_PATH, 'rb') as stream:
+        storage.upload(TOKYO_CLOUD_TEMPLATE_KEY, stream.read(), file_options={
+            'content-type': 'application/vnd.ms-excel.sheet.macroEnabled.12', 'upsert': 'true'
+        })
+    if include_baseline and os.path.exists(TOKYO_BASELINE_PATH):
+        with open(TOKYO_BASELINE_PATH, 'rb') as stream:
+            storage.upload(TOKYO_CLOUD_BASELINE_KEY, stream.read(), file_options={
+                'content-type': 'application/json', 'upsert': 'true'
+            })
+
+
+def restore_tokyo_template_from_cloud_once():
+    """Restore the latest user-uploaded master once per running worker."""
+    global _REMOTE_RESTORE_CHECKED
+    if _REMOTE_RESTORE_CHECKED:
+        return False
+    _REMOTE_RESTORE_CHECKED = True
+    storage = _storage_client()
+    if storage is None:
+        return False
+    try:
+        template_bytes = storage.download(TOKYO_CLOUD_TEMPLATE_KEY)
+        baseline_bytes = storage.download(TOKYO_CLOUD_BASELINE_KEY)
+        if not template_bytes:
+            return False
+        os.makedirs(TOKYO_STORAGE_DIR, exist_ok=True)
+        template_tmp = TOKYO_TEMPLATE_PATH + '.cloud.tmp'
+        baseline_tmp = TOKYO_BASELINE_PATH + '.cloud.tmp'
+        with open(template_tmp, 'wb') as stream:
+            stream.write(template_bytes)
+        with open(baseline_tmp, 'wb') as stream:
+            stream.write(baseline_bytes)
+        os.replace(template_tmp, TOKYO_TEMPLATE_PATH)
+        os.replace(baseline_tmp, TOKYO_BASELINE_PATH)
+        return True
+    except Exception:
+        return False
 
 
 def _dessert_revision():
