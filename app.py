@@ -1,4 +1,4 @@
-# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v26-weekly-admin-control
+# OCTA BACKEND RELEASE: octa-backend-2026-09-15-v27-weekly-cairo-next
 import os
 import requests
 import io
@@ -114,7 +114,7 @@ from vegetable_cutting import vegetable_cutting_bp
 
 TOKYO_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'tokyo_ordering_template.xlsm')
 SADA_SCALES_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'data', 'sada_scales_template.xlsx')
-BACKEND_RELEASE = 'octa-backend-2026-09-15-v26-weekly-admin-control'
+BACKEND_RELEASE = 'octa-backend-2026-09-15-v27-weekly-cairo-next'
 
 # إعدادات إرسال الإيميل (لزرار "إرسال نسخة بالإيميل" في صفحة استلام الصوص)
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.office365.com')
@@ -1422,7 +1422,7 @@ def weekly_purchasing_runs():
             'submitted_at': snapshot.get('submitted_at') or '',
             'worker_name': snapshot.get('worker_name') or '',
             'inventory_items_count': len(snapshot.get('items') or {}),
-            'inventory_path': f'/weekly-inventory.html?id={run_id}&v=26',
+            'inventory_path': f'/weekly-inventory.html?id={run_id}&v=27',
             'xlsx_path': f'/api/weekly-purchasing/{run_id}/xlsx',
             'pdf_path': f'/api/weekly-purchasing/{run_id}/pdf' if completed else '',
             'control_state': control.get('state') or 'active',
